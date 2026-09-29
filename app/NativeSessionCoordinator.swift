@@ -71,6 +71,10 @@ final class NativeSessionCoordinator {
     private var lastPresented: Double = 0
     private var lastStatusTime: TimeInterval = 0
     private var lastViewerMeasurements: NativeSessionMeasurements?
+    /// Every 10 s the viewer logs where decoded frames went: drawn, waiting
+    /// on the GPU, or replaced by newer ones. Local only; never sent.
+    private var drawReportTicks = 0
+    private var drawReportDecoded: Double = 0
     private var lastHostMeasurements: NativeSessionMeasurements?
     /// Idle display and system sleep would end an active session, so each side
     /// holds a power assertion only while a viewer is connected.
@@ -687,6 +691,7 @@ final class NativeSessionCoordinator {
         let channel = NativeSessionChannel(transport), decoder = NativeVideoDecoder()
         viewerChannel = channel; self.decoder = decoder; lastViewerMeasurements = channel.measurements
         firstFrame = false; viewerInputEnabled = false; pendingPing = nil; lastPresented = 0; lastStatusTime = uptime
+        drawReportTicks = 0; drawReportDecoded = 0
         viewerStarted = uptime; reconnectWork?.cancel(); reconnectWork = nil
         // What is already copied here is available to paste on the other Mac.
         clipboard.start(includeCurrent: sharesClipboard && !pairing)
@@ -882,6 +887,15 @@ final class NativeSessionCoordinator {
         let fps = (count - lastPresented) / max(0.001, now - lastStatusTime)
         lastPresented = count; lastStatusTime = now
         channel.measurements.set("last_presented_fps", fps)
+        drawReportTicks += 1
+        if drawReportTicks >= 10, let video = viewerWindow?.video {
+            drawReportTicks = 0
+            let decoded = snapshot["decoded_frames", default: 0], draw = video.takeDrawStats()
+            if draw.drawn > 0 || draw.busy > 0 {
+                NativeLog.session.notice("viewer drawing, last 10 s: \(Int(decoded - self.drawReportDecoded)) decoded, \(draw.summary, privacy: .public)")
+            }
+            drawReportDecoded = decoded
+        }
         let rtt = snapshot["network_round_trip_ms"].map { String(format: "%.0f ms RTT", $0) } ?? "checking connection"
         // The sharing Mac sends frames only when its screen changes, so the rate
         // follows activity there; it is not a cap.

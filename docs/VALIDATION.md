@@ -138,6 +138,27 @@ The embedded Sparkle 2.10.0 framework is pinned by SHA-256, thinned to arm64 and
 
 `v0.3.0-preview.7` raises the viewer decoder's bound from 6 to 16 packets. Two-Mac telemetry on previews 4 and 6 showed a single overflow in the first second of each session: the sharing Mac captured about 30 frames while the viewing Mac was still starting its decoder. The complete local validation script passed with 153 Rust tests and every native Swift suite. It is the first release published for installed copies to pick up by themselves.
 
+## Display-paced viewer
+
+In a preview 7 session between two Macs, the viewing Mac decoded 55–59 fps during motion but drew only 30–50. The network, capture and decoder were keeping up. For `v0.3.0-preview.8`, the viewer draws once per display refresh from a two-frame queue, keeps up to two frames rendering on the GPU and tags its drawable sRGB.
+
+`scripts/measure-native-present.swift` drives the real view on screen on the build Mac (M1 Ultra, 60 Hz display) with synthetic decoder-tagged 1920×1080 frames at 60 fps:
+
+| Arrival | Drawable | Drawn | Replaced |
+|---|---|---|---|
+| Even | 1600×900 window | 60 of 60 fps | 0 |
+| Even | 3456×2234 | 60 of 60 fps | 0 |
+| In pairs | 1600×900 window | 60 of 60 fps | 0 |
+| In pairs | 3456×2234 | 57 of 60 fps | 14 in 5 s, by design |
+
+Each frame cost about 0.2 ms on the processor and at most 0.4 ms on the GPU. On `presentedTime`:
+
+- It stays zero for this windowed view, so "presented" counts frames handed to the display, not frames confirmed on the glass.
+- The same harness drew about 60 fps with the old code on this fast Mac, so it doesn't reproduce the viewing Mac's shortfall.
+- That Mac's own 10-second drawing log (local only) will show whether the change fixed it.
+
+The complete local validation script passed with 153 Rust tests and every native Swift suite.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

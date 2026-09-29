@@ -540,7 +540,8 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 /// Packets arrive validated by Rust or from the local encoder. Up to
 /// `maxPending` wait while one decodes, absorbing packets that arrive together
 /// after a network pause. Overflow discards the pending chain and requests an IDR. Render callbacks run
-/// on the decoder queue; use NativeVideoView.display(), which safely coalesces.
+/// on the decoder queue; use NativeVideoView.display(), which queues a bounded
+/// two frames and paces them to the display.
 final class NativeVideoDecoder {
     var onFrame: ((CVPixelBuffer) -> Void)?
     var onError: ((String) -> Void)?
@@ -699,8 +700,28 @@ final class NativeVideoDecoder {
     deinit { if let session { VTDecompressionSessionInvalidate(session) } }
 }
 
-/// GPU rendering through Core Image's Metal backend. Decoded frames coalesce in
-/// one slot; display() may be called from any queue. AppKit geometry/input is main.
+/// Drawing work since the last report, for the viewer's log. Main thread.
+struct NativeDrawStats {
+    var drawn = 0
+    /// Refreshes with a frame waiting while two were still rendering.
+    var busy = 0
+    /// Frames that arrived with two already waiting; the oldest was dropped.
+    var replaced = 0
+    var cpuMsTotal = 0.0, cpuMsMax = 0.0
+    var gpuMsTotal = 0.0, gpuMsMax = 0.0, gpuFrames = 0
+    var summary: String {
+        let cpu = drawn > 0 ? cpuMsTotal / Double(drawn) : 0, gpu = gpuFrames > 0 ? gpuMsTotal / Double(gpuFrames) : 0
+        return String(format: "%d drawn, %d waited for the GPU, %d replaced; CPU %.1f ms avg (%.1f max), GPU %.1f ms avg (%.1f max)",
+                      drawn, busy, replaced, cpu, cpuMsMax, gpu, gpuMsMax)
+    }
+}
+
+/// GPU rendering through Core Image's Metal backend, paced by the display.
+/// Decoded frames wait in a two-frame queue and one is drawn per display
+/// refresh, so frames that arrive together after a network pause are each
+/// shown rather than the older one dropped; a third replaces the oldest,
+/// bounding the added delay to one refresh. Up to two frames render on the
+/// GPU at once. display() may be called from any queue; drawing is on main.
 class NativeVideoView: MTKView, MTKViewDelegate {
     var geometry: NativeDisplayGeometry? {
         didSet {
@@ -708,20 +729,22 @@ class NativeVideoView: MTKView, MTKViewDelegate {
         }
     }
     var onPresented: (() -> Void)?
+    static let maxQueued = 2
+    static let maxInFlight = 2
     private let frameLock = NSLock()
-    private var pendingImage: CVPixelBuffer?
-    private var displayScheduled = false
-    private var hasUpdate = false
+    // Guarded by frameLock.
+    private var queued: [CVPixelBuffer] = []
     private var acceptsFrames = true
     private var clearPending = false
+    private var replaced = 0
+    // Main thread.
     private var currentImage: CVPixelBuffer?
     private var context: CIContext?
     private var commands: MTLCommandQueue?
-    private var gpuBusy = false
+    private var inFlight = 0
     private var renderDirty = true
-    private var revision: UInt64 = 0
-    private var submittedRevision: UInt64 = 0
     private var presentationEpoch: UInt64 = 0
+    private var stats = NativeDrawStats()
     private let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
     private(set) var displayedVideoRect = NSRect.zero
     override var isFlipped: Bool { true }
@@ -730,36 +753,44 @@ class NativeVideoView: MTKView, MTKViewDelegate {
         let device = device ?? MTLCreateSystemDefaultDevice()
         super.init(frame: frame, device: device)
         framebufferOnly = false; colorPixelFormat = .bgra8Unorm
+        // Core Image writes sRGB; tagging the layer lets macOS colour-match it on wide-gamut displays.
+        colorspace = colorSpace
         clearColor = MTLClearColorMake(0, 0, 0, 1)
-        isPaused = true; enableSetNeedsDisplay = true; autoResizeDrawable = true
+        // Continuous: the display calls draw(in:) every refresh, up to 120 Hz on ProMotion.
+        isPaused = false; enableSetNeedsDisplay = false; preferredFramesPerSecond = 120; autoResizeDrawable = true
         if let device { context = CIContext(mtlDevice: device, options: [.cacheIntermediates: false]); commands = device.makeCommandQueue() }
         delegate = self
     }
     convenience init(frame: NSRect = .zero) { self.init(frame: frame, device: nil) }
     required init(coder: NSCoder) { fatalError("NativeVideoView does not support storyboard initialization") }
     func display(_ image: CVPixelBuffer) {
-        frameLock.lock()
-        guard acceptsFrames else { frameLock.unlock(); return }
-        pendingImage = image; hasUpdate = true
-        let schedule = !displayScheduled; displayScheduled = true; frameLock.unlock()
-        if schedule { DispatchQueue.main.async { [weak self] in self?.consumeNewestFrame() } }
+        frameLock.lock(); defer { frameLock.unlock() }
+        guard acceptsFrames else { return }
+        queued.append(image)
+        if queued.count > Self.maxQueued { queued.removeFirst(); replaced += 1 }
     }
-    private func consumeNewestFrame() {
-        frameLock.lock()
-        guard hasUpdate else { displayScheduled = false; frameLock.unlock(); return }
-        let shouldClear = clearPending && !acceptsFrames
-        currentImage = pendingImage; pendingImage = nil; displayScheduled = false; hasUpdate = false; clearPending = false
-        frameLock.unlock()
-        if shouldClear { geometry = nil; displayedVideoRect = .zero; presentationEpoch &+= 1 }
-        revision &+= 1
-        renderDirty = true
-        needsDisplay = true
+    /// Drawing work since the previous call.
+    func takeDrawStats() -> NativeDrawStats {
+        frameLock.lock(); stats.replaced += replaced; replaced = 0; frameLock.unlock()
+        defer { stats = NativeDrawStats() }
+        return stats
     }
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) { renderDirty = true; needsDisplay = true }
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) { renderDirty = true }
     func draw(in view: MTKView) {
-        if gpuBusy { renderDirty = true; return }
+        applyPendingClear()
+        frameLock.lock()
+        let waiting = !queued.isEmpty
+        guard waiting || renderDirty else { frameLock.unlock(); return }
+        guard inFlight < Self.maxInFlight else { frameLock.unlock(); if waiting { stats.busy += 1 }; return }
+        let next = waiting ? queued.removeFirst() : nil
+        frameLock.unlock()
+        if let next { currentImage = next }
         guard let context, let commands, let drawable = currentDrawable,
-              let command = commands.makeCommandBuffer(), drawableSize.width > 0, drawableSize.height > 0 else { return }
+              let command = commands.makeCommandBuffer(), drawableSize.width > 0, drawableSize.height > 0 else {
+            renderDirty = true // show the newest image at the next refresh
+            return
+        }
+        let began = ProcessInfo.processInfo.systemUptime
         let canvas = CGRect(origin: .zero, size: drawableSize)
         let black = CIImage(color: .black).cropped(to: canvas)
         var output = black
@@ -774,10 +805,8 @@ class NativeVideoView: MTKView, MTKViewDelegate {
                                        width: width / drawableSize.width * bounds.width, height: height / drawableSize.height * bounds.height)
         } else { displayedVideoRect = .zero }
         context.render(output, to: drawable.texture, commandBuffer: command, bounds: canvas, colorSpace: colorSpace)
-        let newFrame = currentImage != nil && revision != submittedRevision
-        submittedRevision = revision
-        let epoch = presentationEpoch
-        if newFrame {
+        if next != nil && currentImage != nil {
+            let epoch = presentationEpoch
             drawable.addPresentedHandler { [weak self] _ in
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.presentationEpoch == epoch else { return }
@@ -785,16 +814,19 @@ class NativeVideoView: MTKView, MTKViewDelegate {
                 }
             }
         }
-        gpuBusy = true
+        inFlight += 1
         renderDirty = false
-        command.addCompletedHandler { [weak self] _ in
+        command.addCompletedHandler { [weak self] buffer in
+            let gpu = max(0, buffer.gpuEndTime - buffer.gpuStartTime) * 1000
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                self.gpuBusy = false
-                if self.renderDirty || self.revision != self.submittedRevision { self.needsDisplay = true }
+                self.inFlight -= 1
+                self.stats.gpuMsTotal += gpu; self.stats.gpuMsMax = max(self.stats.gpuMsMax, gpu); self.stats.gpuFrames += 1
             }
         }
         command.present(drawable); command.commit()
+        let cpu = (ProcessInfo.processInfo.systemUptime - began) * 1000
+        stats.drawn += 1; stats.cpuMsTotal += cpu; stats.cpuMsMax = max(stats.cpuMsMax, cpu)
     }
     func remotePoint(for localPoint: NSPoint) -> CGPoint? {
         guard let geometry, geometry.isValid, displayedVideoRect.width > 0, displayedVideoRect.height > 0,
@@ -803,12 +835,19 @@ class NativeVideoView: MTKView, MTKViewDelegate {
                        y: geometry.y + (localPoint.y - displayedVideoRect.minY) / displayedVideoRect.height * geometry.height)
     }
     /// Closes frame admission until the next valid geometry assignment. This
-    /// fences late decode callbacks and queued display work after disconnect.
+    /// fences late decode callbacks after disconnect; the picture turns black.
     func clearFrame() {
-        frameLock.lock(); pendingImage = nil; acceptsFrames = false; clearPending = true; hasUpdate = true
-        let schedule = !displayScheduled; displayScheduled = true; frameLock.unlock()
-        if Thread.isMainThread { consumeNewestFrame() }
-        else if schedule { DispatchQueue.main.async { [weak self] in self?.consumeNewestFrame() } }
+        frameLock.lock(); queued.removeAll(); acceptsFrames = false; clearPending = true; frameLock.unlock()
+        if Thread.isMainThread { applyPendingClear() }
+    }
+    /// Main thread.
+    private func applyPendingClear() {
+        frameLock.lock()
+        let clear = clearPending && !acceptsFrames
+        if clear { clearPending = false; queued.removeAll() }
+        frameLock.unlock()
+        guard clear else { return }
+        currentImage = nil; geometry = nil; displayedVideoRect = .zero; presentationEpoch &+= 1; renderDirty = true
     }
     func clear() { clearFrame() }
 }
