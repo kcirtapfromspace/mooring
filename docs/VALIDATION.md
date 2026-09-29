@@ -125,6 +125,15 @@ In a live preview 4 session between two Macs, a copied image bounced between the
 
 For `v0.3.0-preview.5`, every pasteboard access moved to one serial background queue, with polls coalesced. The item last exchanged in either direction is never re-sent, and items marked `com.apple.is-remote-clipboard` are skipped. The complete local validation script passed with 153 Rust tests and every native Swift suite, including new private-pasteboard checks for each case.
 
+## In-place updates
+
+For `v0.3.0-preview.6`, the complete local validation script passed with 153 Rust tests and every native Swift suite. `scripts/test-update-local.sh` then ran over loopback only, using ad hoc builds under a separate bundle ID with a separate data folder and preferences:
+
+- **Install:** an installed build 9000 read a signed local feed and fetched build 9001. It verified the EdDSA signatures, installed the new build in place and relaunched it within 3 s of launch. The relaunched copy passed strict code-signature verification.
+- **Refusals:** an archive changed after signing was fetched and refused. A feed changed after signing was read, and no archive was fetched.
+
+The embedded Sparkle 2.10.0 framework is pinned by SHA-256, thinned to arm64 and stripped of its unused XPC services and headers. Each nested component is signed before the app. An update between the two Macs from the public feed has not yet been observed; the first will be the release after preview 6.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

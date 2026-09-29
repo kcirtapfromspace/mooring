@@ -337,10 +337,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     private let cli = CLIClient()
     private lazy var automation: MacLinkAutomationService = AutomationCoordinator(cli: cli)
     private lazy var native = NativeSessionCoordinator()
+    private let updater = MacLinkUpdater()
     private var automationState = AutomationMenuState()
     private var automationStarted = false
     private var initialLoad = true
     private var statusItem: NSStatusItem!
+    private var updateTimer: Timer?
     private let statusMenu = NSMenu()
     private var lastMenuAction: String?
     private let table = NSTableView()
@@ -384,8 +386,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             self.updateControls()
         }
         automationState = automation.state
-        native.onChange = { [weak self] in self?.refreshStatusMenu() }
+        native.onChange = { [weak self] in
+            self?.refreshStatusMenu()
+            // A session that just ended may free a waiting update to install.
+            DispatchQueue.main.async { self?.updater.installIfIdle() }
+        }
         native.onPeersChange = { [weak self] in self?.rebuildRows() }
+        native.onVersionMismatch = { [weak self] in self?.updater.checkInBackground() }
+        updater.isIdle = { [weak self] in self?.native.isIdleForUpdate ?? false }
+        updater.onChange = { [weak self] in self?.refreshStatusMenu() }
+        updater.start()
+        // Sharing can stop without a session change, such as automatic sharing resuming.
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.updater.installIfIdle() }
         reloadConnections()
     }
 
@@ -447,6 +459,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             let stop = NSMenuItem(title: "Stop Sharing This Mac", action: #selector(stopNativeSharing), keyEquivalent: "")
             stop.target = self; statusMenu.addItem(stop)
         }
+        if let version = updater.readyVersion {
+            let install = NSMenuItem(title: "Install Update \(version) & Relaunch", action: #selector(installUpdate), keyEquivalent: "")
+            install.target = self; install.toolTip = "Installs now. Otherwise it installs automatically when no session is connected."
+            statusMenu.addItem(install)
+        } else if updater.isAvailable {
+            let check = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+            check.target = self; statusMenu.addItem(check)
+        }
         let clipboard = NSMenuItem(title: "Shared Clipboard", action: #selector(toggleSharedClipboard), keyEquivalent: "")
         clipboard.target = self; clipboard.state = native.sharesClipboard ? .on : .off
         clipboard.toolTip = "Copy on one Mac and paste on the other during a MacLink session."
@@ -505,6 +525,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     @objc private func connectNative() { native.showConnect() }
     @objc private func shareNative() { native.showShare() }
     @objc private func stopNativeSharing() { native.stopSharingByUser() }
+    @objc private func checkForUpdates() { updater.checkForUpdates() }
+    @objc private func installUpdate() { updater.install() }
     @objc private func toggleSharedClipboard() { native.sharesClipboard.toggle() }
     @objc private func connectNativePeer(_ sender: NSMenuItem) {
         if let id = sender.representedObject as? String { native.connect(peerID: id) }

@@ -37,6 +37,20 @@ A completed pending response with a valid submission ID is recovered automatical
 
 The app is reconstructed from the checksum-verified submitted archive before stapling. Review the Apple log before uploading the resulting ZIP and checksum to GitHub. Do not use `package-release.sh` to recreate an already-notarized ZIP: it builds a fresh app without the stapled ticket.
 
+## Publish to the update feed
+
+Installed copies update themselves from the public feed at `kcirtapfromspace/maclink-releases`. After notarizing, and after the Apple log has been reviewed:
+
+```sh
+./scripts/publish-update.sh 0.3.0-preview.6
+```
+
+The script only publishes a stapled, Gatekeeper-accepted archive for that version. The build must be signed by team `67C7724279` and must follow this same feed. It signs the archive and the feed with the Sparkle EdDSA key in this Mac's login Keychain (Sparkle account `dev.maclink`), creates the public release and confirms the feed serves the new build.
+
+Only the public key is in the app (`SUPublicEDKey`). To move the private key to another Mac, export it with Sparkle's `generate_keys -x` and import it there with `-f`. Never put it in chat, source files or GitHub.
+
+Before a release that changes the updater, run `./scripts/test-update-local.sh`. It builds ad hoc copies under a separate bundle ID and serves them over loopback only. An old copy must verify, install and relaunch a new one in place, and must refuse both a tampered archive and a feed altered after signing.
+
 ## Opening the existing preview
 
 For a trusted copy of the first preview, after attempting to open it, use **System Settings → Privacy & Security → Open Anyway**, then confirm **Open**. This records an exception for that app. Do not disable Gatekeeper globally.

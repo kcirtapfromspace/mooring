@@ -33,7 +33,7 @@ mkdir -p "$project_root/dist" "$(dirname "$app_bundle")"
 build_root="$(mktemp -d "$project_root/dist/.maclink-build.XXXXXX")"
 trap 'rm -rf "$build_root"' EXIT
 staged_bundle="$build_root/MacLink.app"
-mkdir -p "$staged_bundle/Contents/MacOS" "$staged_bundle/Contents/Resources"
+mkdir -p "$staged_bundle/Contents/MacOS" "$staged_bundle/Contents/Resources" "$staged_bundle/Contents/Frameworks"
 sdk_path="$(xcrun --show-sdk-path)"
 installed_targets="$(rustup target list --installed)"
 rust_target=aarch64-apple-darwin
@@ -45,34 +45,69 @@ fi
 # MacLink currently targets Apple Silicon only, with the same macOS floor in both binaries.
 MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release --package maclink-cli --package maclink-session \
     --target "$rust_target" --target-dir "$project_root/target"
+# In-place updates: the pinned, checksum-verified Sparkle framework.
+sparkle_dir="$("$project_root/scripts/fetch-sparkle.sh")"
 swiftc -O -swift-version 5 -parse-as-library -sdk "$sdk_path" -target arm64-apple-macosx14.0 \
     -framework AppKit -framework Foundation -framework Network -framework ServiceManagement \
     -framework Security -framework SystemConfiguration -framework ScreenCaptureKit -framework VideoToolbox \
     -framework CoreMedia -framework CoreVideo -framework Metal -framework MetalKit -framework CoreImage \
     -import-objc-header "$project_root/crates/maclink-session/include/maclink_session.h" \
     -L "$project_root/target/$rust_target/release" -lmaclink_session \
+    -F "$sparkle_dir" -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
     "$project_root"/app/*.swift -o "$staged_bundle/Contents/MacOS/MacLink"
 cp "$project_root/target/$rust_target/release/maclink" "$staged_bundle/Contents/Resources/maclink"
+
+# Embed Sparkle for Apple silicon only. MacLink is not sandboxed, so Sparkle's
+# optional XPC services are unused; headers are build-time only.
+sparkle="$staged_bundle/Contents/Frameworks/Sparkle.framework"
+/usr/bin/ditto "$sparkle_dir/Sparkle.framework" "$sparkle"
+for unused in XPCServices Headers PrivateHeaders Modules; do
+    rm -rf "${sparkle:?}/Versions/B/$unused" "${sparkle:?}/$unused"
+done
+for binary in "$sparkle/Versions/B/Sparkle" "$sparkle/Versions/B/Autoupdate" "$sparkle/Versions/B/Updater.app/Contents/MacOS/Updater"; do
+    lipo -thin arm64 "$binary" -output "$binary.arm64" && mv "$binary.arm64" "$binary"
+done
+cp "$sparkle_dir/LICENSE" "$staged_bundle/Contents/Resources/Sparkle-LICENSE.txt"
 
 python3 "$project_root/scripts/collect-licenses.py" --check
 cp "$project_root/docs/THIRD-PARTY-NOTICES.txt" "$staged_bundle/Contents/Resources/THIRD-PARTY-NOTICES.txt"
 cp "$project_root/app/Info.plist" "$staged_bundle/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $short_version" "$staged_bundle/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :MacLinkReleaseVersion $release_version" "$staged_bundle/Contents/Info.plist"
+# Only release builds follow the public update feed; development builds never
+# replace themselves. MACLINK_UPDATE_FEED overrides it for a local update test.
+signing_identity="${MACLINK_CODESIGN_IDENTITY:--}"
+update_feed="${MACLINK_UPDATE_FEED:-}"
+if [[ -z "$update_feed" && "$signing_identity" != "-" ]]; then
+    update_feed="https://github.com/kcirtapfromspace/maclink-releases/releases/latest/download/appcast.xml"
+fi
+if [[ -n "$update_feed" && "$update_feed" != none ]]; then
+    /usr/libexec/PlistBuddy -c "Add :SUFeedURL string $update_feed" "$staged_bundle/Contents/Info.plist"
+fi
+if [[ -n "${MACLINK_BUNDLE_VERSION:-}" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $MACLINK_BUNDLE_VERSION" "$staged_bundle/Contents/Info.plist"
+fi
+if [[ -n "${MACLINK_BUNDLE_IDENTIFIER:-}" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $MACLINK_BUNDLE_IDENTIFIER" "$staged_bundle/Contents/Info.plist"
+fi
 chmod +x "$staged_bundle/Contents/MacOS/MacLink" "$staged_bundle/Contents/Resources/maclink"
 plutil -lint "$staged_bundle/Contents/Info.plist"
 
 # No identity discovery, credential lookup, or notarization occurs here.
 # Explicitly configure an identity only when the signing setup is already in place.
-signing_identity="${MACLINK_CODESIGN_IDENTITY:--}"
 sign_options=(--force --sign "$signing_identity")
 if [[ "$signing_identity" != "-" ]]; then
     sign_options+=(--options runtime --timestamp)
 fi
+# Inside out: Sparkle's helpers, then the framework, the CLI and the app.
+codesign "${sign_options[@]}" "$sparkle/Versions/B/Autoupdate"
+codesign "${sign_options[@]}" "$sparkle/Versions/B/Updater.app"
+codesign "${sign_options[@]}" "$sparkle"
 codesign "${sign_options[@]}" "$staged_bundle/Contents/Resources/maclink"
 codesign "${sign_options[@]}" "$staged_bundle"
 codesign --verify --deep --strict "$staged_bundle"
-for executable in "$staged_bundle/Contents/MacOS/MacLink" "$staged_bundle/Contents/Resources/maclink"; do
+for executable in "$staged_bundle/Contents/MacOS/MacLink" "$staged_bundle/Contents/Resources/maclink" \
+    "$sparkle/Versions/B/Sparkle" "$sparkle/Versions/B/Autoupdate" "$sparkle/Versions/B/Updater.app/Contents/MacOS/Updater"; do
     if [[ "$(lipo -archs "$executable")" != arm64 ]]; then
         printf 'Expected an Apple Silicon executable: %s\n' "$executable" >&2
         exit 1

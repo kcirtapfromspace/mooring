@@ -104,6 +104,15 @@ final class NativeSessionCoordinator {
     private(set) var peers: [NativePeer] = [] { didSet { if peers != oldValue { onPeersChange?() } } }
     var onChange: (() -> Void)?
     var onPeersChange: (() -> Void)?
+    /// A connection closed during the handshake, which usually means the Macs
+    /// run different MacLink versions.
+    var onVersionMismatch: (() -> Void)?
+    /// Relaunching now would interrupt nothing: no session in either role, no
+    /// connect or reconnect under way, and any sharing resumes by itself.
+    var isIdleForUpdate: Bool {
+        !isConnected && hostChannel == nil && connecting == nil && reconnectWork == nil
+            && (!isSharing || sharesAutomatically)
+    }
     var isSharing: Bool { sharingToken?.isActive == true }
     var isConnected: Bool { viewerChannel?.token.isActive == true }
     /// Start sharing when MacLink opens and resume after sleep, lock or a user switch.
@@ -608,6 +617,7 @@ final class NativeSessionCoordinator {
         // Different versions end the handshake without a reason on the other side.
         if [Int32(ML_SESSION_CLOSED), Int32(ML_SESSION_PROTOCOL)].contains((error as? NativeSessionError)?.status ?? 0) {
             message += " If the other Mac runs a different MacLink version, update both Macs."
+            onVersionMismatch?()
         }
         if pairing {
             if pairWindow?.window?.isVisible == true { pairWindow?.error.stringValue = message } else { showError(message) }

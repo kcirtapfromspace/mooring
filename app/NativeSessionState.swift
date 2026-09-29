@@ -7,6 +7,7 @@ import os
 /// addresses, names, pairing material, input or screen content.
 enum NativeLog {
     static let session = Logger(subsystem: "dev.maclink", category: "session")
+    static let updates = Logger(subsystem: "dev.maclink", category: "updates")
 }
 
 final class NativeRunToken: @unchecked Sendable {

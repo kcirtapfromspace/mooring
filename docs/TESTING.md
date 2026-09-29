@@ -1,6 +1,6 @@
 # Testing the preview on another Mac
 
-Download `MacLink-v0.3.0-preview.5-macos-arm64.zip` and `SHA256SUMS.txt` from the release while signed in to the GitHub account with repository access. MacLink supports Apple silicon only and requires macOS 14 or later. Apple's High Performance mode additionally requires compatible Macs at both ends. The experimental native session requires this preview on both Macs.
+Download `MacLink-v0.3.0-preview.6-macos-arm64.zip` and `SHA256SUMS.txt` from the release while signed in to the GitHub account with repository access. MacLink supports Apple silicon only and requires macOS 14 or later. Apple's High Performance mode additionally requires compatible Macs at both ends. The experimental native session requires this preview on both Macs.
 
 1. In the download directory, verify the ZIP with `shasum -a 256 -c SHA256SUMS.txt`.
 2. Quit older MacLink copies. Extract the ZIP and replace `MacLink.app` in Applications. Saved Macs and existing configured preferences are preserved.
@@ -26,9 +26,10 @@ Download `MacLink-v0.3.0-preview.5-macos-arm64.zip` and `SHA256SUMS.txt` from th
 9. With **Share this Mac automatically** off: Stop Sharing, lock the sharing Mac, and put it to sleep. Each must end the session with a stated reason after the viewer's reconnect attempts; unlocking must not resume sharing. Then turn the option on: quitting and reopening MacLink must start sharing without a prompt, and after lock or sleep, sharing must resume on unlock, but not while the display is still asleep. A viewer still reconnecting at that moment should reconnect. **Stop Sharing** must keep sharing off until you start it again.
 10. Copy text in any app on the viewing Mac and paste it on the sharing Mac through the viewer, then the reverse. Repeat with styled text from TextEdit, and with a screenshot copied with ⌃⇧⌘4 and pasted into Notes or Preview (terminals paste only text with ⌘V). Each copy should cross once: the session log on either Mac must not show the same item being sent back and forth. Copy a password from a password manager and confirm it does not arrive on the other Mac. Turn off **Shared Clipboard** in the menu bar on one Mac and confirm copies no longer cross in either direction. Note whether macOS asked to allow MacLink's clipboard access, and on which Mac.
 11. While connected, run `/Applications/MacLink.app/Contents/Resources/maclink telemetry` in Terminal on either Mac and scroll or drag a window on the sharing Mac. Try `maclink tune --bitrate-mbps 15`, `--max-width 2560`, `--fps 30` and `--in-flight 1`, and note how frame rate, `send_ms`, `encode_ms` and responsiveness change; `maclink tune --reset` restores the defaults. [TELEMETRY.md](TELEMETRY.md) explains each field.
-12. **Save Diagnostics…** in the Share window and **Diagnostics…** in the viewer save measurements only. Attach them, or a few telemetry lines, to your report.
+12. Updates: the menu bar shows **Check for Updates…**. When the next release is published, leave both Macs idle, with no session connected; within about four hours each should relaunch on the new version by itself. Choosing **Check for Updates…** checks immediately. Report whether an update ever interrupted a session.
+13. **Save Diagnostics…** in the Share window and **Diagnostics…** in the viewer save measurements only. Attach them, or a few telemetry lines, to your report.
 
-The distribution is Developer ID signed, notarized and stapled. macOS may still show its normal first-launch downloaded-app confirmation. If **Apple could not verify MacLink.app** appears, confirm that you opened the extracted 0.3.0 preview 5 app rather than an older copy; do not change Gatekeeper settings. Local development builds are ad hoc by default.
+The distribution is Developer ID signed, notarized and stapled. macOS may still show its normal first-launch downloaded-app confirmation. If **Apple could not verify MacLink.app** appears, confirm that you opened the extracted 0.3.0 preview 6 app rather than an older copy; do not change Gatekeeper settings. Local development builds are ad hoc by default.
 
 ## What to report
 
@@ -49,7 +50,7 @@ All compilation, tests, linting, signing, archive creation and Gatekeeper valida
 ./scripts/ci-local.sh
 MACLINK_CODESIGN_IDENTITY='Developer ID Application: YOUR NAME (TEAM_ID)' \
   MACLINK_NOTARY_PROFILE=MacLink \
-  ./scripts/notarize-release.sh 0.3.0-preview.5
+  ./scripts/notarize-release.sh 0.3.0-preview.6
 ```
 
 The local suite includes 128 Rust tests (8 CLI, 41 core, 18 platform, 61 session), 73 Swift session-parser checks, the defaults/home-state regressions, loopback CLI integration, and the native Swift checks: input boundary and Command key-up dispatch, privacy classification, hardware H.264 encode/decode with recovery and the two-frame in-flight bound, session boundary, and an encrypted 1080p loopback stream. Published assets include validation output and checksums.
