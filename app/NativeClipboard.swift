@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 
 /// One copied item's shareable representations. Rust validates everything
 /// that crosses the session: kinds, UTF-8, format signatures and the 4 MiB total.
@@ -44,6 +45,14 @@ struct NativeClipboardContent: Equatable {
         return nest(0, [])
     }
     var isValid: Bool { withItems { ml_clipboard_validate($0.baseAddress, $0.count) == ML_SESSION_OK } }
+    /// The same copied item on either Mac: its text if any, else its image,
+    /// else its rich text. Formats a round trip adds or drops do not change it.
+    var identity: SHA256.Digest? {
+        if let text { return SHA256.hash(data: Data(("text:" + text).utf8)) }
+        if let png { return SHA256.hash(data: Data("png:".utf8) + png) }
+        if let rtf { return SHA256.hash(data: Data("rtf:".utf8) + rtf) }
+        return nil
+    }
 }
 
 /// The pasteboard side of the shared clipboard.
@@ -55,6 +64,10 @@ enum NativePasteboard {
         "com.agilebits.onepassword", "de.petermaurer.TransientPasteboardType", "Pasteboard generator type",
         "com.typeit4me.clipping", "net.antelle.keeweb"
     ].map { NSPasteboard.PasteboardType($0) })
+    /// Universal Clipboard marks what it brought from another device. Both Macs
+    /// signed in to the same Apple ID already share those items, and reading
+    /// one here would fetch it over the network, so they are not sent.
+    static let remoteClipboardType = NSPasteboard.PasteboardType("com.apple.is-remote-clipboard")
     /// Larger TIFF images are not converted; their PNG would exceed the bound anyway.
     static let maxTIFFBytes = 64 * 1024 * 1024
     /// MacLink's own pairing codes are secrets, even after an app drops their
@@ -80,7 +93,7 @@ enum NativePasteboard {
     /// nil when it is empty or marked private.
     static func read(_ pasteboard: NSPasteboard) -> (content: NativeClipboardContent, tiff: Data?)? {
         let types = Set(pasteboard.types ?? [])
-        guard !types.isEmpty, types.isDisjoint(with: privateTypes) else { return nil }
+        guard !types.isEmpty, types.isDisjoint(with: privateTypes), !types.contains(remoteClipboardType) else { return nil }
         var content = NativeClipboardContent()
         content.text = pasteboard.string(forType: .string)
         if let text = content.text, containsPairingCode(text) { return nil }
@@ -104,67 +117,69 @@ enum NativePasteboard {
     }
 }
 
-/// Follows this Mac's clipboard while a session is connected. The change count
-/// is polled on the main thread; TIFF images convert to PNG off it. Content
-/// applied from the other Mac is never echoed back.
-final class NativeClipboardSync {
+/// Follows this Mac's clipboard while a session is connected. Every pasteboard
+/// access runs on one serial utility queue: data another app or Universal
+/// Clipboard provides lazily can take seconds to read, and must never stall
+/// the main thread, which draws the picture and answers connection checks.
+/// Nothing matching the item last exchanged in either direction is sent, so no
+/// echo path (Universal Clipboard, clipboard managers) can bounce it back.
+final class NativeClipboardSync: @unchecked Sendable {
+    /// Called on the main thread.
     var onSend: ((NativeClipboardContent) -> Void)?
     private let pasteboard: NSPasteboard
-    private var seenChangeCount: Int
-    /// The last change sent or applied; a reconnect does not resend it.
+    private let queue = DispatchQueue(label: "dev.maclink.clipboard", qos: .utility)
+    private let pollLock = NSLock()
+    private var pollQueued = false
+    // Confined to `queue`.
+    private var seenChangeCount: Int?
     private var exchangedChangeCount: Int?
-    private var generation: UInt64 = 0
-    private let converter = DispatchQueue(label: "dev.maclink.clipboard", qos: .utility)
-    /// One image conversion at a time; a newer copy waits for it, then re-reads.
-    private var converting = false
-    private var rereadGeneration: UInt64?
+    private var exchanged: SHA256.Digest?
 
-    init(pasteboard: NSPasteboard = .general) {
-        self.pasteboard = pasteboard; seenChangeCount = pasteboard.changeCount
-    }
+    init(pasteboard: NSPasteboard = .general) { self.pasteboard = pasteboard }
     /// Follows changes from now on; `includeCurrent` also shares what is copied
     /// already, unless it is what was last exchanged.
     func start(includeCurrent: Bool) {
-        generation &+= 1; seenChangeCount = pasteboard.changeCount
-        if includeCurrent && seenChangeCount != exchangedChangeCount && !NativePasteboard.readingDenied(pasteboard) { publish() }
+        queue.async { [self] in
+            let count = pasteboard.changeCount
+            seenChangeCount = count
+            if includeCurrent && count != exchangedChangeCount && !NativePasteboard.readingDenied(pasteboard) { publish(count) }
+        }
     }
-    /// Main thread; cheap when nothing changed.
+    /// Main thread, twice a second. At most one poll waits behind a slow read.
     func poll() {
-        guard !NativePasteboard.readingDenied(pasteboard) else { return }
-        let count = pasteboard.changeCount
-        guard count != seenChangeCount else { return }
-        seenChangeCount = count
-        publish()
+        pollLock.lock()
+        guard !pollQueued else { pollLock.unlock(); return }
+        pollQueued = true; pollLock.unlock()
+        queue.async { [self] in
+            pollLock.lock(); pollQueued = false; pollLock.unlock()
+            guard !NativePasteboard.readingDenied(pasteboard) else { return }
+            let count = pasteboard.changeCount
+            guard count != seenChangeCount else { return }
+            seenChangeCount = count
+            publish(count)
+        }
     }
+    /// Writes the other Mac's copy here; it is never sent back.
     func apply(_ content: NativeClipboardContent) {
-        NativePasteboard.write(content, to: pasteboard)
-        generation &+= 1; seenChangeCount = pasteboard.changeCount; exchangedChangeCount = seenChangeCount
+        queue.async { [self] in
+            NativePasteboard.write(content, to: pasteboard)
+            let count = pasteboard.changeCount
+            seenChangeCount = count; exchangedChangeCount = count; exchanged = content.identity
+        }
     }
-    private func publish() {
+    /// Waits for queued pasteboard work; for tests.
+    func waitUntilIdle() { queue.sync {} }
+
+    private func publish(_ count: Int) {
         guard let read = NativePasteboard.read(pasteboard) else { return }
-        let count = seenChangeCount
-        guard let tiff = read.tiff else {
-            if let content = read.content.fitted() { exchangedChangeCount = count; onSend?(content) }
-            return
-        }
-        guard !converting else { rereadGeneration = generation; return }
-        converting = true
-        let token = generation
-        converter.async { [weak self] in
-            let png = NativePasteboard.png(fromTIFF: tiff)
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.converting = false
-                // A newer copy, or content from the other Mac, supersedes this one.
-                if self.generation == token, self.seenChangeCount == count {
-                    var content = read.content; content.png = png
-                    if let fitted = content.fitted() { self.exchangedChangeCount = count; self.onSend?(fitted) }
-                }
-                if let reread = self.rereadGeneration {
-                    self.rereadGeneration = nil
-                    if reread == self.generation { self.publish() }
-                }
-            }
-        }
+        var content = read.content
+        if let tiff = read.tiff { content.png = NativePasteboard.png(fromTIFF: tiff) }
+        // A newer copy supersedes this one; the next poll reads it.
+        guard pasteboard.changeCount == count, let fitted = content.fitted() else { return }
+        exchangedChangeCount = count
+        let identity = fitted.identity
+        guard identity != exchanged else { return }
+        exchanged = identity
+        DispatchQueue.main.async { [weak self] in self?.onSend?(fitted) }
     }
 }

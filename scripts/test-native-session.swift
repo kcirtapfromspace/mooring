@@ -343,34 +343,43 @@ extension NativeSessionTests {
         var sent: [NativeClipboardContent] = []
         let sync = NativeClipboardSync(pasteboard: board)
         sync.onSend = { sent.append($0) }
-        sync.start(includeCurrent: true)
+        // Pasteboard work runs on the sync's own queue; sends arrive on main.
+        func settle() {
+            sync.waitUntilIdle()
+            let until = ProcessInfo.processInfo.systemUptime + 0.1
+            while ProcessInfo.processInfo.systemUptime < until { RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01)) }
+        }
+        sync.start(includeCurrent: true); settle()
         try require(sent == [content], "A new viewer session shares what is already copied")
-        sync.poll()
+        sync.poll(); settle()
         try require(sent.count == 1, "Nothing new, nothing sent")
         let remote = NativeClipboardContent(text: "from the other Mac")
-        sync.apply(remote); sync.poll()
+        sync.apply(remote); sync.poll(); settle()
         try require(sent.count == 1 && NativePasteboard.read(board)?.content == remote, "The other Mac's copy is applied and never echoed back")
-        sync.start(includeCurrent: true)
+        NativePasteboard.write(remote, to: board); sync.poll(); settle()
+        try require(sent.count == 1, "The same item returning through another path, such as a clipboard manager, is not sent back")
+        board.clearContents(); board.setString("via Universal Clipboard", forType: .string)
+        board.setData(Data(), forType: NativePasteboard.remoteClipboardType); sync.poll(); settle()
+        try require(sent.count == 1, "Items Universal Clipboard brought from another device are not sent")
+        sync.start(includeCurrent: true); settle()
         try require(sent.count == 1, "A reconnect does not resend what was last exchanged")
         board.clearContents(); board.setString("copied again", forType: .string)
-        sync.poll()
+        sync.poll(); settle()
         try require(sent.count == 2 && sent.last?.text == "copied again", "A new copy is sent")
+        board.clearContents(); board.setString("copied again", forType: .string)
+        sync.poll(); settle()
+        try require(sent.count == 2, "Copying the item just sent again sends nothing")
 
         let image = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4, bitsPerSample: 8, samplesPerPixel: 4,
                                      hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
         guard let tiff = image?.tiffRepresentation else { throw Failure("Synthetic TIFF") }
         board.clearContents(); board.setData(tiff, forType: .tiff)
-        sync.poll()
-        let deadline = ProcessInfo.processInfo.systemUptime + 3
-        while sent.count < 3 && ProcessInfo.processInfo.systemUptime < deadline { RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01)) }
+        sync.poll(); settle()
         try require(sent.count == 3 && sent.last?.png?.starts(with: png.prefix(8)) == true && sent.last?.isValid == true,
                     "A TIFF image is shared as PNG, converted off the main thread")
-
-        board.clearContents(); board.setData(tiff, forType: .tiff); sync.poll()
-        sync.apply(remote) // superseded before the conversion finishes
-        let settle = ProcessInfo.processInfo.systemUptime + 0.5
-        while ProcessInfo.processInfo.systemUptime < settle { RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01)) }
-        try require(sent.count == 3, "A conversion overtaken by the other Mac's copy is dropped")
+        for _ in 0..<50 { sync.poll() }
+        settle()
+        try require(sent.count == 3, "Polls waiting behind a read coalesce and send nothing new")
 
         board.clearContents(); board.writeObjects([NSURL(fileURLWithPath: "/tmp/example.txt")])
         if let files = NativePasteboard.read(board) {

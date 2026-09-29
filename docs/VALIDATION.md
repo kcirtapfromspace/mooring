@@ -119,6 +119,12 @@ macOS 15.4 and later may ask before MacLink reads the clipboard in the backgroun
 
 A live preview 3 session between two Macs, watched from the sharing Mac, recorded one drop: `The other Mac sent an invalid or incomplete session message`. It came right after round-trip spikes of 104–136 ms, and the viewer reconnected in 0.8 s. The receive grace addresses that path. Whether it removes every drop still needs two-Mac confirmation.
 
+## Clipboard echo fix
+
+In a live preview 4 session between two Macs, a copied image bounced between them about once a second. Universal Clipboard carried each applied copy back to the other Mac, which sent it again. The viewing Mac's picture then stalled for seven seconds: it received about 57 fps, presented none, and its round-trip measurement stopped updating. The session ended and reconnected 0.8 s later.
+
+For `v0.3.0-preview.5`, every pasteboard access moved to one serial background queue, with polls coalesced. The item last exchanged in either direction is never re-sent, and items marked `com.apple.is-remote-clipboard` are skipped. The complete local validation script passed with 153 Rust tests and every native Swift suite, including new private-pasteboard checks for each case.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.
