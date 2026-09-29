@@ -113,6 +113,14 @@ parameter sets, NAL types and a keyframe flag that matches the picture type.
 `ml_video_hevc_chroma_format` reads `chroma_format_idc` from an SPS, so
 MacLink can confirm the encoder really produced 4:4:4.
 
+`ML_CAPABILITY_VIRTUAL_DISPLAY` means "this host can share a virtual display
+of the viewer's size". Viewers send `ML_CONTROL_DISPLAY_REQUEST` with the size
+in points (`geometry.width`/`height`) and pixels (`pixel_width`/`pixel_height`).
+Scale must be exactly 1 or 2, pixels must fit the video limits, and an all-zero
+request releases it. Rust refuses to send a request to a host that didn't
+announce the capability, and a host that didn't announce it treats one as a
+protocol violation.
+
 ## Shared clipboard
 
 Either side may send a clipboard message: one to three representations of one

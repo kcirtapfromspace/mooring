@@ -21,6 +21,8 @@ pub(crate) const PROTOCOL_MIN: u32 = 4;
 pub(crate) const PROTOCOL_MAX: u32 = 5;
 /// The viewer decodes HEVC 4:4:4 in hardware, so the host may send it.
 pub(crate) const CAPABILITY_HEVC_444: u64 = 1;
+/// The host can share a virtual display sized to the viewer's request.
+pub(crate) const CAPABILITY_VIRTUAL_DISPLAY: u64 = 1 << 1;
 
 /// No complete authenticated message for this long ends the session. Viewers
 /// ping every second and hosts answer, so a healthy idle desktop stays open.
@@ -83,7 +85,10 @@ impl Role {
             ),
             Self::Viewer => matches!(
                 kind,
-                ControlKind::Ping | ControlKind::Keyframe | ControlKind::Hello
+                ControlKind::Ping
+                    | ControlKind::Keyframe
+                    | ControlKind::Hello
+                    | ControlKind::DisplayRequest
             ),
         }
     }
@@ -169,6 +174,13 @@ impl ReceivePolicy {
                 return Err(Error::Protocol);
             }
             Incoming::Control(ControlMessage::Hello(_)) => self.hello = true,
+            // Only a host that announced it makes virtual displays receives requests.
+            Incoming::Control(ControlMessage::DisplayRequest(_))
+                if self.version < 5
+                    || self.local_capabilities & CAPABILITY_VIRTUAL_DISPLAY == 0 =>
+            {
+                return Err(Error::Protocol);
+            }
             // HEVC only reaches a side that declared it decodes HEVC 4:4:4.
             Incoming::Video(packet)
                 if packet.header.codec == crate::video::Codec::Hevc
@@ -402,6 +414,31 @@ mod tests {
         let mut new = ReceivePolicy::for_version(Role::Host, 5, 0, now);
         assert_eq!(new.admit(&hello(), now), Ok(Admission::Deliver));
         assert_eq!(new.admit(&hello(), now), Err(Error::Protocol));
+    }
+
+    #[test]
+    fn display_requests_reach_only_hosts_that_make_virtual_displays() {
+        use crate::control::DisplayRequest;
+        let now = Instant::now();
+        let request = || {
+            control(ControlMessage::DisplayRequest(DisplayRequest {
+                width: 1512,
+                height: 916,
+                scale: 2,
+            }))
+        };
+        for (version, capabilities, expected) in [
+            (4, CAPABILITY_VIRTUAL_DISPLAY, Err(Error::Protocol)),
+            (5, 0, Err(Error::Protocol)),
+            (5, CAPABILITY_VIRTUAL_DISPLAY, Ok(Admission::Deliver)),
+        ] {
+            let mut policy = ReceivePolicy::for_version(Role::Host, version, capabilities, now);
+            assert_eq!(policy.admit(&request(), now), expected);
+        }
+        // Viewers never receive one.
+        let mut viewer =
+            ReceivePolicy::for_version(Role::Viewer, 5, CAPABILITY_VIRTUAL_DISPLAY, now);
+        assert_eq!(viewer.admit(&request(), now), Err(Error::Protocol));
     }
 
     #[test]

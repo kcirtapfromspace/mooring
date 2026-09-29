@@ -1,0 +1,39 @@
+# MacLink 0.3.0 preview 10 — The sharing Mac matches your screen
+
+Installed copies of preview 6 or later update to this version by themselves when no session is connected.
+
+## Native resolution on the viewing Mac
+
+Until now you saw the sharing Mac's own screen, letterboxed and scaled to fit yours. Your Mac Studio has no monitor attached, so macOS gives it a 1920×1080 placeholder screen. On a MacBook Pro that was enlarged about 1.6×, with bars top and bottom.
+
+Now the viewing Mac tells the sharing Mac the exact size of its video area and its Retina scale. The sharing Mac then shows its desktop on a virtual display of exactly that size: for example 1512×916 points at 2×, which is 3024×1832 pixels. The picture fills the window with one pixel per screen pixel, so nothing is scaled.
+
+- **Timing:** the request goes out once the window's size has held steady for a second, such as after entering full screen. Resizing the window resizes the virtual display.
+- **Headless sharing Mac:** the virtual display replaces macOS's placeholder.
+- **Sharing Mac with a monitor:** the monitor mirrors the virtual display for the session, and its windows may be rearranged, as when you plug in a display.
+- **When the session ends:** the virtual display is removed and the original arrangement returns. macOS also removes it if MacLink quits.
+- **Turning it off:** **Match Shared Screen to This Mac** in the menu bar, on the viewing Mac. It's on by default.
+
+The virtual display uses a private macOS API, the one Apple's own Screen Sharing uses for High Performance mode. MacLink looks it up before using it; if a future macOS removes it, MacLink shares the sharing Mac's own display as before.
+
+## Display changes no longer end the session
+
+If the sharing Mac's display changes during a session, whether from a viewer-sized display appearing or disappearing, or a resolution change, MacLink now restarts capture on the new display and sends the viewer the new geometry. No input is accepted until the viewer has the new size. Before, the session ended with "Display geometry changed". Restarts are limited to six in 30 seconds.
+
+## Needs both Macs on preview 10
+
+Both Macs must run preview 10. With an older Mac on either end, the session works as before, at the sharing Mac's own resolution.
+
+## Validation
+
+Local validation passed with 97 Rust session tests, including the new display request checks:
+
+- exact scale 1 or 2 and pixels that match the points;
+- the size limits and the all-zero release request;
+- requests only from viewers, to hosts that announced the capability, in protocol 5.
+
+At a MacBook Pro resolution, HEVC 4:4:4 encodes in about 17 ms per frame on this Mac. That's 3024×1900 pixels; 1920×1080 takes about 10 ms.
+
+On this Mac, the private API created, resized and removed a Retina virtual display. That run showed that macOS doesn't pick the requested Retina mode by itself, so MacLink now selects it explicitly. The complete request → main display → release cycle is covered by `scripts/test-virtual-display.sh`, which is run by hand because it changes the display arrangement.
+
+Apple silicon and macOS 14 or later. Developer ID signed, notarized and stapled. Published to the public update feed. All CI and builds run on the local host; GitHub Actions is disabled on both repositories.

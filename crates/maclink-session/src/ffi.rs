@@ -956,6 +956,7 @@ pub extern "C" fn ml_input_keeps_local(key_code: u16, modifiers: u32) -> i32 {
 }
 
 pub const ML_CAPABILITY_HEVC_444: u64 = crate::policy::CAPABILITY_HEVC_444;
+pub const ML_CAPABILITY_VIRTUAL_DISPLAY: u64 = crate::policy::CAPABILITY_VIRTUAL_DISPLAY;
 pub const ML_CODEC_H264: u8 = 1;
 pub const ML_CODEC_HEVC: u8 = 2;
 

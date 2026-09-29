@@ -61,7 +61,11 @@ enum {
 enum {
     ML_CONTROL_GEOMETRY = 1, ML_CONTROL_INPUT_STATE = 2, ML_CONTROL_PING = 3,
     ML_CONTROL_PONG = 4, ML_CONTROL_KEYFRAME = 5,
-    ML_CONTROL_HELLO = 6 /* protocol 5: capabilities in ping_id, sent automatically */
+    ML_CONTROL_HELLO = 6, /* protocol 5: capabilities in ping_id, sent automatically */
+    /* Protocol 5, viewer to host: share a display of geometry.width x height
+     * points and pixel_width x pixel_height pixels (scale 1 or 2); all zero
+     * means the host's own display. Needs ML_CAPABILITY_VIRTUAL_DISPLAY. */
+    ML_CONTROL_DISPLAY_REQUEST = 7
 };
 enum {
     ML_INPUT_KEY_DOWN = 1, ML_INPUT_KEY_UP = 2, ML_INPUT_POINTER_MOVE = 3,
@@ -90,6 +94,7 @@ enum {
 enum { ML_CODEC_H264 = 1, ML_CODEC_HEVC = 2 };
 /* Capability bits announced in protocol 5 sessions. */
 #define ML_CAPABILITY_HEVC_444 1ull
+#define ML_CAPABILITY_VIRTUAL_DISPLAY 2ull
 #define ML_RECONNECT_STABLE_SECONDS 20u
 
 /* Logical CoreGraphics display bounds plus encoded pixel dimensions. */

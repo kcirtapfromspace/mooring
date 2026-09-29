@@ -27,6 +27,9 @@ enum NativeControlMessage: Equatable {
     case keyframe
     /// Protocol 5: the peer's capabilities. Rust sends ours automatically.
     case hello(UInt64)
+    /// Protocol 5, viewer to host: share a display of this many points at
+    /// scale 1 or 2. All zero asks for the host's own display again.
+    case displayRequest(width: Int, height: Int, scale: Int)
 
     var raw: MLControlMessage {
         var raw = MLControlMessage()
@@ -38,6 +41,10 @@ enum NativeControlMessage: Equatable {
         case .pong(let id): raw.kind = UInt8(ML_CONTROL_PONG); raw.ping_id = id
         case .keyframe: raw.kind = UInt8(ML_CONTROL_KEYFRAME)
         case .hello(let capabilities): raw.kind = UInt8(ML_CONTROL_HELLO); raw.ping_id = capabilities
+        case .displayRequest(let width, let height, let scale):
+            raw.kind = UInt8(ML_CONTROL_DISPLAY_REQUEST)
+            raw.geometry.width = Double(width); raw.geometry.height = Double(height)
+            raw.geometry.pixel_width = UInt32(clamping: width * scale); raw.geometry.pixel_height = UInt32(clamping: height * scale)
         }
         return raw
     }
@@ -50,6 +57,9 @@ enum NativeControlMessage: Equatable {
         case ML_CONTROL_PONG: self = .pong(raw.ping_id)
         case ML_CONTROL_KEYFRAME: self = .keyframe
         case ML_CONTROL_HELLO: self = .hello(raw.ping_id)
+        case ML_CONTROL_DISPLAY_REQUEST:
+            let width = Int(raw.geometry.width), pixels = Int(raw.geometry.pixel_width)
+            self = .displayRequest(width: width, height: Int(raw.geometry.height), scale: width > 0 ? pixels / width : 0)
         default: throw NativeSessionError(message: "The other Mac sent an unsupported session command.")
         }
     }

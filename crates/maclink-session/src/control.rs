@@ -50,6 +50,8 @@ pub(crate) enum ControlKind {
     Keyframe = 5,
     /// Protocol 5: each side's capabilities, sent once at session start.
     Hello = 6,
+    /// Protocol 5, viewer to host: share a display of this size.
+    DisplayRequest = 7,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -66,6 +68,54 @@ pub(crate) enum ControlMessage {
     Keyframe,
     /// Capability bits in the ping_id field; unknown bits are ignored.
     Hello(u64),
+    /// The viewer's video area: `width`×`height` points at `scale` 1 or 2,
+    /// carried in the geometry size and pixel fields. All zero asks the host
+    /// to share its own display again.
+    DisplayRequest(DisplayRequest),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DisplayRequest {
+    pub width: u32,
+    pub height: u32,
+    pub scale: u32,
+}
+impl DisplayRequest {
+    fn from_geometry(geometry: &DisplayGeometry) -> Option<Self> {
+        if geometry.is_zero() {
+            return Some(Self::default());
+        }
+        let points = |value: f64| {
+            (value.fract() == 0.0 && (240.0..=7680.0).contains(&value)).then_some(value as u32)
+        };
+        let (width, height) = (points(geometry.width)?, points(geometry.height)?);
+        let scale = geometry.pixel_width / width;
+        (geometry.x == 0.0
+            && geometry.y == 0.0
+            && width >= 320
+            && (scale == 1 || scale == 2)
+            && geometry.pixel_width == width * scale
+            && geometry.pixel_height == height * scale
+            && valid_dimensions(geometry.pixel_width, geometry.pixel_height))
+        .then_some(Self {
+            width,
+            height,
+            scale,
+        })
+    }
+    fn geometry(&self) -> DisplayGeometry {
+        if *self == Self::default() {
+            return DisplayGeometry::default();
+        }
+        DisplayGeometry {
+            x: 0.0,
+            y: 0.0,
+            width: self.width.into(),
+            height: self.height.into(),
+            pixel_width: self.width * self.scale,
+            pixel_height: self.height * self.scale,
+        }
+    }
 }
 
 impl ControlMessage {
@@ -93,6 +143,9 @@ impl ControlMessage {
             4 if geometry.is_zero() && !enabled => Self::Pong(ping_id),
             5 if geometry.is_zero() && !enabled && ping_id == 0 => Self::Keyframe,
             6 if geometry.is_zero() && !enabled => Self::Hello(ping_id),
+            7 if !enabled && ping_id == 0 => Self::DisplayRequest(
+                DisplayRequest::from_geometry(&geometry).ok_or(Error::Invalid)?,
+            ),
             _ => return Err(Error::Invalid),
         };
         Ok(message)
@@ -106,6 +159,7 @@ impl ControlMessage {
             Self::Pong(_) => ControlKind::Pong,
             Self::Keyframe => ControlKind::Keyframe,
             Self::Hello(_) => ControlKind::Hello,
+            Self::DisplayRequest(_) => ControlKind::DisplayRequest,
         }
     }
 
@@ -123,6 +177,7 @@ impl ControlMessage {
                 (0, id, DisplayGeometry::default())
             }
             Self::Keyframe => (0, 0, DisplayGeometry::default()),
+            Self::DisplayRequest(request) => (0, 0, request.geometry()),
         }
     }
 
@@ -297,7 +352,7 @@ mod tests {
             (6, 1, 3, zero), // hello carries only capabilities
             (6, 0, 3, display),
             (0, 0, 0, zero), // unknown kinds
-            (7, 0, 0, zero),
+            (8, 0, 0, zero),
         ] {
             assert!(ControlMessage::from_parts(kind, enabled, id, value).is_err());
         }
@@ -307,6 +362,53 @@ mod tests {
             Ok(hello),
             "unknown capability bits survive"
         );
+    }
+
+    #[test]
+    fn display_requests_carry_points_and_an_exact_scale() {
+        let sized =
+            |width: f64, height: f64, pixel_width: u32, pixel_height: u32| DisplayGeometry {
+                width,
+                height,
+                pixel_width,
+                pixel_height,
+                ..DisplayGeometry::default()
+            };
+        let retina = ControlMessage::from_parts(7, 0, 0, sized(1512.0, 916.0, 3024, 1832)).unwrap();
+        assert_eq!(
+            retina,
+            ControlMessage::DisplayRequest(DisplayRequest {
+                width: 1512,
+                height: 916,
+                scale: 2
+            })
+        );
+        assert_eq!(ControlMessage::decode(&retina.encode()), Ok(retina));
+        let release = ControlMessage::from_parts(7, 0, 0, DisplayGeometry::default()).unwrap();
+        assert_eq!(
+            release,
+            ControlMessage::DisplayRequest(DisplayRequest::default())
+        );
+        assert_eq!(ControlMessage::decode(&release.encode()), Ok(release));
+        for invalid in [
+            sized(1512.0, 916.0, 4536, 2748),  // scale 3
+            sized(1512.0, 916.0, 3024, 1830),  // pixels disagree with the scale
+            sized(1512.5, 916.0, 3025, 1832),  // fractional points
+            sized(300.0, 240.0, 600, 480),     // narrower than 320 points
+            sized(2560.0, 1600.0, 5120, 3200), // more pixels than the video allows
+            sized(1512.0, 916.0, 0, 0),
+            DisplayGeometry {
+                x: 1.0,
+                ..sized(1512.0, 916.0, 3024, 1832)
+            },
+        ] {
+            assert!(
+                ControlMessage::from_parts(7, 0, 0, invalid).is_err(),
+                "{invalid:?}"
+            );
+        }
+        assert!(ControlMessage::from_parts(7, 1, 0, sized(1512.0, 916.0, 3024, 1832)).is_err());
+        assert!(ControlMessage::from_parts(7, 0, 5, sized(1512.0, 916.0, 3024, 1832)).is_err());
     }
 
     #[test]

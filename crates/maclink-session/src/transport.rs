@@ -11,8 +11,8 @@ use crate::clipboard::{self, ClipboardKind, ClipboardPacket, MAX_CLIPBOARD};
 use crate::control::ControlMessage;
 use crate::input::InputEvent;
 use crate::policy::{
-    Admission, CAPABILITY_HEVC_444, CLIPBOARD, CONTROL, INPUT, PROTOCOL_MAX, PROTOCOL_MIN,
-    ReceivePolicy, Role, TELEMETRY, VIDEO,
+    Admission, CAPABILITY_HEVC_444, CAPABILITY_VIRTUAL_DISPLAY, CLIPBOARD, CONTROL, INPUT,
+    PROTOCOL_MAX, PROTOCOL_MIN, ReceivePolicy, Role, TELEMETRY, VIDEO,
 };
 use crate::telemetry::{MAX_TELEMETRY, TelemetryMessage};
 use crate::video::Codec;
@@ -389,6 +389,12 @@ impl Session {
                 Err(Error::Invalid)
             }
             Outgoing::Control(ControlMessage::Hello(_)) if self.version < 5 => Err(Error::Invalid),
+            Outgoing::Control(ControlMessage::DisplayRequest(_))
+                if self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_VIRTUAL_DISPLAY
+                    == 0 =>
+            {
+                Err(Error::Invalid)
+            }
             Outgoing::Video(frame) => self.send_bytes(VIDEO, &frame.encode()?, end),
             Outgoing::Input(event) => self.send_bytes(INPUT, &event.encode(), end),
             Outgoing::Control(control) if self.role.may_send_control(control.kind()) => {

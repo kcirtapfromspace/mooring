@@ -240,6 +240,8 @@ final class NativeVideoEncoder {
     let codec: NativeVideoCodec
     /// VideoToolbox's name for HEVC with 4:4:4 chroma, as the encoder advertises it.
     static let hevc444Profile = "HEVC_Main444_AutoLevel"
+    /// Apple's latency advice: favour encoding speed over quality. Settable for measurement.
+    static var prioritizesSpeed = true
 
     /// H.264 uses Apple's low-latency encoder. HEVC 4:4:4 needs a normal
     /// session: the low-latency one silently falls back to 4:2:0, so frame
@@ -291,6 +293,10 @@ final class NativeVideoEncoder {
             // Optional on some encoders; low-latency mode and no reordering are
             // required above. No caller-side queue relies on this hint.
             _ = VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
+            if Self.prioritizesSpeed {
+                _ = VTSessionSetProperty(created, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
+                _ = VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaximizePowerEfficiency, value: kCFBooleanFalse)
+            }
             let prepare = VTCompressionSessionPrepareToEncodeFrames(created)
             guard prepare == noErr else { throw NativeMediaError("Hardware encoder preparation failed (\(prepare)).") }
             var hardware: Unmanaged<CFTypeRef>?
@@ -486,6 +492,10 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private(set) var codec: NativeVideoCodec = .h264
     /// Called on the capture queue for each complete captured frame.
     var onCapturedFrame: (() -> Void)?
+    /// When set, a change of main display or its geometry calls this (once)
+    /// instead of onError, so the owner can restart capture on the new display.
+    var onDisplayChanged: (() -> Void)?
+    private var displayChangeReported = false
 
     init(maxPixelWidth: Int = 3840, maxPixelHeight: Int = 2160, framesPerSecond: Int = 60, showsCursor: Bool = true,
          bitrate: Int = 25_000_000, keyframeSeconds: Int = 2, inFlightLimit: Int = NativeVideoEncoder.maxInFlight,
@@ -610,8 +620,18 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         encoderLock.lock(); let matches = captureIdentity == ObjectIdentifier(stream); encoderLock.unlock()
         guard matches else { return }
+        encoderLock.lock(); let display = captureDisplay; encoderLock.unlock()
         takeEncoder()?.stop()
+        // The captured display went away, as when a virtual display replaces it.
+        if let display, CGMainDisplayID() != display || CGDisplayIsOnline(display) == 0, reportDisplayChange() { return }
         onError?("Screen capture stopped: \(error.localizedDescription)")
+    }
+    /// True if the owner takes display changes; reported at most once per capture.
+    private func reportDisplayChange() -> Bool {
+        guard let handler = onDisplayChanged else { return false }
+        encoderLock.lock(); let first = !displayChangeReported; displayChangeReported = true; encoderLock.unlock()
+        if first { handler() }
+        return true
     }
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
         guard outputType == .screen else { return }
@@ -633,7 +653,7 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         guard CGMainDisplayID() == display, bounds.minX == geometry.x, bounds.minY == geometry.y,
               bounds.width == geometry.width, bounds.height == geometry.height else {
             takeEncoder()?.stop()
-            onError?("Display geometry changed. Reconnect to restore accurate remote input.")
+            if !reportDisplayChange() { onError?("Display geometry changed. Reconnect to restore accurate remote input.") }
             return
         }
         onCapturedFrame?()

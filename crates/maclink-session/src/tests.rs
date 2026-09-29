@@ -1553,7 +1553,7 @@ fn a_malformed_clipboard_closes_the_receiver_and_clears_it() {
     assert!(is_closed(host.0));
 }
 
-const TEST_CAPABILITIES: u64 = ML_CAPABILITY_HEVC_444 | 1 << 40; // plus a bit no build knows
+const TEST_CAPABILITIES: u64 = ML_CAPABILITY_HEVC_444 | ML_CAPABILITY_VIRTUAL_DISPLAY | 1 << 40; // plus a bit no build knows
 fn hello(id: u64) -> u64 {
     let mut buffer = vec![0; 4096];
     let (status, message) = typed(id, &mut buffer, 2000);
@@ -1731,4 +1731,57 @@ fn hevc_reaches_only_viewers_that_announced_it() {
         0,
         "H.264 still flows"
     );
+}
+
+fn display_request(width: u32, height: u32, scale: u32) -> MLControlMessage {
+    MLControlMessage {
+        kind: 7,
+        geometry: MLDisplayGeometry {
+            width: width.into(),
+            height: height.into(),
+            pixel_width: width * scale,
+            pixel_height: height * scale,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn viewers_ask_capable_hosts_for_a_display_their_size() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let (viewer, host) = pair_version(5);
+    assert_eq!(
+        (hello(host.0), hello(viewer.0)),
+        (TEST_CAPABILITIES, TEST_CAPABILITIES)
+    );
+    assert_eq!(send_control(viewer.0, &display_request(1512, 916, 2)), 0);
+    assert_eq!(
+        send_control(host.0, &display_request(1512, 916, 2)),
+        Error::Invalid as i32,
+        "hosts never ask"
+    );
+    let mut buffer = vec![0; 4096];
+    let (status, message) = typed(host.0, &mut buffer, 2000);
+    assert_eq!(
+        (status, message.kind, message.control.kind),
+        (0, CONTROL, 7)
+    );
+    let geometry = message.control.geometry;
+    assert_eq!(
+        (
+            geometry.width,
+            geometry.height,
+            geometry.pixel_width,
+            geometry.pixel_height
+        ),
+        (1512.0, 916.0, 3024, 1832)
+    );
+    // Before a capable host's Hello, or in protocol 4, the request is refused locally.
+    let (old_viewer, _old_host) = pair_version(4);
+    assert_eq!(
+        send_control(old_viewer.0, &display_request(1512, 916, 2)),
+        Error::Invalid as i32
+    );
+    assert!(!is_closed(old_viewer.0));
 }

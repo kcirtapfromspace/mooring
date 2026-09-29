@@ -39,6 +39,7 @@ private struct NativeEncoderCounters {
 final class NativeSessionCoordinator {
     private static let automaticSharingKey = "native.shareAutomatically"
     private static let sharedClipboardKey = "native.shareClipboard"
+    private static let matchScreenKey = "native.matchScreen"
     private let defaults: UserDefaults
     private let keychain = NativeKeychain()
     private let peerStore = NativePeerStore()
@@ -101,6 +102,15 @@ final class NativeSessionCoordinator {
     private var systemKeys: NativeSystemKeyCapture?
     /// Found at launch by encoding and decoding one HEVC 4:4:4 frame in hardware.
     private var hevc444Available = false
+    /// Host: the display being shared, virtual when a viewer asked for its size.
+    private let sharedDisplay = NativeSharedDisplay()
+    private var pendingDisplayRequest: (width: Int, height: Int, scale: Int)?
+    private var displayRequestScheduled = false
+    private var displayRestarts: [TimeInterval] = []
+    private var displayRestartScheduled = false
+    /// Viewer: the last size observed and the last one requested.
+    private var observedScreenRequest: (width: Int, height: Int, scale: Int)?
+    private var sentScreenRequest: (width: Int, height: Int, scale: Int)?
     /// Exchanges this Mac's clipboard with a connected Mac, polled twice a second.
     private let clipboard = NativeClipboardSync()
     private var clipboardTimer: Timer?
@@ -137,6 +147,12 @@ final class NativeSessionCoordinator {
             shareWindow?.clipboard.state = newValue ? .on : .off
             onChange?()
         }
+    }
+    /// Viewer: ask a capable sharing Mac for a display the size of this Mac's
+    /// video area, at Retina density. On by default.
+    var matchesScreen: Bool {
+        get { defaults.object(forKey: Self.matchScreenKey) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Self.matchScreenKey); onChange?() }
     }
     var status: String? {
         if isSharing { return hostChannel == nil ? "Sharing this Mac · waiting" : "Sharing this Mac · connected" }
@@ -175,7 +191,9 @@ final class NativeSessionCoordinator {
             let hevc = NativeCodecSupport.probeHEVC444()
             DispatchQueue.main.async {
                 self?.hevc444Available = hevc
-                ml_capabilities_set(hevc ? UInt64(ML_CAPABILITY_HEVC_444) : 0)
+                let virtualDisplay = NativeSharedDisplay.isAvailable
+                ml_capabilities_set((hevc ? UInt64(ML_CAPABILITY_HEVC_444) : 0) | (virtualDisplay ? UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) : 0))
+                NativeLog.session.notice("virtual display for viewers: \(virtualDisplay ? "available" : "unavailable", privacy: .public)")
                 NativeLog.session.notice("HEVC 4:4:4 hardware encode and decode: \(hevc ? "available" : "unavailable", privacy: .public)")
             }
         }
@@ -364,6 +382,14 @@ final class NativeSessionCoordinator {
                 channel.fail(message)
             }
         }
+        // A new main display, such as the viewer-sized one, restarts capture on
+        // it and sends the viewer fresh geometry instead of ending the session.
+        capture.onDisplayChanged = { [weak self, weak channel] in
+            DispatchQueue.main.async {
+                guard let self, let channel, live.isActive, self.hostChannel === channel else { return }
+                self.restartCaptureForDisplayChange(channel)
+            }
+        }
         capture.start { [weak self, weak channel] result in
             guard let self, let channel, live.isActive, self.hostChannel === channel, channel.token.isActive else { return }
             switch result {
@@ -416,6 +442,50 @@ final class NativeSessionCoordinator {
         }
     }
 
+    /// Restarts are spaced and bounded: six in 30 s, or the session ends.
+    private func restartCaptureForDisplayChange(_ channel: NativeSessionChannel) {
+        guard !displayRestartScheduled else { return }
+        let now = uptime
+        displayRestarts = displayRestarts.filter { now - $0 < 30 } + [now]
+        guard displayRestarts.count <= 6 else {
+            channel.fail("This Mac's display kept changing. Reconnect when it is settled.")
+            return
+        }
+        displayRestartScheduled = true
+        retireCapture()
+        // No input lands on a display whose geometry the viewer has not seen.
+        hostGeometryLock.lock(); hostGeometry = nil; hostGeometryLock.unlock()
+        hostInjector?.releaseAll()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self, weak channel] in
+            guard let self else { return }
+            self.displayRestartScheduled = false
+            guard let channel, self.hostChannel === channel, channel.token.isActive, self.capture == nil else { return }
+            NativeLog.session.notice("display changed; capturing the new main display")
+            self.startCapture(for: channel)
+        }
+    }
+
+    /// The viewer's latest request wins; it applies after half a second of quiet.
+    private func requestDisplay(width: Int, height: Int, scale: Int, channel: NativeSessionChannel) {
+        pendingDisplayRequest = (width, height, scale)
+        guard !displayRequestScheduled else { return }
+        displayRequestScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self, weak channel] in
+            guard let self else { return }
+            self.displayRequestScheduled = false
+            guard let channel, self.hostChannel === channel, channel.token.isActive, let request = self.pendingDisplayRequest else { return }
+            self.pendingDisplayRequest = nil
+            self.sharedDisplay.apply(width: request.width, height: request.height, scale: request.scale) { applied in
+                if request.width == 0 {
+                    NativeLog.session.notice("sharing this Mac's own display again")
+                } else {
+                    NativeLog.session.notice("viewer-sized display \(request.width)×\(request.height) points at \(request.scale)x: \(applied ? "active" : "refused, sharing this Mac's own display", privacy: .public)")
+                }
+                if !applied { self.sharedDisplay.release() }
+            }
+        }
+    }
+
     private func updateHostPermission() {
         guard NativePrivacyGuard.mayShareNow() else {
             stopSharing(reason: pausedReason("Sharing stopped because this Mac is no longer active."))
@@ -462,6 +532,11 @@ final class NativeSessionCoordinator {
                             guard let self, let channel, self.hostChannel === channel else { return }
                             self.capture?.requestKeyframe()
                         }
+                    case .control(.displayRequest(let width, let height, let scale)):
+                        channel.deliverControl { [weak self, weak channel] in
+                            guard let self, let channel, self.hostChannel === channel else { return }
+                            self.requestDisplay(width: width, height: height, scale: scale, channel: channel)
+                        }
                     case .control(.hello):
                         // Rust has recorded the viewer's capabilities; start with the best shared codec.
                         channel.deliverControl { [weak self, weak channel] in
@@ -491,6 +566,7 @@ final class NativeSessionCoordinator {
     private func endHost(reason: String) {
         recordEnd("host", reason)
         hostChannel?.close(); hostChannel = nil
+        sharedDisplay.release(); pendingDisplayRequest = nil; displayRestarts = []
         endHostActivity()
         retireCapture(); hostInjector?.stop(); hostInjector = nil
         hostGeometryLock.lock(); hostGeometry = nil; hostGeometryLock.unlock()
@@ -513,6 +589,7 @@ final class NativeSessionCoordinator {
         sharingToken?.cancel(); sharingToken = nil
         listener?.close(); listener = nil
         hostChannel?.close(); hostChannel = nil
+        sharedDisplay.release(); pendingDisplayRequest = nil; displayRestarts = []
         endHostActivity()
         retireCapture(); hostInjector?.stop(); hostInjector = nil
         permissionTimer?.invalidate(); permissionTimer = nil
@@ -727,6 +804,7 @@ final class NativeSessionCoordinator {
         viewerChannel = channel; self.decoder = decoder; lastViewerMeasurements = channel.measurements
         firstFrame = false; viewerInputEnabled = false; pendingPing = nil; lastPresented = 0; lastStatusTime = uptime
         drawReportTicks = 0; drawReportDecoded = 0
+        observedScreenRequest = nil; sentScreenRequest = nil
         viewerStarted = uptime; reconnectWork?.cancel(); reconnectWork = nil
         // What is already copied here is available to paste on the other Mac.
         clipboard.start(includeCurrent: sharesClipboard && !pairing)
@@ -882,7 +960,7 @@ final class NativeSessionCoordinator {
                 channel.measurements.set("network_round_trip_ms", (uptime - outstanding.1) * 1000)
                 pendingPing = nil
             }
-        case .ping, .keyframe, .hello:
+        case .ping, .keyframe, .hello, .displayRequest:
             break
         }
     }
@@ -937,11 +1015,35 @@ final class NativeSessionCoordinator {
         let rate = fps < 0.5 ? "screen unchanged" : String(format: "%.0f fps as the screen changes", fps)
         let size = viewerWindow?.video.geometry.map { " · \($0.pixelWidth)×\($0.pixelHeight)" } ?? ""
         viewerWindow?.status.stringValue = "\(viewerInputEnabled ? "Connected" : "View only") · \(rate) · \(rtt)\(size)"
+        requestMatchingScreen(channel)
         if let pendingPing, now - pendingPing.1 > 8 { channel.fail("The sharing Mac stopped answering connection checks."); return }
         if pendingPing == nil {
             pingSequence &+= 1; pendingPing = (pingSequence, now)
             channel.control(.ping(pingSequence))
         }
+    }
+    /// Once a second: when the video area has kept the same size for a tick,
+    /// ask a capable sharing Mac for a display exactly that size at this Mac's
+    /// Retina scale, so the picture fills the window pixel for pixel.
+    private func requestMatchingScreen(_ channel: NativeSessionChannel) {
+        guard firstFrame, channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) != 0,
+              let view = viewerWindow?.video, let window = view.window else { return }
+        var desired: (width: Int, height: Int, scale: Int) = (0, 0, 0)
+        if matchesScreen {
+            let scale = window.backingScaleFactor >= 2 ? 2 : 1
+            var width = Double(view.bounds.width), height = Double(view.bounds.height)
+            // Stay within the video limits (3840×2160 pixels), keeping the shape.
+            let fit = min(1, 3840 / (width * Double(scale)), 2160 / (height * Double(scale)))
+            width = (width * fit / 2).rounded(.down) * 2; height = (height * fit / 2).rounded(.down) * 2
+            if width >= 320 && height >= 240 { desired = (Int(width), Int(height), scale) }
+        }
+        defer { observedScreenRequest = desired }
+        guard let observed = observedScreenRequest, observed == desired else { return }
+        if let sent = sentScreenRequest, sent == desired { return }
+        if sentScreenRequest == nil && desired.width == 0 { return }
+        sentScreenRequest = desired
+        channel.control(.displayRequest(width: desired.width, height: desired.height, scale: desired.scale))
+        NativeLog.session.notice("asked the sharing Mac for a \(desired.width)×\(desired.height)-point display at \(desired.scale)x")
     }
     /// `reconnect` is set only for an unexpected end. Privacy, sleep, quitting
     /// and closing the window end any reconnecting instead.

@@ -177,6 +177,24 @@ On the build Mac (M1 Ultra), the native media suite ran 120 paced 1080p frames t
 
 The encrypted loopback added a version 5 phase in which the viewer decoded HEVC 4:4:4 from the host after the capability exchange. The viewing Mac's hardware decode support isn't known here; its launch self-test decides.
 
+## Viewer-sized virtual display
+
+For `v0.3.0-preview.10`, the Rust suite added display request checks:
+
+- exact scale, and pixels that match the points;
+- size limits, and the all-zero release request;
+- direction, protocol 5 only, and capability gating on send and on receive.
+
+Encode cost at MacBook Pro sizes on the build Mac: HEVC 4:4:4 averaged about 17 ms per frame at 3024×1900 and 22 ms at 3456×2234. H.264 took 19 ms and 25 ms.
+
+A first run of the private API on the build Mac (headless, with macOS's 1920×1080 placeholder):
+
+- it created, resized and removed a Retina virtual display;
+- macOS chose a doubled mode unless the exact Retina mode was selected, so MacLink now selects it;
+- the virtual display replaced the placeholder, and a new placeholder appeared after release.
+
+That run interrupted a live session three times, because the old capture code ended the session on a display change. It now restarts capture instead. `scripts/test-virtual-display.sh` checks the request → main display → release cycle. It is manual because it changes the display arrangement, and must not run during a session.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

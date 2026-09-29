@@ -47,11 +47,14 @@ MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release --package maclink-c
     --target "$rust_target" --target-dir "$project_root/target"
 # In-place updates: the pinned, checksum-verified Sparkle framework.
 sparkle_dir="$("$project_root/scripts/fetch-sparkle.sh")"
+# The one Objective-C file: the private virtual-display boundary (AGENTS.md).
+clang -fobjc-arc -O2 -Wall -Werror -isysroot "$sdk_path" -target arm64-apple-macos14.0 \
+    -c "$project_root/app/NativeVirtualDisplay.m" -o "$build_root/NativeVirtualDisplay.o"
 swiftc -O -swift-version 5 -parse-as-library -sdk "$sdk_path" -target arm64-apple-macosx14.0 \
     -framework AppKit -framework Foundation -framework Network -framework ServiceManagement \
     -framework Security -framework SystemConfiguration -framework ScreenCaptureKit -framework VideoToolbox \
     -framework CoreMedia -framework CoreVideo -framework Metal -framework MetalKit -framework CoreImage \
-    -import-objc-header "$project_root/crates/maclink-session/include/maclink_session.h" \
+    -import-objc-header "$project_root/app/MacLink-Bridging.h" "$build_root/NativeVirtualDisplay.o" \
     -L "$project_root/target/$rust_target/release" -lmaclink_session \
     -F "$sparkle_dir" -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
     "$project_root"/app/*.swift -o "$staged_bundle/Contents/MacOS/MacLink"

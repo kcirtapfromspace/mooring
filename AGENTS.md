@@ -7,6 +7,6 @@
 - The Apple backend requests modes through native-exported, undocumented URL options. Never equate a launch or exported document with independently verified video negotiation. Real two-Mac switching remains a release test gate.
 - The Rust network policy consumes live TCP/RFB target checks in the menu-bar app. These do not measure bandwidth, loss, or video latency. The separate streaming quality policy remains simulated.
 - Accessibility may manage only a unique new session window matching the requested endpoint and exported mode. Pause on ambiguity; never close all windows, type credentials, or terminate Screen Sharing to switch modes. Check cancellation before AX mutations.
-- Swift/AppKit is a thin native shell; keep policy, validation, persistence, and protocol work in Rust. Use public Apple media APIs through a small, well-defined boundary.
+- Swift/AppKit is a thin native shell; keep policy, validation, persistence, and protocol work in Rust. Use public Apple media APIs through a small, well-defined boundary. One approved exception (2026-09-29): the private CoreGraphics `CGVirtualDisplay` API, confined to `app/NativeVirtualDisplay.m`, looked up at runtime, with a fallback to the physical display when it is missing.
 - Keep queues, messages, timeouts, and retry budgets bounded. Input cleanup and stale-frame recovery matter more than an average FPS number.
 - Evaluate source licenses before reusing external protocol implementations. No AGPL implementation code has been included in this MIT project.
