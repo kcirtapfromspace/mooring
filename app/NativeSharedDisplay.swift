@@ -32,7 +32,9 @@ final class NativeSharedDisplay {
     }
 
     /// macOS brings a new display online asynchronously; wait up to 3 s for
-    /// the exact Retina mode, then select it and mirror other displays into it.
+    /// the exact Retina mode (normally already the default), select it if
+    /// needed, and mirror other displays into it. Changes apply for this app
+    /// only, so macOS undoes them if MacLink quits.
     private func configure(width: Int, height: Int, scale: Int, attempt: Int, generation: UInt64,
                            completion: @escaping (Bool) -> Void) {
         guard generation == self.generation, let id = virtual?.displayID, id != kCGNullDirectDisplay else { return }
@@ -49,14 +51,17 @@ final class NativeSharedDisplay {
             }
             return
         }
-        var config: CGDisplayConfigRef?
-        guard CGBeginDisplayConfiguration(&config) == .success, let config else { completion(false); return }
-        CGConfigureDisplayWithDisplayMode(config, id, wanted, nil)
-        var mirrors: [CGDirectDisplayID] = []
-        for other in Self.activeDisplays() where other != id {
-            if CGConfigureDisplayMirrorOfDisplay(config, other, id) == .success { mirrors.append(other) }
+        if let current = CGDisplayCopyDisplayMode(id), current.pixelWidth != wanted.pixelWidth || current.width != wanted.width {
+            guard CGDisplaySetDisplayMode(id, wanted, nil) == .success else { completion(false); return }
         }
-        guard CGCompleteDisplayConfiguration(config, .forSession) == .success else { completion(false); return }
+        var mirrors: [CGDirectDisplayID] = []
+        let others = Self.activeDisplays().filter { $0 != id && CGDisplayMirrorsDisplay($0) != id }
+        if !others.isEmpty {
+            var config: CGDisplayConfigRef?
+            guard CGBeginDisplayConfiguration(&config) == .success, let config else { completion(false); return }
+            for other in others where CGConfigureDisplayMirrorOfDisplay(config, other, id) == .success { mirrors.append(other) }
+            guard CGCompleteDisplayConfiguration(config, .forAppOnly) == .success else { completion(false); return }
+        }
         mirrored = Array(Set(mirrored + mirrors))
         size = (width, height, scale)
         completion(true)
@@ -69,7 +74,7 @@ final class NativeSharedDisplay {
             var config: CGDisplayConfigRef?
             if CGBeginDisplayConfiguration(&config) == .success, let config {
                 for display in mirrored { CGConfigureDisplayMirrorOfDisplay(config, display, kCGNullDirectDisplay) }
-                CGCompleteDisplayConfiguration(config, .forSession)
+                CGCompleteDisplayConfiguration(config, .forAppOnly)
             }
             mirrored = []
         }

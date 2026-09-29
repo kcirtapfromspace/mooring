@@ -193,7 +193,15 @@ A first run of the private API on the build Mac (headless, with macOS's 1920×10
 - macOS chose a doubled mode unless the exact Retina mode was selected, so MacLink now selects it;
 - the virtual display replaced the placeholder, and a new placeholder appeared after release.
 
-That run interrupted a live session three times, because the old capture code ended the session on a display change. It now restarts capture instead. `scripts/test-virtual-display.sh` checks the request → main display → release cycle. It is manual because it changes the display arrangement, and must not run during a session.
+That run interrupted a live session three times, because the old capture code ended the session on a display change. It now restarts capture instead.
+
+`scripts/test-virtual-display.sh` checks the request → main display → release cycle. It is manual because it changes the display arrangement, and must not run during a session. Its first run failed:
+
+- modes are given in points, not pixels;
+- selecting a mode across the session failed with error 1001;
+- the display lingered after release because an autoreleased reference was never drained.
+
+After those fixes, it passed on the build Mac: 1512×916 points became the main display at 3024×1832 pixels, a resize to 1280×800 applied in place, and release restored the 1920×1080 placeholder at once.
 
 ## Media feasibility
 

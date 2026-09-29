@@ -44,6 +44,12 @@ Pointer checks cover the image format, size and hotspot bounds, direction, capab
 
 At a MacBook Pro resolution, HEVC 4:4:4 encodes in about 17 ms per frame on this Mac. That's 3024×1900 pixels; 1920×1080 takes about 10 ms.
 
-On this Mac, the private API created, resized and removed a Retina virtual display. That run showed that macOS doesn't pick the requested Retina mode by itself, so MacLink now selects it explicitly. The complete request → main display → release cycle is covered by `scripts/test-virtual-display.sh`, which is run by hand because it changes the display arrangement.
+On this Mac (headless), `scripts/test-virtual-display.sh` passed. It is run by hand because it changes the display arrangement:
+
+- **Request, 1512×916 points at 2×:** became the main display at exactly 1512×916 points, 3024×1832 pixels.
+- **Resize, 1280×800 at 2×:** applied in place.
+- **Release:** macOS's 1920×1080 placeholder was back immediately.
+
+Two earlier runs found problems, both fixed before release. Modes had to be given in points. And the display lingered after release until a leftover reference was cleared.
 
 Apple silicon and macOS 14 or later. Developer ID signed, notarized and stapled. Published to the public update feed. All CI and builds run on the local host; GitHub Actions is disabled on both repositories.
