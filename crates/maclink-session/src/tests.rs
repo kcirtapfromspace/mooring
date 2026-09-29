@@ -3,7 +3,7 @@
 
 use crate::Error;
 use crate::ffi::*;
-use crate::policy::{CONTROL, INPUT, VIDEO};
+use crate::policy::{CONTROL, INPUT, TELEMETRY, VIDEO};
 use crate::transport::{
     HANDSHAKE_PAYLOAD, MAX_CONTROL, MAX_INPUT, MAX_RECORD, MAX_VIDEO, PROLOGUE, builder, deadline,
     read_record, session, write_exact, write_record,
@@ -296,7 +296,7 @@ fn authenticated_header_bounds_types_offsets_sequences_and_direction_are_enforce
         plain(INPUT, (MAX_INPUT + 1) as u32, 0, 0, b"x"),
         plain(CONTROL, (MAX_CONTROL + 1) as u32, 0, 0, b"x"),
         plain(VIDEO, 1, 0, 0, b"x"), // a host never receives video
-        plain(4, 1, 0, 0, b"x"),
+        plain(5, 1, 0, 0, b"x"),
         plain(INPUT, 1, 1, 0, b"x"),
         plain(INPUT, 1, 0, 1, b"x"),
         plain(INPUT, 1, 0, 0, b"xx"),
@@ -437,7 +437,7 @@ fn listener_handshake_and_accept_timeouts_remain_usable() {
 #[test]
 fn validation_rejects_bad_arguments_without_closing_the_session() {
     let (viewer, host) = pair();
-    assert_eq!(send(viewer.0, 4, b"x"), Error::Invalid as i32);
+    assert_eq!(send(viewer.0, 5, b"x"), Error::Invalid as i32);
     assert_eq!(
         send(viewer.0, INPUT, &vec![0; MAX_INPUT + 1]),
         Error::Invalid as i32
@@ -1151,4 +1151,221 @@ fn accepted_connections_get_a_bounded_handshake_grace() {
     let (status, host) = accepting.join().unwrap();
     assert_eq!(status, 0);
     assert_ne!(host.0, 0);
+}
+
+fn stats_message(values: &[(u8, f64)]) -> MLTelemetryMessage {
+    let mut message = MLTelemetryMessage {
+        kind: 1,
+        count: values.len() as u8,
+        ..Default::default()
+    };
+    for (slot, (metric, value)) in message.metrics.iter_mut().zip(values) {
+        *slot = MLMetric {
+            metric: *metric,
+            reserved: [0; 7],
+            value: *value,
+        };
+    }
+    message
+}
+
+#[test]
+fn telemetry_flows_both_ways_but_only_viewers_tune() {
+    let (viewer, host) = pair();
+    let mut buffer = vec![0; MAX_VIDEO];
+    let stats = stats_message(&[(1, 42.0), (7, 23.5)]);
+    assert_eq!(
+        unsafe { ml_session_send_telemetry(host.0, &stats, 1000) },
+        0
+    );
+    let (status, message) = typed(viewer.0, &mut buffer, 1000);
+    assert_eq!(
+        (
+            status,
+            message.kind,
+            message.telemetry.kind,
+            message.telemetry.count
+        ),
+        (0, TELEMETRY, 1, 2)
+    );
+    assert_eq!(
+        (
+            message.telemetry.metrics[1].metric,
+            message.telemetry.metrics[1].value
+        ),
+        (7, 23.5)
+    );
+    let tune = MLTelemetryMessage {
+        kind: 2,
+        tuning: MLTuning {
+            fps: 30,
+            bitrate_kbps: 12_000,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert_eq!(
+        unsafe { ml_session_send_telemetry(host.0, &tune, 1000) },
+        Error::Invalid as i32,
+        "hosts never tune"
+    );
+    assert_eq!(
+        unsafe { ml_session_send_telemetry(viewer.0, &tune, 1000) },
+        0
+    );
+    assert_eq!(
+        unsafe { ml_session_send_telemetry(viewer.0, &stats, 1000) },
+        0
+    );
+    let (status, message) = typed(host.0, &mut [], 1000);
+    assert_eq!(
+        (
+            status,
+            message.telemetry.kind,
+            message.telemetry.tuning.fps,
+            message.telemetry.tuning.bitrate_kbps
+        ),
+        (0, 2, 30, 12_000)
+    );
+    assert_eq!(typed(host.0, &mut [], 1000).1.telemetry.count, 2);
+    let mut invalid = stats;
+    invalid.metrics[0].value = f64::NAN;
+    let mut unknown = stats;
+    unknown.metrics[0].metric = 99;
+    let mut too_many = stats;
+    too_many.count = 33;
+    let mut duplicate = stats;
+    duplicate.metrics[1].metric = 1;
+    let empty_tune = MLTelemetryMessage {
+        kind: 2,
+        ..Default::default()
+    };
+    let wide = MLTelemetryMessage {
+        kind: 2,
+        tuning: MLTuning {
+            max_width: 5120,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    for message in [invalid, unknown, too_many, duplicate, empty_tune, wide] {
+        assert_eq!(
+            unsafe { ml_session_send_telemetry(viewer.0, &message, 1000) },
+            Error::Invalid as i32
+        );
+    }
+    assert!(
+        !is_closed(viewer.0) && !is_closed(host.0),
+        "invalid local telemetry leaves the session open"
+    );
+}
+
+#[test]
+fn local_telemetry_abi_serves_snapshots_and_takes_tuning() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    let folder = format!("/tmp/mltf-{}", std::process::id());
+    let _ = std::fs::remove_dir_all(&folder);
+    let path = CString::new(folder.clone()).unwrap();
+    let mut tuning = MLTuning::default();
+    assert_eq!(
+        unsafe { ml_telemetry_take_tuning(&mut tuning) },
+        Error::Closed as i32,
+        "nothing serves before start"
+    );
+    assert_eq!(unsafe { ml_telemetry_start(path.as_ptr()) }, 0);
+    assert_eq!(
+        unsafe { ml_telemetry_start(path.as_ptr()) },
+        0,
+        "start is idempotent"
+    );
+    let client = UnixStream::connect(format!("{folder}/telemetry/telemetry.sock")).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut reader = BufReader::new(client.try_clone().unwrap());
+    let mut writer = client;
+    writer
+        .write_all(b"{\"tune\":{\"fps\":24,\"in_flight\":1}}\n")
+        .unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert!(line.contains("ack"), "{line}");
+    assert_eq!(unsafe { ml_telemetry_take_tuning(&mut tuning) }, 1);
+    assert_eq!(
+        (tuning.fps, tuning.in_flight, tuning.bitrate_kbps),
+        (24, 1, 0)
+    );
+    let taken = tuning;
+    assert_eq!(unsafe { ml_telemetry_take_tuning(&mut tuning) }, 0);
+    assert_eq!(tuning.fps, 0, "an empty take clears its output");
+    let mut defaults = MLTuning::default();
+    assert_eq!(unsafe { ml_tuning_defaults(&mut defaults) }, 0);
+    let mut merged = MLTuning::default();
+    assert_eq!(
+        unsafe { ml_tuning_merge(&defaults, &taken, &mut merged) },
+        0
+    );
+    assert_eq!(
+        (merged.fps, merged.in_flight, merged.bitrate_kbps),
+        (24, 1, 25_000)
+    );
+    let mut snapshot = MLTelemetrySnapshot {
+        role: 2,
+        local_count: 1,
+        session_seconds: 3.5,
+        peer_age_seconds: -1.0,
+        tuning: merged,
+        last_end_age_seconds: 4.0,
+        ..Default::default()
+    };
+    for (slot, byte) in snapshot.last_end.iter_mut().zip(b"Session closed") {
+        *slot = *byte as c_char;
+    }
+    snapshot.local[0] = MLMetric {
+        metric: 38,
+        reserved: [0; 7],
+        value: 7.5,
+    };
+    assert_eq!(unsafe { ml_telemetry_publish(&snapshot) }, 0);
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    assert!(
+        line.contains(r#""rtt_ms":7.5"#)
+            && line.contains(r#""peer_age_s":null"#)
+            && line.contains(r#""fps":24"#)
+            && line.contains(r#""last_end":{"age_s":4.0,"reason":"Session closed"}"#),
+        "{line}"
+    );
+    let mut bad = snapshot;
+    bad.role = 9;
+    assert_eq!(unsafe { ml_telemetry_publish(&bad) }, Error::Invalid as i32);
+    assert_eq!(ml_telemetry_stop(), 0);
+    assert_eq!(
+        unsafe { ml_telemetry_publish(&snapshot) },
+        Error::Closed as i32
+    );
+    assert!(!std::path::Path::new(&format!("{folder}/telemetry/telemetry.sock")).exists());
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn reconnect_budget_and_local_shortcuts_cross_the_c_abi() {
+    let delays: Vec<i32> = (0..=ML_RECONNECT_ATTEMPTS + 1)
+        .map(|attempt| ml_reconnect_delay_ms(attempt))
+        .collect();
+    assert_eq!(
+        delays,
+        [
+            Error::Invalid as i32,
+            500,
+            1000,
+            2000,
+            4000,
+            8000,
+            Error::Invalid as i32
+        ]
+    );
+    assert_eq!(ml_input_keeps_local(53, 8 | 4), 1); // ⌘⌥Esc
+    assert_eq!(ml_input_keeps_local(48, 8), 0); // ⌘-Tab goes to the remote Mac
 }

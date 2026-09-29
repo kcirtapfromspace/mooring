@@ -12,6 +12,10 @@ use std::time::{Duration, Instant};
 
 pub mod network_probe;
 
+/// The app's owner-only local telemetry socket, relative to the data directory.
+/// It lives in its own 0700 folder so no other user can reach it.
+pub const TELEMETRY_SOCKET: &str = "telemetry/telemetry.sock";
+
 /// MacLink's per-user data directory: `MACLINK_HOME` when set, otherwise
 /// `~/Library/Application Support/MacLink`. Shared by the CLI and native session.
 pub fn support_directory() -> Result<PathBuf, String> {

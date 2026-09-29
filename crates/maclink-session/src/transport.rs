@@ -9,7 +9,8 @@
 
 use crate::control::ControlMessage;
 use crate::input::InputEvent;
-use crate::policy::{Admission, CONTROL, INPUT, ReceivePolicy, Role, VIDEO};
+use crate::policy::{Admission, CONTROL, INPUT, ReceivePolicy, Role, TELEMETRY, VIDEO};
+use crate::telemetry::{MAX_TELEMETRY, TelemetryMessage};
 use crate::video::{VideoFrame, VideoPacket};
 use crate::{Error, Result};
 use snow::{Builder, HandshakeState, StatelessTransportState};
@@ -24,7 +25,7 @@ use zeroize::{Zeroize, Zeroizing};
 pub(crate) const PATTERN: &str = "Noise_NKpsk0_25519_ChaChaPoly_BLAKE2s";
 pub(crate) const PROLOGUE: &[u8] = b"MacLink direct session v1";
 /// Names the application message formats; mismatched builds fail the handshake.
-pub(crate) const HANDSHAKE_PAYLOAD: &[u8] = b"maclink-session/2";
+pub(crate) const HANDSHAKE_PAYLOAD: &[u8] = b"maclink-session/3";
 pub(crate) const MAX_VIDEO: usize = crate::video::MAX_PACKET;
 pub(crate) const MAX_INPUT: usize = 256;
 pub(crate) const MAX_CONTROL: usize = 1024;
@@ -63,6 +64,7 @@ fn limit(kind: u8) -> Result<usize> {
         VIDEO => Ok(MAX_VIDEO),
         INPUT => Ok(MAX_INPUT),
         CONTROL => Ok(MAX_CONTROL),
+        TELEMETRY => Ok(MAX_TELEMETRY),
         _ => Err(Error::Invalid),
     }
 }
@@ -207,6 +209,7 @@ pub(crate) enum Outgoing<'a> {
     Video(VideoFrame<'a>),
     Input(InputEvent),
     Control(ControlMessage),
+    Telemetry(TelemetryMessage),
 }
 #[derive(Debug, PartialEq)]
 pub(crate) enum Incoming {
@@ -214,6 +217,7 @@ pub(crate) enum Incoming {
     Video(VideoPacket),
     Input(InputEvent),
     Control(ControlMessage),
+    Telemetry(TelemetryMessage),
 }
 
 pub(crate) struct Counter {
@@ -276,6 +280,10 @@ impl Session {
                 self.send_bytes(CONTROL, &control.encode(), end)
             }
             Outgoing::Control(_) => Err(Error::Invalid),
+            Outgoing::Telemetry(telemetry) if self.role.may_send_telemetry(telemetry) => {
+                self.send_bytes(TELEMETRY, &telemetry.encode()?, end)
+            }
+            Outgoing::Telemetry(_) => Err(Error::Invalid),
         }
     }
     pub(crate) fn send_bytes(&self, kind: u8, data: &[u8], end: Instant) -> Result<()> {
@@ -339,13 +347,10 @@ impl Session {
                 let message = match kind {
                     VIDEO => Incoming::Video(VideoPacket::parse(&video[..length])?),
                     INPUT => Incoming::Input(InputEvent::decode(&small[..length])?),
-                    _ => Incoming::Control(ControlMessage::decode(&small[..length])?),
+                    CONTROL => Incoming::Control(ControlMessage::decode(&small[..length])?),
+                    _ => Incoming::Telemetry(TelemetryMessage::decode(&small[..length])?),
                 };
-                let control = match &message {
-                    Incoming::Control(control) => Some(control),
-                    _ => None,
-                };
-                Ok((policy.admit(kind, control, Instant::now())?, message))
+                Ok((policy.admit(&message, Instant::now())?, message))
             })();
             match decoded {
                 Ok((Admission::Deliver, message)) => return Ok(message),

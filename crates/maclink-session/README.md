@@ -6,7 +6,7 @@ and belong on background queues. No service starts without an explicit listen ca
 
 Rust owns the session protocol: sockets, framing, deadlines, typed wire formats and
 their validation, per-role direction and rate policy, the host's held-input state,
-pairing codes, and saved peer metadata. Swift converts Apple types to and from the
+pairing codes, saved peer metadata, and live telemetry and tuning. Swift converts Apple types to and from the
 header's fixed-layout structs, stores secrets in Keychain, drives ScreenCaptureKit,
 VideoToolbox and CGEvent, and owns the UI. Struct layouts are asserted at compile
 time on both sides of the boundary.
@@ -32,7 +32,7 @@ earlier preference list is imported once.
 ## Transport
 
 The protocol is `Noise_NKpsk0_25519_ChaChaPoly_BLAKE2s` with prologue
-`MacLink direct session v1`. Each handshake payload is `maclink-session/2`, which
+`MacLink direct session v1`. Each handshake payload is `maclink-session/3`, which
 names the application message formats; mismatched builds fail the handshake. Both
 peers then confirm fresh transport keys with encrypted `client-ready/1` and
 `server-ready/1` records at directional nonce zero. Session handles are published
@@ -45,7 +45,7 @@ plaintext contains version byte 1, type byte, two reserved zero bytes, big-endia
 u64 message sequence, u32 total payload length and u32 chunk offset, followed by at
 most 65499 payload bytes. Every chunk authenticates the same type, sequence and
 total, and must have the expected next offset. Video messages are bounded to 12 MiB,
-input to 256 bytes and control to 1 KiB. TCP_NODELAY is enabled.
+input to 256 bytes, control to 1 KiB and telemetry to 512 bytes. TCP_NODELAY is enabled.
 
 ## Messages and policy
 
@@ -62,11 +62,15 @@ An accepted session is the sharing host; a connected session is the viewer.
   carries nothing.
 - **Control**: 52 bytes. Hosts send geometry (with input permission), input state
   and pong; viewers send ping and keyframe requests.
+- **Telemetry**: stats (up to 32 distinct metric IDs with finite values from 0 to
+  1e9) from either side about once a second, and tuning from the viewer only:
+  bitrate 1–80 Mbps, maximum capture width 640–3840 (even), frame rate 1–60,
+  frames in flight 1–2 and keyframe interval 1–10 s, where zero means unchanged.
 
 Fields a kind does not use must be zero. Invalid or misdirected sends return
 `INVALID` before any byte is written and leave the session open. On receive, a
 viewer needs geometry before video; hosts accept at most 1000 messages and viewers
-32 control messages per second (`RATE_LIMITED`); hosts skip pings under 250 ms and
+32 control and telemetry messages per second (`RATE_LIMITED`); hosts skip pings under 250 ms and
 keyframe requests under 500 ms apart (viewers retry at 750 ms); ten seconds without
 a complete message ends the session (`STALLED`). Any peer violation closes the
 session and clears the rejected plaintext.
@@ -75,6 +79,25 @@ The host's input state releases only keys and buttons the connection pressed,
 bounds autorepeat to 120 Hz, and releases ordinary keys before modifiers and then
 buttons at the latest position. `accept` stages a transition; the caller commits
 after posting the returned events.
+
+## Local telemetry
+
+Each app serves an owner-only (0600) Unix socket, `telemetry/telemetry.sock`, in an
+owner-only (0700) folder of the MacLink data directory. Clients read one JSON snapshot per line (this Mac's measurements,
+the peer's latest, and the sharing settings) and write `{"tune": {...}}` lines,
+which are validated, acknowledged and merged into one pending update the app takes
+each second. At most four clients are served; a slow client or a command line over
+1 KiB disconnects that client. A second running copy leaves the socket to the
+first, and a non-socket file at that path is never replaced. No network port is
+opened. See `docs/TELEMETRY.md` and the CLI's `telemetry` and `tune` commands.
+
+## Viewer shortcuts and reconnects
+
+`ml_input_keeps_local` names the chords that stay on the viewing Mac while it
+captures system shortcuts such as ⌘-Tab for the remote Mac: Force Quit, Lock
+Screen and full screen. `ml_reconnect_delay_ms` is the viewer's bounded
+automatic-reconnect backoff: five attempts, 0.5 s to 8 s apart, with a fresh
+budget after a session stays connected for 20 s.
 
 ## Lifecycle
 
@@ -101,6 +124,6 @@ primitives.
 
 Run `cargo test -p maclink-session` for loopback authentication, duplex transfer,
 tamper/replay, framing, direction and rate policy, idle limits, typed wire formats,
-input state, pairing, the peer store and the C ABI. `scripts/test-native.sh` covers
+input state, pairing, the peer store, telemetry and its local socket, and the C ABI. `scripts/test-native.sh` covers
 the Swift side of the boundary and a hardware-codec loopback stream. These tests do
 not establish real-network performance or streaming quality.

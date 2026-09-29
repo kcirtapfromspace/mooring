@@ -13,6 +13,7 @@ enum NativeSessionMessage {
     case video(NativeVideoPacket)
     case input(NativeInputEvent)
     case control(NativeControlMessage)
+    case telemetry(NativeTelemetry)
 }
 
 /// Blocking Rust I/O is called only from dedicated network queues. Registry IDs
@@ -27,7 +28,7 @@ final class NativeTransport: @unchecked Sendable {
     private var id: UInt64 { lock.lock(); defer { lock.unlock() }; return handle }
     static func check(_ status: Int32) throws {
         guard status == 0 else {
-            throw NativeSessionError(message: String(cString: ml_session_error_string(status)))
+            throw NativeSessionError(message: String(cString: ml_session_error_string(status)), status: status)
         }
     }
     static func listen(identity: NativeHostIdentity, bindAddress: String = "0.0.0.0", port: UInt16 = 45900) throws -> NativeTransport {
@@ -65,13 +66,16 @@ final class NativeTransport: @unchecked Sendable {
         try Self.check(result)
         return NativeTransport(session, receivesVideo: false)
     }
-    func send(_ message: NativeSessionMessage, timeout: UInt32 = 3_000) throws {
+    /// A write that cannot finish within the timeout ends the session. Brief
+    /// Wi-Fi stalls are longer than 3 s; the 10 s idle limit still ends a dead link.
+    func send(_ message: NativeSessionMessage, timeout: UInt32 = 8_000) throws {
         let session = id
         let status: Int32
         switch message {
         case .video(let packet): status = packet.withFrame { ml_session_send_video(session, $0, timeout) }
         case .input(let event): var raw = event.raw; status = ml_session_send_input(session, &raw, timeout)
         case .control(let control): var raw = control.raw; status = ml_session_send_control(session, &raw, timeout)
+        case .telemetry(let telemetry): var raw = telemetry.raw; status = ml_session_send_telemetry(session, &raw, timeout)
         }
         try Self.check(status)
     }
@@ -96,6 +100,7 @@ final class NativeTransport: @unchecked Sendable {
                                             avcc: slice(packet.avcc_offset, packet.avcc_length)))
         case ML_SESSION_INPUT: return .input(try NativeInputEvent(message.input))
         case ML_SESSION_CONTROL: return .control(try NativeControlMessage(validated: message.control))
+        case ML_SESSION_TELEMETRY: return .telemetry(try NativeTelemetry(validated: message.telemetry))
         default:
             close(); throw NativeSessionError(message: "The peer sent an unsupported message.")
         }

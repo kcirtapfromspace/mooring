@@ -68,6 +68,33 @@ The pointer, Connections list, power assertions and session-ended overlay are Ap
 
 Apple accepted the preview 2 build as submission `28240f8a-2fc0-4079-97e9-92d24f05ceb2` with no issues. The final extracted arm64 ZIP passed strict signature, stapled-ticket and Gatekeeper validation as Notarized Developer ID.
 
+## Telemetry, automatic sharing and reconnection
+
+For `v0.3.0-preview.3`, the complete local validation script passed with 145 Rust tests (76 session, 10 CLI) and every native Swift suite. New Rust checks cover:
+
+- the telemetry wire format and every tuning bound;
+- the direction rule that only viewers tune;
+- the owner-only socket folder, its client and per-line limits, commands from clients that close immediately, and stale-file handling;
+- the bounded reconnect backoff;
+- the chords that stay on the viewing Mac.
+
+The encrypted hardware loopback now carries stats both ways and a tuning command to the host. The session suite drives the real `maclink telemetry` and `tune` commands against the app's socket.
+
+Automatic sharing, ⌘-Tab capture through an event tap, reconnection in the same window, and capture restarts for a new width are AppKit and ScreenCaptureKit behavior, verified here only by compilation and by the Swift boundary checks. They need the two-Mac checks in the testing guide. The cause of the preview 2 disconnects is not yet known. This build logs every session end with MacLink's reason and reports it in telemetry.
+
+Review made these corrections before release:
+
+- automatic sharing no longer resumes while the display sleeps;
+- automatic reconnects no longer take focus;
+- held keys are released when macOS interrupts the shortcut tap;
+- reconnects no longer rewrite saved pairings;
+- a pairing to a different Mac starts a fresh reconnect budget;
+- view-only sessions keep Command shortcuts local;
+- a retired capture's cancellation can no longer end a session during a width change;
+- width changes restart capture at most once a second;
+- encoder counters no longer go backward after a restart;
+- telemetry commands from clients that disconnect immediately still apply.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

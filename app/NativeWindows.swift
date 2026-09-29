@@ -7,46 +7,49 @@ final class NativeShareWindow: NSWindowController, NSWindowDelegate {
     var onReset: (() -> Void)?
     var onControlPermission: (() -> Void)?
     var onDiagnostics: (() -> Void)?
-    var onClose: (() -> Void)?
+    var onAutomaticChange: ((Bool) -> Void)?
     let status = label("Sharing is off", size: 14, weight: .medium)
     let detail = label("Start sharing, then copy the pairing code to MacLink on your other Mac.", color: .secondaryLabelColor)
     let toggle = NSButton(title: "Start Sharing", target: nil, action: nil)
     let copy = NSButton(title: "Copy Pairing Code", target: nil, action: nil)
     let control = NSButton(title: "Enable Keyboard & Mouse…", target: nil, action: nil)
+    let automatic = NSButton(checkboxWithTitle: "Share this Mac automatically", target: nil, action: nil)
 
     init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 335),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 420),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Share This Mac"
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
         let title = label("Your Mac, wherever you work", size: 22, weight: .semibold)
-        let note = label("Pairing allows viewing and, when enabled, keyboard and mouse control. Keep the code private. Closing this window stops sharing.", size: 12, color: .secondaryLabelColor)
+        let note = label("Pairing allows viewing and, when enabled, keyboard and mouse control. Keep the code private. Sharing continues after you close this window; stop it here or from the menu bar.", size: 12, color: .secondaryLabelColor)
+        let automaticNote = label("Starts sharing when MacLink opens and resumes after sleep or lock. To share after you log in, turn on Launch MacLink at login in Settings.", size: 12, color: .secondaryLabelColor)
         let reset = NSButton(title: "Reset Pairing", target: self, action: #selector(resetPairing))
         let diagnostics = NSButton(title: "Save Diagnostics…", target: self, action: #selector(saveDiagnostics))
         toggle.target = self; toggle.action = #selector(toggleSharing); toggle.keyEquivalent = "\r"
         copy.target = self; copy.action = #selector(copyCode); copy.isEnabled = false
         control.target = self; control.action = #selector(enableControl)
+        automatic.target = self; automatic.action = #selector(changeAutomatic)
         for button in [toggle, copy, control, reset, diagnostics] { button.bezelStyle = .rounded }
         let actions = stack([toggle, copy], orientation: .horizontal, spacing: 10)
         let extras = stack([reset, diagnostics], orientation: .horizontal, spacing: 10)
-        let body = stack([title, status, detail, actions, control, note, extras], spacing: 15)
+        let body = stack([title, status, detail, actions, control, stack([automatic, automaticNote], spacing: 4), note, extras], spacing: 15)
         let root = window.contentView!; root.addSubview(body)
         NSLayoutConstraint.activate([
             body.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 26),
             body.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -26),
             body.topAnchor.constraint(equalTo: root.topAnchor, constant: 24)
         ])
-        for view in [title, detail, note] { view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
+        for view in [title, detail, note, automaticNote] { view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     @objc private func toggleSharing() { onToggle?() }
+    @objc private func changeAutomatic() { onAutomaticChange?(automatic.state == .on) }
     @objc private func copyCode() { onCopy?() }
     @objc private func resetPairing() { onReset?() }
     @objc private func enableControl() { onControlPermission?() }
     @objc private func saveDiagnostics() { onDiagnostics?() }
-    func windowWillClose(_ notification: Notification) { onClose?() }
 }
 
 final class NativePairWindow: NSWindowController, NSWindowDelegate {
@@ -95,6 +98,9 @@ final class NativeRemoteView: NativeVideoView {
     var onReleaseInput: (() -> Void)?
     /// Hides this Mac's pointer over the video when the remote pointer is in it.
     var hidesLocalCursor = false { didSet { if hidesLocalCursor != oldValue { window?.invalidateCursorRects(for: self) } } }
+    /// Command chords go to the remote Mac only while it accepts control; in a
+    /// view-only session ⌘W and the menu shortcuts act on this Mac.
+    var forwardsCommandKeys = false
     private static let invisibleCursor = NSCursor(image: NSImage(size: NSSize(width: 16, height: 16), flipped: false) { _ in true },
                                                   hotSpot: .zero)
     private var tracking: NSTrackingArea?
@@ -130,10 +136,11 @@ final class NativeRemoteView: NativeVideoView {
     override func otherMouseUp(with event: NSEvent) { onInput?(event) }
     override func scrollWheel(with event: NSEvent) { onInput?(event) }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        // Keep the macOS full-screen escape chord local; other Command chords
-        // belong to the remote desktop while this view has keyboard focus.
-        if event.modifierFlags.contains([.command, .control]) && event.keyCode == 3 { return false }
-        guard window?.firstResponder === self, event.type == .keyDown,
+        // Force Quit, Lock Screen and full-screen chords stay on this Mac; other
+        // Command chords belong to the remote desktop while this view has focus.
+        if event.type == .keyDown,
+           NativeSystemKeyCapture.keepsLocal(keyCode: event.keyCode, modifiers: .from(event.modifierFlags)) { return false }
+        guard forwardsCommandKeys, window?.firstResponder === self, event.type == .keyDown,
               event.modifierFlags.contains(.command) else { return false }
         onInput?(event); return true
     }
@@ -142,13 +149,28 @@ final class NativeRemoteView: NativeVideoView {
 final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
     let video = NativeRemoteView(frame: .zero, device: MTLCreateSystemDefaultDevice())
     let status = label("Connecting…", size: 12, color: .secondaryLabelColor)
+    /// The paired Mac this window shows; reconnecting reuses the window.
+    let peerID: String
     var onClose: (() -> Void)?
     var onReleaseInput: (() -> Void)?
     var onDiagnostics: (() -> Void)?
     var onReconnect: (() -> Void)?
+    var onCancelReconnect: (() -> Void)?
+    var onAllowSystemKeys: (() -> Void)?
+    /// Set once the window closes; a closed window is never reused.
+    private(set) var isClosed = false
+    /// Full screen is entered for the first picture only, so a reconnect keeps
+    /// the user's own choice.
+    var hasShownVideo = false
     private let ended = NSVisualEffectView()
+    private let endedTitle = label("Session ended", size: 17, weight: .semibold)
     private let endedReason = label("", size: 13, color: .secondaryLabelColor)
-    init(name: String) {
+    private let reconnectButton = NSButton(title: "Reconnect", target: nil, action: nil)
+    private let closeButton = NSButton(title: "Close", target: nil, action: nil)
+    private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
+    private let allowSystemKeys = NSButton(title: "Allow ⌘-Tab…", target: nil, action: nil)
+    init(name: String, peerID: String) {
+        self.peerID = peerID
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
         window.title = name + " — MacLink"
@@ -162,7 +184,10 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
         root.addSubview(video)
         let diagnostics = NSButton(title: "Diagnostics…", target: self, action: #selector(saveDiagnostics))
         diagnostics.bezelStyle = .inline
-        let bar = stack([status, NSView(), diagnostics], orientation: .horizontal, spacing: 12)
+        allowSystemKeys.target = self; allowSystemKeys.action = #selector(allowKeys); allowSystemKeys.bezelStyle = .inline
+        allowSystemKeys.toolTip = "Allow MacLink in Accessibility on this Mac to send ⌘-Tab and other system shortcuts to the remote Mac."
+        allowSystemKeys.isHidden = true
+        let bar = stack([status, NSView(), allowSystemKeys, diagnostics], orientation: .horizontal, spacing: 12)
         root.addSubview(bar)
         NSLayoutConstraint.activate([
             video.leadingAnchor.constraint(equalTo: root.leadingAnchor), video.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -179,13 +204,13 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
         ended.material = .hudWindow; ended.blendingMode = .withinWindow; ended.state = .active
         ended.wantsLayer = true; ended.layer?.cornerRadius = 14
         ended.translatesAutoresizingMaskIntoConstraints = false; ended.isHidden = true
-        let reconnect = NSButton(title: "Reconnect", target: self, action: #selector(reconnect))
-        reconnect.bezelStyle = .rounded; reconnect.keyEquivalent = "\r"
-        let close = NSButton(title: "Close", target: self, action: #selector(closeWindow))
-        close.bezelStyle = .rounded
+        reconnectButton.target = self; reconnectButton.action = #selector(reconnect); reconnectButton.keyEquivalent = "\r"
+        closeButton.target = self; closeButton.action = #selector(closeWindow)
+        cancelButton.target = self; cancelButton.action = #selector(cancelReconnect)
+        for button in [reconnectButton, closeButton, cancelButton] { button.bezelStyle = .rounded }
         endedReason.alignment = .center
-        let content = stack([label("Session ended", size: 17, weight: .semibold), endedReason,
-                             stack([close, reconnect], orientation: .horizontal, spacing: 10)], spacing: 12)
+        let content = stack([endedTitle, endedReason,
+                             stack([closeButton, cancelButton, reconnectButton], orientation: .horizontal, spacing: 10)], spacing: 12)
         content.alignment = .centerX
         ended.addSubview(content)
         root.addSubview(ended)
@@ -201,12 +226,28 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     func showEnded(reason: String) {
-        endedReason.stringValue = reason
+        showOverlay(title: "Session ended", reason: reason, reconnecting: false)
+    }
+    /// Shown between automatic attempts; Cancel stops them.
+    func showReconnecting(reason: String, attempt: Int, of attempts: Int) {
+        showOverlay(title: "Reconnecting…", reason: "\(reason)\nAttempt \(attempt) of \(attempts).", reconnecting: true)
+    }
+    /// A connect started from this window; Cancel stops it.
+    func showConnecting() { showOverlay(title: "Connecting…", reason: endedReason.stringValue, reconnecting: true) }
+    func hideOverlay() { ended.isHidden = true }
+    var isReconnecting: Bool { !ended.isHidden && !cancelButton.isHidden }
+    func setSystemKeysAllowed(_ allowed: Bool) { allowSystemKeys.isHidden = allowed }
+    private func showOverlay(title: String, reason: String, reconnecting: Bool) {
+        endedTitle.stringValue = title; endedReason.stringValue = reason
+        cancelButton.isHidden = !reconnecting
+        reconnectButton.isHidden = reconnecting; closeButton.isHidden = reconnecting
         ended.isHidden = false
     }
     @objc private func reconnect() { onReconnect?() }
+    @objc private func cancelReconnect() { onCancelReconnect?() }
+    @objc private func allowKeys() { onAllowSystemKeys?() }
     @objc private func closeWindow() { window?.performClose(nil) }
-    func windowWillClose(_ notification: Notification) { onClose?() }
+    func windowWillClose(_ notification: Notification) { isClosed = true; onClose?() }
     func windowDidResignKey(_ notification: Notification) { onReleaseInput?() }
     func windowDidMiniaturize(_ notification: Notification) { onReleaseInput?() }
     @objc private func saveDiagnostics() { onDiagnostics?() }

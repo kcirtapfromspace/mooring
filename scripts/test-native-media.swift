@@ -141,6 +141,7 @@ struct NativeMediaTests {
         try testRecovery(encoded)
         try testOverflow(encoded)
         try testFailureBudget(encoded)
+        try testInFlightLimit()
         let inspected = try inspectBitstream(packets)
         let stopped = DispatchSemaphore(value: 0)
         encoder.stop { stopped.signal() }
@@ -204,6 +205,23 @@ struct NativeMediaTests {
         try require(decoder.decode(frames[60].packet), "Recovery keyframe occupies the one pending slot")
         resume.signal()
         try require(recovered.wait(timeout: .now() + 3) == .success, "Overflow recovers with IDR")
+    }
+    /// Live tuning can serialize encoding and sending again.
+    static func testInFlightLimit() throws {
+        let encoder = try NativeVideoEncoder(width: 640, height: 360)
+        let output = DispatchSemaphore(value: 0), lock = NSLock()
+        var held: [() -> Void] = []
+        defer { encoder.stop() }
+        encoder.onEncodedFrame = { _, release in lock.lock(); held.append(release); lock.unlock(); output.signal() }
+        encoder.setInFlightLimit(1)
+        let pixels = try image(index: 0, width: 640, height: 360)
+        try require(encoder.encode(pixels, presentationTime: CMTime(value: 0, timescale: 60)), "First frame admission")
+        try require(output.wait(timeout: .now() + 5) == .success, "Small hardware encode")
+        try require(!encoder.encode(pixels, presentationTime: CMTime(value: 1, timescale: 60)), "A limit of one refuses a second frame")
+        lock.lock(); held.forEach { $0() }; held = []; lock.unlock()
+        try require(encoder.encode(pixels, presentationTime: CMTime(value: 2, timescale: 60)), "Releasing the send admits the next frame")
+        try require(output.wait(timeout: .now() + 5) == .success, "Second small hardware encode")
+        lock.lock(); held.forEach { $0() }; lock.unlock()
     }
     /// A keyframe whose header disagrees with its parameter sets always fails.
     static func testFailureBudget(_ frames: [NativeEncodedFrame]) throws {

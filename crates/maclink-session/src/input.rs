@@ -48,6 +48,25 @@ pub(crate) fn is_modifier_key(code: u16) -> bool {
     matches!(code, 54..=63)
 }
 
+/// While the viewer captures system shortcuts such as ⌘-Tab for the remote
+/// Mac, these stay on the viewing Mac as an escape hatch: Force Quit (⌘⌥Esc,
+/// with or without ⇧), Lock Screen (⌃⌘Q), and full screen (⌃⌘F or Globe-F).
+/// Caps Lock is ignored.
+pub(crate) fn keeps_local(key_code: u16, modifiers: u32) -> bool {
+    const SHIFT: u32 = 1;
+    const CONTROL: u32 = 2;
+    const OPTION: u32 = 4;
+    const COMMAND: u32 = 8;
+    const FUNCTION: u32 = 32;
+    let held = modifiers & (SHIFT | CONTROL | OPTION | COMMAND | FUNCTION);
+    match key_code {
+        53 => held == COMMAND | OPTION || held == COMMAND | OPTION | SHIFT, // Escape
+        12 => held == CONTROL | COMMAND,                                    // Q
+        3 => held == CONTROL | COMMAND || held == FUNCTION,                 // F
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct InputEvent {
     pub kind: InputKind,
@@ -600,6 +619,34 @@ mod tests {
         );
         state.commit();
         assert_eq!(state.release_all(), [key(InputKind::KeyUp, 4)]);
+    }
+
+    #[test]
+    fn only_the_escape_hatch_shortcuts_stay_local() {
+        let (shift, control, option, command, caps, function) = (1, 2, 4, 8, 16, 32);
+        for (code, modifiers) in [
+            (53, command | option),
+            (53, command | option | shift),
+            (53, command | option | caps),
+            (12, control | command),
+            (3, control | command),
+            (3, function),
+        ] {
+            assert!(keeps_local(code, modifiers), "{code} {modifiers}");
+        }
+        for (code, modifiers) in [
+            (48, command), // ⌘-Tab goes to the remote Mac
+            (48, command | shift),
+            (49, command), // ⌘-Space
+            (53, 0),       // Escape alone
+            (53, command),
+            (12, command), // ⌘-Q quits the remote app
+            (3, command),  // ⌘-F finds on the remote Mac
+            (3, control | command | shift),
+            (123, control), // ⌃← switches remote Spaces
+        ] {
+            assert!(!keeps_local(code, modifiers), "{code} {modifiers}");
+        }
     }
 
     #[test]

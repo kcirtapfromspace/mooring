@@ -500,7 +500,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
 
     @objc private func connectNative() { native.showConnect() }
     @objc private func shareNative() { native.showShare() }
-    @objc private func stopNativeSharing() { native.stopSharing() }
+    @objc private func stopNativeSharing() { native.stopSharingByUser() }
     @objc private func connectNativePeer(_ sender: NSMenuItem) {
         if let id = sender.representedObject as? String { native.connect(peerID: id) }
     }

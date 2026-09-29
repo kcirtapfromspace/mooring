@@ -20,6 +20,8 @@ struct NativeStreamIntegration {
         let accepted = DispatchSemaphore(value: 0)
         let decoded = DispatchSemaphore(value: 0)
         let returnedControl = DispatchSemaphore(value: 0)
+        let receivedStats = DispatchSemaphore(value: 0)
+        let receivedTuning = DispatchSemaphore(value: 0)
         let writer = DispatchQueue(label: "native-test-writer")
         func fail(_ message: String) { lock.lock(); if error == nil { error = message }; lock.unlock(); decoded.signal(); returnedControl.signal(); accepted.signal() }
     }
@@ -64,9 +66,11 @@ struct NativeStreamIntegration {
                 guard let server = try listener.accept() else { state.fail("Accept timed out"); return }
                 state.server = server; state.accepted.signal()
                 while token.isActive {
-                    if let message = try server.receive() {
-                        guard case .input(let event) = message, event.kind == .releaseAll else { state.fail("Unexpected return control"); return }
-                        state.returnedControl.signal()
+                    switch try server.receive() {
+                    case .input(let event)? where event.kind == .releaseAll: state.returnedControl.signal()
+                    case .telemetry(.tuning(let tuning))? where tuning.fps == 30: state.receivedTuning.signal()
+                    case nil: continue
+                    default: state.fail("Unexpected return message"); return
                     }
                 }
             } catch { if token.isActive { state.fail(error.localizedDescription) } }
@@ -102,6 +106,7 @@ struct NativeStreamIntegration {
                     guard let message = try client.receive() else { continue }
                     switch message {
                     case .control(.geometry): continue
+                    case .telemetry(.stats(let stats)) where stats[.captureFps] == 60: state.receivedStats.signal()
                     case .video(let packet):
                         _ = decoder.decode(packet)
                         // An ordinary typed event, never passed to CGEvent injection.
@@ -128,6 +133,12 @@ struct NativeStreamIntegration {
         }
         state.writer.sync {}
         let elapsed = ProcessInfo.processInfo.systemUptime - began
+        // Live telemetry crosses the same encrypted session: stats to the viewer, tuning to the host.
+        try server.send(.telemetry(.stats([.captureFps: 60, .encodeMs: 9.5])))
+        try require(state.receivedStats.wait(timeout: .now() + 5) == .success, "Host stats reach the viewer")
+        var tuning = MLTuning(); tuning.fps = 30
+        try client.send(.telemetry(.tuning(NativeTuning(raw: tuning))))
+        try require(state.receivedTuning.wait(timeout: .now() + 5) == .success, "Viewer tuning reaches the host")
         try require(state.frames == total && encoder.snapshot.encoded_frames == total && decoder.hardwareDecoder, "Incomplete native pipeline")
         let sorted = state.roundTripMS.sorted(), encodes = state.encodeMS.sorted()
         let report: [String: Any] = ["kind": "synthetic encrypted loopback, not display/input latency", "frames": state.frames,
@@ -140,7 +151,7 @@ struct NativeStreamIntegration {
         let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
         let path = CommandLine.arguments.dropFirst().first ?? "target/native-stream-loopback.json"
         try data.write(to: URL(fileURLWithPath: path), options: .atomic)
-        print("Native encrypted stream: \(total)/\(total) 1080p frames and return controls; hardware decode verified. Report: \(path)")
+        print("Native encrypted stream: \(total)/\(total) 1080p frames, return controls and live telemetry both ways; hardware decode verified. Report: \(path)")
         token.cancel(); client.close(); server.close()
     }
 }

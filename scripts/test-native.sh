@@ -20,7 +20,7 @@ target/maclink-native-privacy-tests
 
 # Native session code validates through the arm64 Rust static library. These
 # checks use synthetic pixels, in-process events and loopback only.
-MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release -p maclink-session --target aarch64-apple-darwin
+MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release -p maclink-session -p maclink-cli --target aarch64-apple-darwin
 bridge=(-import-objc-header crates/maclink-session/include/maclink_session.h -L target/aarch64-apple-darwin/release -lmaclink_session)
 media_frameworks=(-framework AppKit -framework Security -framework ScreenCaptureKit -framework VideoToolbox
   -framework CoreMedia -framework CoreVideo -framework Metal -framework MetalKit -framework CoreImage -framework CoreText)
@@ -39,5 +39,6 @@ swiftc -swift-version 5 -warnings-as-errors -parse-as-library -target arm64-appl
   app/NativePairing.swift app/NativeTransport.swift app/NativeSessionState.swift app/NativeMedia.swift \
   app/NativePrivacyGuard.swift app/NativeInput.swift \
   scripts/test-native-session.swift -o target/maclink-native-session-tests
-target/maclink-native-session-tests
+# The session check drives the real CLI against the app's local telemetry socket.
+target/maclink-native-session-tests target/aarch64-apple-darwin/release/maclink
 ./scripts/test-native-stream.sh

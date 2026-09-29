@@ -20,6 +20,8 @@ final class NativePrivacyGuard {
     static func mayShareNow() -> Bool {
         sessionIsEligible(CGSessionCopyCurrentDictionary() as? [String: Any])
     }
+    /// Display sleep stops sharing, so automatic sharing waits for it to end.
+    static var displayIsAwake: Bool { CGDisplayIsAsleep(CGMainDisplayID()) == 0 }
     /// Pure classifier used by permission-free tests. Missing/ill-typed public
     /// session state fails closed; any present lock flag must be exactly false.
     static func sessionIsEligible(_ session: [String: Any]?) -> Bool {

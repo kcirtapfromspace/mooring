@@ -4,9 +4,14 @@
 //! Swift converts between Apple types and these fixed-layout structs only.
 
 use crate::control::{ControlMessage, DisplayGeometry};
-use crate::input::{InputEvent, InputReducer, MAX_RELEASES};
+use crate::input::{InputEvent, InputReducer, MAX_RELEASES, keeps_local};
 use crate::pairing::{PairingCode, normalize_address};
 use crate::peers::{MAX_PEERS, Peer, PeerStore};
+use crate::policy::{RECONNECT_DELAYS, RECONNECT_STABLE, reconnect_delay};
+use crate::telemetry::{
+    MAX_METRICS, Metric, Server, Snapshot, Stats, TelemetryMessage, Tuning, validate_reason,
+    validate_stats,
+};
 use crate::transport::{self, Handle, Incoming, Listener, Outgoing, deadline};
 use crate::video::{VideoFrame, VideoHeader, valid_dimensions};
 use crate::{Error, Result};
@@ -14,7 +19,7 @@ use std::ffi::{CStr, c_char};
 use std::net::{IpAddr, SocketAddr};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use zeroize::{Zeroize, Zeroizing};
 
 pub const ML_TEXT_CAPACITY: usize = 256;
@@ -95,6 +100,69 @@ pub struct MLSessionMessage {
     pub video: MLVideoPacket,
     pub input: MLInputEvent,
     pub control: MLControlMessage,
+    pub telemetry: MLTelemetryMessage,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MLMetric {
+    pub metric: u8,
+    pub reserved: [u8; 7],
+    pub value: f64,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MLTuning {
+    pub bitrate_kbps: u32,
+    pub max_width: u32,
+    pub fps: u8,
+    pub in_flight: u8,
+    pub keyframe_seconds: u8,
+    pub reserved: [u8; 5],
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MLTelemetryMessage {
+    pub kind: u8,
+    pub count: u8,
+    pub reserved: [u8; 6],
+    pub tuning: MLTuning,
+    pub metrics: [MLMetric; MAX_METRICS],
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct MLTelemetrySnapshot {
+    pub role: u8,
+    pub local_count: u8,
+    pub peer_count: u8,
+    pub reserved: [u8; 5],
+    pub session_seconds: f64,
+    /// Negative when no peer measurements have arrived.
+    pub peer_age_seconds: f64,
+    pub tuning: MLTuning,
+    pub local: [MLMetric; MAX_METRICS],
+    pub peer: [MLMetric; MAX_METRICS],
+    /// Seconds since the latest session ended; ignored when `last_end` is empty.
+    pub last_end_age_seconds: f64,
+    /// Why the latest session on this Mac ended; empty when none has.
+    pub last_end: [c_char; ML_REASON_CAPACITY],
+}
+pub const ML_REASON_CAPACITY: usize = 160;
+impl Default for MLTelemetrySnapshot {
+    fn default() -> Self {
+        Self {
+            role: 0,
+            local_count: 0,
+            peer_count: 0,
+            reserved: [0; 5],
+            session_seconds: 0.0,
+            peer_age_seconds: -1.0,
+            tuning: MLTuning::default(),
+            local: [MLMetric::default(); MAX_METRICS],
+            peer: [MLMetric::default(); MAX_METRICS],
+            last_end_age_seconds: 0.0,
+            last_end: [0; ML_REASON_CAPACITY],
+        }
+    }
 }
 #[repr(C)]
 pub struct MLPairingCode {
@@ -117,6 +185,20 @@ pub struct MLInputState(Mutex<InputReducer>);
 const _: () = {
     use std::mem::{offset_of, size_of};
     assert!(size_of::<MLDisplayGeometry>() == 40);
+    assert!(size_of::<MLMetric>() == 16);
+    assert!(offset_of!(MLMetric, value) == 8);
+    assert!(size_of::<MLTuning>() == 16);
+    assert!(offset_of!(MLTuning, fps) == 8);
+    assert!(size_of::<MLTelemetryMessage>() == 536);
+    assert!(offset_of!(MLTelemetryMessage, tuning) == 8);
+    assert!(offset_of!(MLTelemetryMessage, metrics) == 24);
+    assert!(size_of::<MLTelemetrySnapshot>() == 1232);
+    assert!(offset_of!(MLTelemetrySnapshot, last_end_age_seconds) == 1064);
+    assert!(offset_of!(MLTelemetrySnapshot, last_end) == 1072);
+    assert!(offset_of!(MLTelemetrySnapshot, tuning) == 24);
+    assert!(offset_of!(MLTelemetrySnapshot, local) == 40);
+    assert!(offset_of!(MLTelemetrySnapshot, peer) == 552);
+    assert!(offset_of!(MLSessionMessage, telemetry) == 192);
     assert!(offset_of!(MLDisplayGeometry, pixel_width) == 32);
     assert!(size_of::<MLControlMessage>() == 56);
     assert!(offset_of!(MLControlMessage, ping_id) == 40);
@@ -139,7 +221,7 @@ const _: () = {
     assert!(size_of::<MLVideoPacket>() == 80);
     assert!(offset_of!(MLVideoPacket, sps_offset) == 32);
     assert!(offset_of!(MLVideoPacket, avcc_length) == 72);
-    assert!(size_of::<MLSessionMessage>() == 192);
+    assert!(size_of::<MLSessionMessage>() == 728);
     assert!(offset_of!(MLSessionMessage, video) == 8);
     assert!(offset_of!(MLSessionMessage, input) == 88);
     assert!(offset_of!(MLSessionMessage, control) == 136);
@@ -237,6 +319,79 @@ fn input_out(event: &InputEvent) -> MLInputEvent {
         is_repeat: event.is_repeat.into(),
         reserved: [0; 6],
     }
+}
+fn stats_in(metrics: &[MLMetric], count: u8) -> Result<Stats> {
+    let stats = metrics
+        .get(..usize::from(count))
+        .ok_or(Error::Invalid)?
+        .iter()
+        .map(
+            |entry| match (Metric::from_raw(entry.metric), entry.reserved) {
+                (Some(metric), [0, 0, 0, 0, 0, 0, 0]) => Ok((metric, entry.value)),
+                _ => Err(Error::Invalid),
+            },
+        )
+        .collect::<Result<Stats>>()?;
+    validate_stats(&stats)?;
+    Ok(stats)
+}
+fn stats_out(stats: &Stats, out: &mut [MLMetric; MAX_METRICS]) -> u8 {
+    for (slot, (metric, value)) in out.iter_mut().zip(stats) {
+        *slot = MLMetric {
+            metric: *metric as u8,
+            reserved: [0; 7],
+            value: *value,
+        };
+    }
+    stats.len() as u8
+}
+fn tuning_in(raw: &MLTuning) -> Result<Tuning> {
+    if raw.reserved != [0; 5] {
+        return Err(Error::Invalid);
+    }
+    let tuning = Tuning {
+        bitrate_kbps: raw.bitrate_kbps,
+        max_width: raw.max_width,
+        fps: raw.fps,
+        in_flight: raw.in_flight,
+        keyframe_seconds: raw.keyframe_seconds,
+    };
+    tuning.validate()?;
+    Ok(tuning)
+}
+fn tuning_out(tuning: Tuning) -> MLTuning {
+    MLTuning {
+        bitrate_kbps: tuning.bitrate_kbps,
+        max_width: tuning.max_width,
+        fps: tuning.fps,
+        in_flight: tuning.in_flight,
+        keyframe_seconds: tuning.keyframe_seconds,
+        reserved: [0; 5],
+    }
+}
+fn telemetry_in(raw: &MLTelemetryMessage) -> Result<TelemetryMessage> {
+    if raw.reserved != [0; 6] {
+        return Err(Error::Invalid);
+    }
+    match raw.kind {
+        1 => Ok(TelemetryMessage::Stats(stats_in(&raw.metrics, raw.count)?)),
+        2 if raw.count == 0 => Ok(TelemetryMessage::Tuning(tuning_in(&raw.tuning)?)),
+        _ => Err(Error::Invalid),
+    }
+}
+fn telemetry_out(message: &TelemetryMessage) -> MLTelemetryMessage {
+    let mut out = MLTelemetryMessage::default();
+    match message {
+        TelemetryMessage::Stats(stats) => {
+            out.kind = 1;
+            out.count = stats_out(stats, &mut out.metrics);
+        }
+        TelemetryMessage::Tuning(tuning) => {
+            out.kind = 2;
+            out.tuning = tuning_out(*tuning);
+        }
+    }
+    out
 }
 fn header(raw: &MLVideoHeader) -> Result<VideoHeader> {
     if raw.reserved != [0; 7] || raw.keyframe > 1 {
@@ -568,6 +723,20 @@ pub unsafe extern "C" fn ml_session_send_control(
         transport::session(id)?.send_message(&Outgoing::Control(value), deadline(timeout_ms)?)
     })
 }
+/// Both sides may send stats; only the viewer may send tuning.
+/// # Safety
+/// `message` must be readable during the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_session_send_telemetry(
+    id: u64,
+    message: *const MLTelemetryMessage,
+    timeout_ms: u32,
+) -> i32 {
+    ffi(|| {
+        let value = telemetry_in(unsafe { input_ref(message)? })?;
+        transport::session(id)?.send_message(&Outgoing::Telemetry(value), deadline(timeout_ms)?)
+    })
+}
 /// # Safety
 /// `out` must be writable; a non-null `video_buffer` writable for `capacity`
 /// bytes and not aliased by another call.
@@ -615,6 +784,10 @@ pub unsafe extern "C" fn ml_session_receive(
                 out.kind = crate::policy::CONTROL;
                 out.control = control_out(&message);
             }
+            Incoming::Telemetry(message) => {
+                out.kind = crate::policy::TELEMETRY;
+                out.telemetry = telemetry_out(&message);
+            }
         }
         Ok(())
     })
@@ -655,6 +828,27 @@ pub unsafe extern "C" fn ml_video_frame_validate(value: *const MLVideoFrame) -> 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ml_input_event_validate(event: *const MLInputEvent) -> i32 {
     ffi(|| input(unsafe { input_ref(event)? }).map(|_| ()))
+}
+
+/// 1 when this key and modifier combination stays on the viewing Mac even
+/// while it captures system shortcuts for the remote Mac, otherwise 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn ml_input_keeps_local(key_code: u16, modifiers: u32) -> i32 {
+    i32::from(keeps_local(key_code, modifiers))
+}
+
+pub const ML_RECONNECT_ATTEMPTS: u32 = 5;
+pub const ML_RECONNECT_STABLE_SECONDS: u32 = 20;
+const _: () = assert!(RECONNECT_DELAYS.len() == ML_RECONNECT_ATTEMPTS as usize);
+const _: () = assert!(RECONNECT_STABLE.as_secs() == ML_RECONNECT_STABLE_SECONDS as u64);
+
+/// Milliseconds to wait before automatic viewer reconnect `attempt`
+/// (1-based), or `ML_SESSION_INVALID` once the bounded budget is spent.
+#[unsafe(no_mangle)]
+pub extern "C" fn ml_reconnect_delay_ms(attempt: u32) -> i32 {
+    reconnect_delay(attempt)
+        .and_then(|delay| i32::try_from(delay.as_millis()).ok())
+        .unwrap_or(Error::Invalid as i32)
 }
 
 // Host input state.
@@ -990,6 +1184,140 @@ pub unsafe extern "C" fn ml_peers_import_legacy(
         if let Some(imported) = unsafe { imported.as_mut() } {
             *imported = count;
         }
+        Ok(())
+    })
+}
+
+// Local telemetry socket: owner-only, in the MacLink data directory.
+
+fn telemetry_server() -> &'static Mutex<Option<Arc<Server>>> {
+    static SERVER: OnceLock<Mutex<Option<Arc<Server>>>> = OnceLock::new();
+    SERVER.get_or_init(|| Mutex::new(None))
+}
+/// Start serving `telemetry.sock`; a no-op when already serving. BUSY means
+/// another MacLink process already serves it.
+/// # Safety
+/// `directory` null (MACLINK_HOME or Application Support) or NUL terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_telemetry_start(directory: *const c_char) -> i32 {
+    ffi(|| {
+        let mut server = telemetry_server().lock().map_err(|_| Error::Internal)?;
+        if server.is_some() {
+            return Ok(());
+        }
+        let directory = if directory.is_null() {
+            maclink_platform::support_directory().map_err(|_| Error::Storage)?
+        } else {
+            PathBuf::from(unsafe { text(directory)? })
+        };
+        *server = Some(Server::start(&directory)?);
+        Ok(())
+    })
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn ml_telemetry_stop() -> i32 {
+    ffi(|| {
+        if let Some(server) = telemetry_server()
+            .lock()
+            .map_err(|_| Error::Internal)?
+            .take()
+        {
+            server.stop();
+        }
+        Ok(())
+    })
+}
+/// Send one snapshot line to every connected local client.
+/// # Safety
+/// `snapshot` must be readable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_telemetry_publish(snapshot: *const MLTelemetrySnapshot) -> i32 {
+    ffi(|| {
+        let raw = unsafe { input_ref(snapshot)? };
+        let role = match raw.role {
+            0 => "idle",
+            1 => "host",
+            2 => "viewer",
+            _ => return Err(Error::Invalid),
+        };
+        if raw.reserved != [0; 5] {
+            return Err(Error::Invalid);
+        }
+        let value = Snapshot {
+            role,
+            session_seconds: raw.session_seconds,
+            peer_age_seconds: (raw.peer_age_seconds >= 0.0).then_some(raw.peer_age_seconds),
+            tuning: tuning_in(&raw.tuning)?,
+            local: stats_in(&raw.local, raw.local_count)?,
+            peer: stats_in(&raw.peer, raw.peer_count)?,
+            last_end: match read_text(&raw.last_end)? {
+                reason if reason.is_empty() => None,
+                reason => {
+                    validate_reason(&reason)?;
+                    Some((reason, raw.last_end_age_seconds))
+                }
+            },
+        };
+        let server = telemetry_server()
+            .lock()
+            .map_err(|_| Error::Internal)?
+            .clone()
+            .ok_or(Error::Closed)?;
+        server.publish(&value)
+    })
+}
+/// Returns 1 and fills `out` when a local tuning command is pending, 0 when
+/// none is, or a negative status.
+/// # Safety
+/// `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_telemetry_take_tuning(out: *mut MLTuning) -> i32 {
+    let mut taken = false;
+    let status = ffi(|| {
+        let out = unsafe { output(out)? };
+        *out = MLTuning::default();
+        let server = telemetry_server()
+            .lock()
+            .map_err(|_| Error::Internal)?
+            .clone()
+            .ok_or(Error::Closed)?;
+        if let Some(tuning) = server.take_tuning() {
+            *out = tuning_out(tuning);
+            taken = true;
+        }
+        Ok(())
+    });
+    if status == 0 {
+        i32::from(taken)
+    } else {
+        status
+    }
+}
+/// The host's starting tuning.
+/// # Safety
+/// `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_tuning_defaults(out: *mut MLTuning) -> i32 {
+    ffi(|| {
+        *unsafe { output(out)? } = tuning_out(Tuning::DEFAULT);
+        Ok(())
+    })
+}
+/// Apply the present (nonzero) fields of `update` to `current`.
+/// # Safety
+/// Inputs must be readable and `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_tuning_merge(
+    current: *const MLTuning,
+    update: *const MLTuning,
+    out: *mut MLTuning,
+) -> i32 {
+    ffi(|| {
+        let out = unsafe { output(out)? };
+        *out = MLTuning::default();
+        let current = tuning_in(unsafe { input_ref(current)? })?;
+        let update = tuning_in(unsafe { input_ref(update)? })?;
+        *out = tuning_out(current.merged(update));
         Ok(())
     })
 }

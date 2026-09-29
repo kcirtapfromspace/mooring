@@ -1,6 +1,6 @@
 # Testing the preview on another Mac
 
-Download `MacLink-v0.3.0-preview.2-macos-arm64.zip` and `SHA256SUMS.txt` from the release while signed in to the GitHub account with repository access. MacLink supports Apple silicon only and requires macOS 14 or later. Apple's High Performance mode additionally requires compatible Macs at both ends. The experimental native session requires this preview on both Macs.
+Download `MacLink-v0.3.0-preview.3-macos-arm64.zip` and `SHA256SUMS.txt` from the release while signed in to the GitHub account with repository access. MacLink supports Apple silicon only and requires macOS 14 or later. Apple's High Performance mode additionally requires compatible Macs at both ends. The experimental native session requires this preview on both Macs.
 
 1. In the download directory, verify the ZIP with `shasum -a 256 -c SHA256SUMS.txt`.
 2. Quit older MacLink copies. Extract the ZIP and replace `MacLink.app` in Applications. Saved Macs and existing configured preferences are preserved.
@@ -15,22 +15,27 @@ Download `MacLink-v0.3.0-preview.2-macos-arm64.zip` and `SHA256SUMS.txt` from th
 
 ## Experimental native session
 
-1. On the Mac to share, choose **Share This Mac…** and click **Start Sharing**. Grant Screen Recording when macOS asks, then click Start Sharing again if needed. If macOS asks whether MacLink may accept incoming connections, allow it. Click **Copy Pairing Code**.
+1. On the Mac to share, choose **Share This Mac…** and click **Start Sharing**. Grant Screen Recording when macOS asks, then click Start Sharing again if needed. If macOS asks whether MacLink may accept incoming connections, allow it. Click **Copy Pairing Code**. Close the Share window and confirm the menu still shows **Stop Sharing This Mac**: sharing continues without the window.
 2. Move the code to the viewing Mac without posting it anywhere shared; it works like a password. On the viewing Mac, choose **Connect with MacLink…**, paste the code and click **Pair & Connect**. Leave **Address** empty on the same local network; enter the sharing Mac's IP address for other paths.
 3. Verify the remote display appears and enters full screen, and that the status bar shows frame rate, round-trip time and the sharing Mac's resolution ("screen unchanged" means no new frames were needed). The session is view-only until the sharing Mac clicks **Enable Keyboard & Mouse…** and allows MacLink in Accessibility. Confirm there is exactly one pointer in both view-only and control modes.
 4. With control enabled, test typing, repeated shortcuts such as Cmd-Z twice, modifier keys, clicks, double-clicks, drags, right-clicks and trackpad scrolling. Switch away from the viewer mid-drag or mid-keypress and confirm nothing stays pressed on the sharing Mac.
-5. Test colored terminal text and small UI text for legibility, window dragging, scrolling and video playback. Note any stalls, stale regions or dropped frames.
-6. Close the viewer, then reconnect from the paired Mac's name in the menu and from **Open Connections…**, where pairings are listed with Screen Sharing Macs. Leave a session idle past the sharing Mac's display-sleep time; it should stay connected. Stop sharing, lock the sharing Mac, and put it to sleep; each must end the session with a stated reason and a **Reconnect** button, and unlocking must not resume sharing on its own. After **Reset Pairing**, the old code must fail; **Remove** in Connections must forget a pairing.
-7. While scrolling or dragging a window on the sharing Mac, note the frame rate, then use **Save Diagnostics…** in the Share window and **Diagnostics…** in the viewer. Both save measurements only, including per-frame encode and send times, frame sizes and encoder drops. Attach both to your report.
+5. On the viewing Mac, click **Allow ⌘-Tab…** in the viewer's status bar and allow MacLink in Accessibility; the button disappears within a second. With the viewer focused, ⌘-Tab, ⌘-Shift-Tab and ⌘-Space must act on the sharing Mac only. ⌘⌥Esc must open this Mac's Force Quit window and ⌃⌘F must leave full screen, after which ⌘-Tab switches apps locally again.
+6. Test colored terminal text and small UI text for legibility, window dragging, scrolling and video playback. Note any stalls, stale regions or dropped frames.
+7. Close the viewer, then reconnect from the paired Mac's name in the menu and from **Open Connections…**, where pairings are listed with Screen Sharing Macs. Leave a session idle past the sharing Mac's display-sleep time; it should stay connected. After **Reset Pairing**, the old code must fail; **Remove** in Connections must forget a pairing.
+8. On the sharing Mac, click **Stop Sharing** and then **Start Sharing** again within ten seconds. The viewer must show **Reconnecting…** and reconnect in the same window, still in full screen. Repeat with the sharing Mac's Wi-Fi off for about 15 seconds, then on. **Cancel** must stop the attempts. Closing the viewer, or sleeping or locking the viewing Mac, must not trigger reconnection.
+9. With **Share this Mac automatically** off: Stop Sharing, lock the sharing Mac, and put it to sleep. Each must end the session with a stated reason after the viewer's reconnect attempts; unlocking must not resume sharing. Then turn the option on: quitting and reopening MacLink must start sharing without a prompt, and after lock or sleep, sharing must resume on unlock, but not while the display is still asleep. A viewer still reconnecting at that moment should reconnect. **Stop Sharing** must keep sharing off until you start it again.
+10. While connected, run `/Applications/MacLink.app/Contents/Resources/maclink telemetry` in Terminal on either Mac and scroll or drag a window on the sharing Mac. Try `maclink tune --bitrate-mbps 15`, `--max-width 2560`, `--fps 30` and `--in-flight 1`, and note how frame rate, `send_ms`, `encode_ms` and responsiveness change; `maclink tune --reset` restores the defaults. [TELEMETRY.md](TELEMETRY.md) explains each field.
+11. **Save Diagnostics…** in the Share window and **Diagnostics…** in the viewer save measurements only. Attach them, or a few telemetry lines, to your report.
 
-The distribution is Developer ID signed, notarized and stapled. macOS may still show its normal first-launch downloaded-app confirmation. If **Apple could not verify MacLink.app** appears, confirm that you opened the extracted 0.3.0 preview 2 app rather than an older copy; do not change Gatekeeper settings. Local development builds are ad hoc by default.
+The distribution is Developer ID signed, notarized and stapled. macOS may still show its normal first-launch downloaded-app confirmation. If **Apple could not verify MacLink.app** appears, confirm that you opened the extracted 0.3.0 preview 3 app rather than an older copy; do not change Gatekeeper settings. Local development builds are ad hoc by default.
 
 ## What to report
 
 - Both Mac models, macOS versions, display resolutions and scale, and connection type: Ethernet, Wi-Fi, off-site, travel router, Tailscale or WireGuard.
 - Apple Screen Sharing: whether address-only Add & Connect, permission auto-continuation, saved-Mac persistence and full screen work; whether the default flow avoids Settings; whether existing preferences survive an update.
 - Apple Screen Sharing: whether Auto requests a suitable mode, Apple's actual mode agrees, and fallback reconnects only the expected session. Include the displayed reason, not private network details. Note any unexpected reopen, duplicate window or repeated High Performance trial.
-- Native session: pairing and reconnect success, time to first image, displayed frame rate and round-trip time, text legibility, typing/scrolling delay compared with Apple Screen Sharing, stuck keys or buttons, and exactly how any session ended.
+- Native session: telemetry lines from a busy moment, the tuning that felt best, pairing and reconnect success, time to first image, displayed frame rate and round-trip time, text legibility, typing/scrolling delay compared with Apple Screen Sharing, stuck keys or buttons, and exactly how any session ended.
+- For any unexpected disconnect, the session log from both Macs: `/usr/bin/log show --last 2h --style compact --predicate 'subsystem == "dev.maclink"'`. It contains MacLink's reasons and timings only, but review it before sharing.
 - The permission prompts each Mac showed, and whether denying one produced a clear message.
 
 Do not include passwords, pairing codes, clipboard contents, private screen recordings or session keys. RFB timing does not measure bandwidth or video latency, the native session's round-trip time is not display latency, and a travel bridge can make separate locations look like one familiar network.
@@ -43,7 +48,7 @@ All compilation, tests, linting, signing, archive creation and Gatekeeper valida
 ./scripts/ci-local.sh
 MACLINK_CODESIGN_IDENTITY='Developer ID Application: YOUR NAME (TEAM_ID)' \
   MACLINK_NOTARY_PROFILE=MacLink \
-  ./scripts/notarize-release.sh 0.3.0-preview.2
+  ./scripts/notarize-release.sh 0.3.0-preview.3
 ```
 
 The local suite includes 128 Rust tests (8 CLI, 41 core, 18 platform, 61 session), 73 Swift session-parser checks, the defaults/home-state regressions, loopback CLI integration, and the native Swift checks: input boundary and Command key-up dispatch, privacy classification, hardware H.264 encode/decode with recovery and the two-frame in-flight bound, session boundary, and an encrypted 1080p loopback stream. Published assets include validation output and checksums.

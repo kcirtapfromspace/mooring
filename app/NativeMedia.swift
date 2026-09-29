@@ -45,6 +45,8 @@ struct NativeMediaMetrics: Codable {
     var dropped_frames: UInt64 = 0
     /// Frames that failed and restarted the chain with a keyframe.
     var failed_frames: UInt64 = 0
+    var keyframes: UInt64 = 0
+    var encode_ms_total: Double = 0
 }
 
 struct NativeEncodedFrame {
@@ -158,15 +160,22 @@ final class NativeVideoEncoder {
     private var metrics = NativeMediaMetrics()
     private var targetBitrate: Int
     private var appliedBitrate: Int
+    private var inFlightLimit = NativeVideoEncoder.maxInFlight
+    private var targetFrameRate: Int
+    private var appliedFrameRate: Int
+    private var targetKeyframeSeconds: Int
+    private var appliedKeyframeSeconds: Int
     let width: Int
     let height: Int
-    let framesPerSecond: Int
 
-    init(width: Int, height: Int, framesPerSecond: Int = 60, bitrate: Int = 25_000_000) throws {
+    init(width: Int, height: Int, framesPerSecond: Int = 60, bitrate: Int = 25_000_000, keyframeSeconds: Int = 2) throws {
         guard NativeVideoPacket.validDimensions(width, height), (1...60).contains(framesPerSecond),
               (1_000_000...80_000_000).contains(bitrate) else { throw NativeMediaError("Unsupported video encoder configuration.") }
-        self.width = width; self.height = height; self.framesPerSecond = framesPerSecond
+        guard (1...10).contains(keyframeSeconds) else { throw NativeMediaError("Unsupported keyframe interval.") }
+        self.width = width; self.height = height
         targetBitrate = bitrate; appliedBitrate = bitrate
+        targetFrameRate = framesPerSecond; appliedFrameRate = framesPerSecond
+        targetKeyframeSeconds = keyframeSeconds; appliedKeyframeSeconds = keyframeSeconds
         let specification: [String: Any] = [
             kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String: true,
             kVTVideoEncoderSpecification_EnableLowLatencyRateControl as String: true
@@ -184,8 +193,8 @@ final class NativeVideoEncoder {
                 (kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel as CFTypeRef),
                 (kVTCompressionPropertyKey_AverageBitRate, bitrate as CFNumber),
                 (kVTCompressionPropertyKey_ExpectedFrameRate, framesPerSecond as CFNumber),
-                (kVTCompressionPropertyKey_MaxKeyFrameInterval, (framesPerSecond * 2) as CFNumber),
-                (kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 2 as CFNumber),
+                (kVTCompressionPropertyKey_MaxKeyFrameInterval, (framesPerSecond * keyframeSeconds) as CFNumber),
+                (kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, keyframeSeconds as CFNumber),
                 (kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2 as CFTypeRef),
                 (kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_ITU_R_709_2 as CFTypeRef),
                 (kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2 as CFTypeRef)
@@ -216,6 +225,17 @@ final class NativeVideoEncoder {
     deinit { if let session { VTCompressionSessionInvalidate(session) } }
     var snapshot: NativeMediaMetrics { lock.lock(); defer { lock.unlock() }; return metrics }
     var inFlightCount: Int { lock.lock(); defer { lock.unlock() }; return outstanding.count }
+    /// Live settings take effect on the next encoded frame.
+    func setFrameRate(_ framesPerSecond: Int) {
+        lock.lock(); targetFrameRate = min(60, max(1, framesPerSecond)); lock.unlock()
+    }
+    func setKeyframeSeconds(_ seconds: Int) {
+        lock.lock(); targetKeyframeSeconds = min(10, max(1, seconds)); lock.unlock()
+    }
+    /// 1 serializes encoding and sending; 2 overlaps them.
+    func setInFlightLimit(_ limit: Int) {
+        lock.lock(); inFlightLimit = min(Self.maxInFlight, max(1, limit)); lock.unlock()
+    }
     func setTargetBitrate(_ bitsPerSecond: Int) {
         lock.lock(); targetBitrate = min(80_000_000, max(1_000_000, bitsPerSecond)); lock.unlock()
     }
@@ -223,11 +243,12 @@ final class NativeVideoEncoder {
     @discardableResult
     func encode(_ image: CVPixelBuffer, presentationTime: CMTime) -> Bool {
         lock.lock()
-        guard active, outstanding.count < Self.maxInFlight else { if active { metrics.skipped_capture_frames &+= 1 }; lock.unlock(); return false }
+        guard active, outstanding.count < inFlightLimit else { if active { metrics.skipped_capture_frames &+= 1 }; lock.unlock(); return false }
         guard CVPixelBufferGetWidth(image) == width, CVPixelBufferGetHeight(image) == height,
               presentationTime.isNumeric, presentationTime.seconds >= 0 else { lock.unlock(); return false }
         nextToken &+= 1
         let token = nextToken, keyframe = forceKeyframe, bitrate = targetBitrate
+        let frameRate = targetFrameRate, keyframeSeconds = targetKeyframeSeconds
         outstanding.insert(token)
         forceKeyframe = false
         lock.unlock()
@@ -236,13 +257,21 @@ final class NativeVideoEncoder {
             guard let self else { return }
             self.lock.lock(); let active = self.active; self.lock.unlock()
             guard active, let session = self.session else { self.release(token); return }
+            if frameRate != self.appliedFrameRate || keyframeSeconds != self.appliedKeyframeSeconds {
+                let applied = [
+                    VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: frameRate as CFNumber),
+                    VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: (frameRate * keyframeSeconds) as CFNumber),
+                    VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: keyframeSeconds as CFNumber)
+                ].allSatisfy { $0 == noErr }
+                if applied { self.appliedFrameRate = frameRate; self.appliedKeyframeSeconds = keyframeSeconds }
+            }
             if bitrate != self.appliedBitrate {
                 let result = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
                 if result == noErr { self.appliedBitrate = bitrate }
             }
             let properties = keyframe ? [kVTEncodeFrameOptionKey_ForceKeyFrame as String: true] as CFDictionary : nil
             let result = VTCompressionSessionEncodeFrame(session, imageBuffer: image,
-                presentationTimeStamp: presentationTime, duration: CMTime(value: 1, timescale: Int32(self.framesPerSecond)),
+                presentationTimeStamp: presentationTime, duration: CMTime(value: 1, timescale: Int32(frameRate)),
                 frameProperties: properties, infoFlagsOut: nil) { [weak self] status, flags, sample in
                     self?.queue.async { [weak self] in
                         self?.encoded(status: status, flags: flags, sample: sample, token: token, began: began)
@@ -314,7 +343,10 @@ final class NativeVideoEncoder {
                 timestamp: UInt64(timestamp * 1_000_000), keyframe: keyframe,
                 sps: parameterSets[0], pps: parameterSets[1], avcc: bytes)
             metrics.encode_ms = max(0, (ProcessInfo.processInfo.systemUptime - began) * 1000)
+            let milliseconds = max(0, (ProcessInfo.processInfo.systemUptime - began) * 1000)
             metrics.encoded_frames &+= 1; metrics.encoded_bytes &+= UInt64(packet.wireSize); metrics.target_bitrate = appliedBitrate
+            metrics.encode_ms_total += milliseconds
+            if keyframe { metrics.keyframes &+= 1 }
             let report = metrics
             lock.unlock()
             guard let callback = onEncodedFrame else { release(token); return }
@@ -349,10 +381,18 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var starting = false
     private let maxPixelWidth: Int
     private let maxPixelHeight: Int
-    private let framesPerSecond: Int
-    private var bitrate = 25_000_000
+    private var framesPerSecond: Int
+    private var bitrate: Int
+    private var keyframeSeconds: Int
+    private var inFlightLimit: Int
+    /// Called on the capture queue for each complete captured frame.
+    var onCapturedFrame: (() -> Void)?
 
-    init(maxPixelWidth: Int = 3840, maxPixelHeight: Int = 2160, framesPerSecond: Int = 60, showsCursor: Bool = true) {
+    init(maxPixelWidth: Int = 3840, maxPixelHeight: Int = 2160, framesPerSecond: Int = 60, showsCursor: Bool = true,
+         bitrate: Int = 25_000_000, keyframeSeconds: Int = 2, inFlightLimit: Int = NativeVideoEncoder.maxInFlight) {
+        self.bitrate = min(80_000_000, max(1_000_000, bitrate))
+        self.keyframeSeconds = min(10, max(1, keyframeSeconds))
+        self.inFlightLimit = min(NativeVideoEncoder.maxInFlight, max(1, inFlightLimit))
         self.showsCursor = showsCursor
         self.maxPixelWidth = min(3840, max(16, maxPixelWidth))
         self.maxPixelHeight = min(2160, max(16, maxPixelHeight))
@@ -380,7 +420,9 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 let height = max(16, Int(Double(displayMode.pixelHeight) * scale) / 2 * 2)
                 let geometry = NativeDisplayGeometry(x: logical.minX, y: logical.minY, width: logical.width, height: logical.height, pixelWidth: width, pixelHeight: height)
                 guard geometry.isValid else { throw NativeMediaError("Unsupported main-display geometry.") }
-                let encoder = try NativeVideoEncoder(width: width, height: height, framesPerSecond: self.framesPerSecond, bitrate: self.bitrate)
+                let encoder = try NativeVideoEncoder(width: width, height: height, framesPerSecond: self.framesPerSecond,
+                                                     bitrate: self.bitrate, keyframeSeconds: self.keyframeSeconds)
+                encoder.setInFlightLimit(self.inFlightLimit)
                 encoder.onEncodedFrame = { [weak self] frame, release in
                     guard let callback = self?.onEncodedFrame else { release(); return }
                     callback(frame, release)
@@ -437,6 +479,25 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         stream.updateConfiguration(configuration) { _ in }
     }
     func requestKeyframe() { currentEncoder()?.requestKeyframe() }
+    var inFlightCount: Int { currentEncoder()?.inFlightCount ?? 0 }
+    /// The running encoder's cumulative counters; nil before start and after stop.
+    var encoderMetrics: NativeMediaMetrics? { currentEncoder()?.snapshot }
+    /// Updates the capture interval and the encoder's expected rate.
+    func setFrameRate(_ fps: Int) {
+        precondition(Thread.isMainThread)
+        framesPerSecond = min(60, max(1, fps)); currentEncoder()?.setFrameRate(framesPerSecond)
+        guard let stream, let configuration else { return }
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: Int32(framesPerSecond))
+        stream.updateConfiguration(configuration) { _ in }
+    }
+    func setKeyframeSeconds(_ seconds: Int) {
+        precondition(Thread.isMainThread)
+        keyframeSeconds = min(10, max(1, seconds)); currentEncoder()?.setKeyframeSeconds(keyframeSeconds)
+    }
+    func setInFlightLimit(_ limit: Int) {
+        precondition(Thread.isMainThread)
+        inFlightLimit = min(NativeVideoEncoder.maxInFlight, max(1, limit)); currentEncoder()?.setInFlightLimit(inFlightLimit)
+    }
     func setTargetBitrate(_ bitsPerSecond: Int) {
         precondition(Thread.isMainThread)
         bitrate = min(80_000_000, max(1_000_000, bitsPerSecond)); currentEncoder()?.setTargetBitrate(bitrate)
@@ -470,6 +531,7 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             onError?("Display geometry changed. Reconnect to restore accurate remote input.")
             return
         }
+        onCapturedFrame?()
         _ = current.encode(image, presentationTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
     }
 }
@@ -482,8 +544,13 @@ final class NativeVideoDecoder {
     var onFrame: ((CVPixelBuffer) -> Void)?
     var onError: ((String) -> Void)?
     var onNeedsKeyframe: (() -> Void)?
+    /// Milliseconds for each successfully decoded frame, on the decode queue.
+    var onDecoded: ((Double) -> Void)?
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "MacLink.native.decode", qos: .userInteractive)
+    private var overflowCount: UInt64 = 0
+    /// Packets discarded because decoding fell behind, since the decoder started.
+    var overflows: UInt64 { lock.lock(); defer { lock.unlock() }; return overflowCount }
     private var active = true
     private var busy = false
     private var pending: NativeVideoPacket?
@@ -520,7 +587,7 @@ final class NativeVideoDecoder {
         guard active else { lock.unlock(); return false }
         if busy {
             guard pending == nil else {
-                pending = nil; discontinuity = true; discontinuityEpoch &+= 1
+                pending = nil; discontinuity = true; discontinuityEpoch &+= 1; overflowCount &+= 1
                 let notify = claimKeyframeRequestLocked(); lock.unlock()
                 if notify { onNeedsKeyframe?() }
                 return false
@@ -583,6 +650,7 @@ final class NativeVideoDecoder {
             var output: CVPixelBuffer?, outputStatus: OSStatus = noErr
             // Both async/temporal flags are clear: Apple guarantees the callback
             // finishes before this call returns. No asynchronous output backlog.
+            let began = ProcessInfo.processInfo.systemUptime
             result = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: [], infoFlagsOut: nil) { status, flags, image, _, _ in
                 outputStatus = status
                 if !flags.contains(.frameDropped) { output = image }
@@ -593,7 +661,7 @@ final class NativeVideoDecoder {
             }
             lastSequence = packet.sequence
             lock.lock(); let deliver = self.active && !discontinuity; if deliver { consecutiveFailures = 0 }; lock.unlock()
-            if deliver { onFrame?(output) }
+            if deliver { onDecoded?((ProcessInfo.processInfo.systemUptime - began) * 1000); onFrame?(output) }
         } catch { notifyRecovery(error.localizedDescription) }
     }
     private func createSession(_ packet: NativeVideoPacket) throws {

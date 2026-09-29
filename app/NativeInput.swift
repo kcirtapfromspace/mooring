@@ -133,8 +133,8 @@ enum NativeInputGeometry {
     }
 }
 
-/// Call on the viewer's UI thread, only for events delivered to its focused view.
-/// No event taps, global monitors, Accessibility prompts, or system shortcuts.
+/// Call on the viewer's UI thread, only for events delivered to its focused view
+/// or forwarded by NativeSystemKeyCapture while it captures system shortcuts.
 final class NativeInputEncoder {
     private var heldKeys = Set<UInt16>()
     private var heldButtons = Set<UInt8>()
@@ -256,6 +256,69 @@ final class NativeCommandKeyUpMonitor {
         monitor = nil
     }
     deinit { stop() }
+}
+
+/// macOS acts on system shortcuts such as ⌘-Tab, Spotlight, Mission Control
+/// and Spaces before any app sees them. While the viewer is focused and
+/// controlling the remote Mac, this active event tap sends every key event to
+/// the remote Mac instead and consumes it here, except the few that Rust keeps
+/// local as an escape hatch (Force Quit, Lock Screen, full screen). It needs
+/// Accessibility permission on this Mac; without it, ordinary keys still work
+/// through the view and system shortcuts stay local. Main run loop only.
+final class NativeSystemKeyCapture {
+    /// Decided per event on the main thread: only a focused, controlling viewer captures.
+    var isCapturing: () -> Bool = { false }
+    var forward: (NSEvent) -> Void = { _ in }
+    /// macOS disabled the tap; releases it did not see must be sent another way.
+    var onInterrupted: () -> Void = {}
+    private var tap: CFMachPort?
+    private var source: CFRunLoopSource?
+
+    static var isPermitted: Bool { AXIsProcessTrusted() }
+    var isRunning: Bool { tap != nil }
+    static func keepsLocal(keyCode: UInt16, modifiers: NativeInputModifiers) -> Bool {
+        ml_input_keeps_local(keyCode, modifiers.rawValue) == 1
+    }
+
+    /// Installs the tap; false when this Mac has not granted Accessibility.
+    @discardableResult
+    func start() -> Bool {
+        guard tap == nil else { return true }
+        guard Self.isPermitted else { return false }
+        let mask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue) | (1 << CGEventType.flagsChanged.rawValue)
+        let callback: CGEventTapCallBack = { _, type, event, context in
+            guard let context else { return Unmanaged.passUnretained(event) }
+            return Unmanaged<NativeSystemKeyCapture>.fromOpaque(context).takeUnretainedValue().handle(type, event)
+        }
+        guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+                                          eventsOfInterest: CGEventMask(mask), callback: callback,
+                                          userInfo: Unmanaged.passUnretained(self).toOpaque()) else { return false }
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        self.tap = tap; self.source = source
+        return true
+    }
+    func stop() {
+        if let tap { CGEvent.tapEnable(tap: tap, enable: false); CFMachPortInvalidate(tap) }
+        if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
+        tap = nil; source = nil
+    }
+    deinit { stop() }
+
+    private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            onInterrupted()
+            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            return Unmanaged.passUnretained(event)
+        }
+        guard type == .keyDown || type == .keyUp || type == .flagsChanged, isCapturing(),
+              let key = NSEvent(cgEvent: event) else { return Unmanaged.passUnretained(event) }
+        if type != .flagsChanged && Self.keepsLocal(keyCode: key.keyCode, modifiers: .from(key.modifierFlags)) {
+            return Unmanaged.passUnretained(event)
+        }
+        forward(key)
+        return nil // consumed: it acts on the remote Mac only
+    }
 }
 
 /// The host's held-input state, owned by Rust: unknown releases and duplicate

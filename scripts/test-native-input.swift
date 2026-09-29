@@ -135,6 +135,17 @@ enum NativeInputTests {
         require(reducer.stop() == [up], "Stop releases current keys")
         rejects({ _ = try reducer.accept(down, now: 4) }, "Queued input cannot press keys after Stop")
         require(reducer.stop().isEmpty && reducer.releaseAll().isEmpty, "Stop and cleanup stay idempotent")
+        // The system-shortcut tap keeps only the escape chords local. No tap is
+        // installed here; this covers the Swift boundary to Rust's rule.
+        let keepsLocal = NativeSystemKeyCapture.keepsLocal
+        require(keepsLocal(53, [.command, .option]) && keepsLocal(53, [.command, .option, .shift]),
+                "Force Quit stays on the viewing Mac")
+        require(keepsLocal(12, [.control, .command]) && keepsLocal(3, [.control, .command]) && keepsLocal(3, .function),
+                "Lock Screen and full-screen chords stay on the viewing Mac")
+        require(!keepsLocal(48, .command) && !keepsLocal(48, [.command, .shift]) && !keepsLocal(49, .command)
+                && !keepsLocal(53, .command) && !keepsLocal(12, .command),
+                "⌘-Tab, Spotlight, ⌘-Esc and ⌘-Q go to the remote Mac")
+        require(NativeSystemKeyCapture().isRunning == false, "A new capture installs no tap until started")
         let dispatch = testCommandKeyUps()
         print("Native input tests passed: \(checks) checks; validation, wire round-trips, geometry, left/right modifiers, the Rust input boundary, and \(dispatch). No permissions requested or system events posted.")
     }

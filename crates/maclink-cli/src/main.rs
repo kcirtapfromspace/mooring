@@ -1,10 +1,15 @@
 mod store;
 
-use serde_json::{Value, json};
-use std::{path::PathBuf, time::Duration};
+use serde_json::{Map, Value, json};
+use std::{
+    io::{BufRead, BufReader, Write},
+    os::unix::net::UnixStream,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use store::Store;
 
-const HELP: &str = "MacLink — native Mac connections, Rust foundation\n\nUsage: maclink [--config-dir PATH] COMMAND\n\n  list                         List saved Macs as JSON\n  add --name NAME --host HOST [--port PORT]\n                               Save a Mac (default port 5900)\n  remove ID                    Remove a saved Mac\n  inspect ID                   Read the server's RFB greeting; no login\n  connect ID                   Open Apple Screen Sharing\n  connect-mode ID MODE         Request standard or high_performance\n  home-network                 Identify the local network without contacting a Mac\n  network-probe ID             Measure target TCP/RFB timing and route\n  network-evaluate JSON        Evaluate live probe metadata with state\n  doctor                       Report local capabilities and limitations\n  simulate                     Run simulated adaptive-quality scenarios\n\nMode requests use experimental native-exported Apple URL options.\nThey do not confirm video negotiation. MacLink has no custom video engine.\nNo passwords are stored. MACLINK_HOME overrides the connection directory.\n";
+const HELP: &str = "MacLink — native Mac connections, Rust foundation\n\nUsage: maclink [--config-dir PATH] COMMAND\n\n  list                         List saved Macs as JSON\n  add --name NAME --host HOST [--port PORT]\n                               Save a Mac (default port 5900)\n  remove ID                    Remove a saved Mac\n  inspect ID                   Read the server's RFB greeting; no login\n  connect ID                   Open Apple Screen Sharing\n  connect-mode ID MODE         Request standard or high_performance\n  home-network                 Identify the local network without contacting a Mac\n  network-probe ID             Measure target TCP/RFB timing and route\n  network-evaluate JSON        Evaluate live probe metadata with state\n  doctor                       Report local capabilities and limitations\n  simulate                     Run simulated adaptive-quality scenarios\n  telemetry [--count N]        Stream live native-session measurements as JSON lines\n  tune OPTIONS                 Adjust the sharing Mac's stream while connected:\n                               --bitrate-mbps 1-80  --max-width 640-3840 (even)\n                               --fps 1-60  --in-flight 1-2  --keyframe-seconds 1-10\n                               --reset (restore defaults, then apply the rest)\n\nMode requests use experimental native-exported Apple URL options.\nThey do not confirm video negotiation. Telemetry and tuning use the running\napp's owner-only local socket; tuning from a viewer is sent to the sharing Mac\nover the encrypted session. No passwords are stored. MACLINK_HOME overrides\nthe connection directory.\n";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -13,6 +18,7 @@ fn main() {
         return;
     }
     match execute(&args) {
+        Ok(Value::Null) => {} // streaming commands print as they go
         Ok(value) => println!(
             "{}",
             serde_json::to_string_pretty(&value).expect("JSON value serialization")
@@ -126,7 +132,7 @@ fn execute(args: &[String]) -> Result<Value, String> {
                 "config_directory":store::path_display(&directory),
                 "apple_silicon":cfg!(all(target_os="macos",target_arch="aarch64")),
                 "apple_backend":"launches native Screen Sharing; Apple manages display mode",
-                "custom_streaming_backend":"not implemented",
+                "custom_streaming_backend":"experimental native MacLink session; both Macs run MacLink",
                 "automatic_quality":"menu-bar network policy uses live TCP/RFB checks; experimental Apple mode requests and Accessibility reconnects require setup",
                 "inspection":"RFB greeting only; does not measure video latency, bandwidth or High Performance support",
                 "password_storage":"none; Apple handles credentials"
@@ -138,8 +144,140 @@ fn execute(args: &[String]) -> Result<Value, String> {
                 json!({"simulated":true, "note":"Synthetic telemetry; these are not measured remote-desktop performance results", "scenarios":maclink_core::demo_scenarios()}),
             )
         }
+        "telemetry" => {
+            let count = match trailing {
+                [] => None,
+                [flag, value] if flag == "--count" => Some(
+                    value
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|count| (1..=86_400).contains(count))
+                        .ok_or("--count must be between 1 and 86400")?,
+                ),
+                _ => return Err("Usage: maclink telemetry [--count N]".into()),
+            };
+            stream_telemetry(&directory, count)?;
+            Ok(Value::Null)
+        }
+        "tune" => send_tuning(&directory, parse_tune(trailing)?),
         _ => Err(format!("Unknown command '{command}'; run maclink --help")),
     }
+}
+
+const MAX_TELEMETRY_LINE: usize = 64 * 1024;
+
+fn telemetry_socket(directory: &Path) -> Result<UnixStream, String> {
+    let path = directory.join(maclink_platform::TELEMETRY_SOCKET);
+    let stream = UnixStream::connect(&path).map_err(|_| {
+        format!(
+            "MacLink is not serving telemetry at {}. Open MacLink on this Mac first.",
+            store::path_display(&path)
+        )
+    })?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("Cannot configure the telemetry socket: {e}"))?;
+    Ok(stream)
+}
+
+fn read_line(reader: &mut impl BufRead) -> Result<String, String> {
+    let mut line = String::new();
+    let read = std::io::Read::take(&mut *reader, MAX_TELEMETRY_LINE as u64 + 1)
+        .read_line(&mut line)
+        .map_err(|e| format!("MacLink stopped sending telemetry: {e}"))?;
+    if read == 0 {
+        return Err("MacLink closed the telemetry socket".into());
+    }
+    if line.len() > MAX_TELEMETRY_LINE || !line.ends_with('\n') {
+        return Err("MacLink sent an oversized telemetry line".into());
+    }
+    Ok(line.trim_end().to_owned())
+}
+
+/// One snapshot per second while MacLink runs; stops after `count` if given.
+fn stream_telemetry(directory: &Path, count: Option<usize>) -> Result<(), String> {
+    let mut reader = BufReader::new(telemetry_socket(directory)?);
+    let mut printed = 0;
+    loop {
+        let line = read_line(&mut reader)?;
+        if serde_json::from_str::<Value>(&line).is_err() {
+            return Err("MacLink sent invalid telemetry".into());
+        }
+        println!("{line}");
+        std::io::stdout()
+            .flush()
+            .map_err(|e| format!("Cannot write telemetry: {e}"))?;
+        printed += 1;
+        if count.is_some_and(|count| printed >= count) {
+            return Ok(());
+        }
+    }
+}
+
+/// Builds the `{"tune": {...}}` request; the app validates the bounds.
+fn parse_tune(args: &[String]) -> Result<Value, String> {
+    let mut request = Map::new();
+    let mut remaining = args;
+    while let Some((flag, rest)) = remaining.split_first() {
+        let (key, value, next) = match flag.as_str() {
+            "--reset" => ("reset", json!(true), rest),
+            "--bitrate-mbps" | "--max-width" | "--fps" | "--in-flight" | "--keyframe-seconds" => {
+                let (value, next) = rest
+                    .split_first()
+                    .ok_or_else(|| format!("{flag} requires a value"))?;
+                let key = &flag[2..];
+                let value = if flag == "--bitrate-mbps" {
+                    json!(
+                        value
+                            .parse::<f64>()
+                            .ok()
+                            .filter(|v| v.is_finite())
+                            .ok_or("--bitrate-mbps must be a number")?
+                    )
+                } else {
+                    json!(
+                        value
+                            .parse::<u32>()
+                            .map_err(|_| format!("{flag} must be a whole number"))?
+                    )
+                };
+                (key, value, next)
+            }
+            other => return Err(format!("Unknown tune option '{other}'; run maclink --help")),
+        };
+        let key = key.replace('-', "_");
+        if request.insert(key, value).is_some() {
+            return Err(format!("Repeated tune option '{flag}'"));
+        }
+        remaining = next;
+    }
+    if request.is_empty() {
+        return Err("Give at least one tune option; run maclink --help".into());
+    }
+    Ok(json!({ "tune": request }))
+}
+
+fn send_tuning(directory: &Path, request: Value) -> Result<Value, String> {
+    let stream = telemetry_socket(directory)?;
+    let mut writer = stream
+        .try_clone()
+        .map_err(|e| format!("Cannot use the telemetry socket: {e}"))?;
+    writeln!(writer, "{request}").map_err(|e| format!("Cannot send tuning: {e}"))?;
+    let mut reader = BufReader::new(stream);
+    // Snapshot lines may arrive first; wait for this command's reply.
+    for _ in 0..16 {
+        let reply: Value = serde_json::from_str(&read_line(&mut reader)?)
+            .map_err(|_| "MacLink sent an invalid reply".to_string())?;
+        if let Some(error) = reply.get("error").and_then(Value::as_str) {
+            return Err(error.to_owned());
+        }
+        if let Some(ack) = reply.get("ack") {
+            return Ok(
+                json!({"status":"queued", "ack": ack, "note":"Applied on the sharing Mac within about a second while a native session is connected."}),
+            );
+        }
+    }
+    Err("MacLink did not acknowledge the tuning request".into())
 }
 
 fn require_count(args: &[String], count: usize) -> Result<(), String> {
@@ -203,6 +341,54 @@ mod tests {
         ] {
             assert!(parse_add(&args(&input)).is_err());
         }
+    }
+    #[test]
+    fn tune_options_build_one_request() {
+        assert_eq!(
+            parse_tune(&args(&[
+                "--bitrate-mbps",
+                "40.5",
+                "--max-width",
+                "2560",
+                "--reset"
+            ]))
+            .unwrap(),
+            json!({"tune": {"bitrate_mbps": 40.5, "max_width": 2560, "reset": true}})
+        );
+        assert_eq!(
+            parse_tune(&args(&[
+                "--fps",
+                "30",
+                "--in-flight",
+                "1",
+                "--keyframe-seconds",
+                "4"
+            ]))
+            .unwrap(),
+            json!({"tune": {"fps": 30, "in_flight": 1, "keyframe_seconds": 4}})
+        );
+        for input in [
+            vec![],
+            vec!["--fps"],
+            vec!["--fps", "thirty"],
+            vec!["--fps", "30", "--fps", "24"],
+            vec!["--bitrate-mbps", "NaN"],
+            vec!["--max-width", "-2"],
+            vec!["--colour", "red"],
+        ] {
+            assert!(parse_tune(&args(&input)).is_err(), "{input:?}");
+        }
+    }
+    #[test]
+    fn telemetry_needs_a_running_app() {
+        let missing =
+            std::env::temp_dir().join(format!("maclink-no-telemetry-{}", std::process::id()));
+        assert!(
+            stream_telemetry(&missing, Some(1))
+                .unwrap_err()
+                .contains("not serving telemetry")
+        );
+        assert!(send_tuning(&missing, json!({"tune": {"fps": 30}})).is_err());
     }
     #[test]
     fn cli_defaults_to_screen_sharing_port() {

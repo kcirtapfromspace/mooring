@@ -17,6 +17,7 @@ mod input;
 mod pairing;
 mod peers;
 mod policy;
+mod telemetry;
 mod transport;
 mod video;
 

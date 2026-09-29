@@ -24,7 +24,38 @@ enum {
     ML_SESSION_INTERNAL = -9, ML_SESSION_RATE_LIMITED = -10,
     ML_SESSION_STALLED = -11, ML_SESSION_STORAGE = -12
 };
-enum { ML_SESSION_VIDEO = 1, ML_SESSION_INPUT = 2, ML_SESSION_CONTROL = 3 };
+enum { ML_SESSION_VIDEO = 1, ML_SESSION_INPUT = 2, ML_SESSION_CONTROL = 3, ML_SESSION_TELEMETRY = 4 };
+enum { ML_TELEMETRY_STATS = 1, ML_TELEMETRY_TUNING = 2 };
+enum { ML_ROLE_IDLE = 0, ML_ROLE_HOST = 1, ML_ROLE_VIEWER = 2 };
+/* Measurement IDs; the local JSON uses the lowercase names after ML_METRIC_. */
+enum {
+    ML_METRIC_CAPTURE_FPS = 1,
+    ML_METRIC_ENCODED_FPS = 2,
+    ML_METRIC_SKIPPED_FPS = 3,
+    ML_METRIC_DROPPED_FPS = 4,
+    ML_METRIC_FAILED_FRAMES = 5,
+    ML_METRIC_KEYFRAMES = 6,
+    ML_METRIC_ENCODE_MS = 7,
+    ML_METRIC_ENCODE_MS_MAX = 8,
+    ML_METRIC_SEND_MS = 9,
+    ML_METRIC_SEND_MS_MAX = 10,
+    ML_METRIC_SENT_MBPS = 11,
+    ML_METRIC_FRAME_KIB = 12,
+    ML_METRIC_IN_FLIGHT = 13,
+    ML_METRIC_BITRATE_MBPS = 14,
+    ML_METRIC_PIXEL_WIDTH = 15,
+    ML_METRIC_PIXEL_HEIGHT = 16,
+    ML_METRIC_FPS_CAP = 17,
+    ML_METRIC_RECEIVED_FPS = 32,
+    ML_METRIC_RECEIVED_MBPS = 33,
+    ML_METRIC_DECODE_MS = 34,
+    ML_METRIC_DECODE_MS_MAX = 35,
+    ML_METRIC_DECODED_FPS = 36,
+    ML_METRIC_PRESENTED_FPS = 37,
+    ML_METRIC_RTT_MS = 38,
+    ML_METRIC_KEYFRAME_REQUESTS = 39,
+    ML_METRIC_DECODER_OVERFLOWS = 40
+};
 enum {
     ML_CONTROL_GEOMETRY = 1, ML_CONTROL_INPUT_STATE = 2, ML_CONTROL_PING = 3,
     ML_CONTROL_PONG = 4, ML_CONTROL_KEYFRAME = 5
@@ -47,6 +78,10 @@ enum {
 #define ML_PAIRING_CODE_CAPACITY 2049u
 #define ML_CREDENTIAL_CAPACITY 1024u
 #define ML_PEERS_MAX 32u
+#define ML_TELEMETRY_MAX_METRICS 32u
+#define ML_REASON_CAPACITY 160u
+#define ML_RECONNECT_ATTEMPTS 5u
+#define ML_RECONNECT_STABLE_SECONDS 20u
 
 /* Logical CoreGraphics display bounds plus encoded pixel dimensions. */
 typedef struct {
@@ -104,6 +139,33 @@ typedef struct {
     size_t avcc_offset, avcc_length;
 } MLVideoPacket;
 
+/* One measurement: finite and 0 to 1e9. */
+typedef struct {
+    uint8_t metric;
+    uint8_t reserved[7];
+    double value;
+} MLMetric;
+
+/* Zero fields mean "unchanged". Bounds: bitrate 1000-80000 kbps, max_width
+ * 640-3840 and even, fps 1-60, in_flight 1-2, keyframe_seconds 1-10. */
+typedef struct {
+    uint32_t bitrate_kbps;
+    uint32_t max_width;
+    uint8_t fps;
+    uint8_t in_flight;
+    uint8_t keyframe_seconds;
+    uint8_t reserved[5];
+} MLTuning;
+
+/* Stats carry `count` distinct metrics; tuning carries `tuning` and count 0. */
+typedef struct {
+    uint8_t kind;
+    uint8_t count;
+    uint8_t reserved[6];
+    MLTuning tuning;
+    MLMetric metrics[ML_TELEMETRY_MAX_METRICS];
+} MLTelemetryMessage;
+
 /* kind selects the one populated member. */
 typedef struct {
     uint8_t kind;
@@ -111,7 +173,25 @@ typedef struct {
     MLVideoPacket video;
     MLInputEvent input;
     MLControlMessage control;
+    MLTelemetryMessage telemetry;
 } MLSessionMessage;
+
+/* One local snapshot. peer_age_seconds is negative before peer stats arrive.
+ * last_end is MacLink's own printable reason for the latest session end on
+ * this Mac, NUL terminated and empty when none has ended. */
+typedef struct {
+    uint8_t role;
+    uint8_t local_count;
+    uint8_t peer_count;
+    uint8_t reserved[5];
+    double session_seconds;
+    double peer_age_seconds;
+    MLTuning tuning;
+    MLMetric local[ML_TELEMETRY_MAX_METRICS];
+    MLMetric peer[ML_TELEMETRY_MAX_METRICS];
+    double last_end_age_seconds;
+    char last_end[ML_REASON_CAPACITY];
+} MLTelemetrySnapshot;
 
 /* Strings are NUL-terminated UTF-8. peer_id is lowercase hex SHA-256 of the
  * public key, recomputed whenever a code crosses back into Rust. */
@@ -155,7 +235,7 @@ _Static_assert(offsetof(MLVideoFrame, avcc_length) == 72, "MLVideoFrame.avcc_len
 _Static_assert(sizeof(MLVideoPacket) == 80, "MLVideoPacket layout");
 _Static_assert(offsetof(MLVideoPacket, sps_offset) == 32, "MLVideoPacket.sps_offset layout");
 _Static_assert(offsetof(MLVideoPacket, avcc_length) == 72, "MLVideoPacket.avcc_length layout");
-_Static_assert(sizeof(MLSessionMessage) == 192, "MLSessionMessage layout");
+_Static_assert(sizeof(MLSessionMessage) == 728, "MLSessionMessage layout");
 _Static_assert(offsetof(MLSessionMessage, video) == 8, "MLSessionMessage.video layout");
 _Static_assert(offsetof(MLSessionMessage, input) == 88, "MLSessionMessage.input layout");
 _Static_assert(offsetof(MLSessionMessage, control) == 136, "MLSessionMessage.control layout");
@@ -165,6 +245,20 @@ _Static_assert(offsetof(MLPairingCode, peer_id) == 512, "MLPairingCode.peer_id l
 _Static_assert(offsetof(MLPairingCode, public_key) == 577, "MLPairingCode.public_key layout");
 _Static_assert(offsetof(MLPairingCode, secret) == 609, "MLPairingCode.secret layout");
 _Static_assert(sizeof(MLPeer) == 577, "MLPeer layout");
+_Static_assert(sizeof(MLMetric) == 16, "MLMetric layout");
+_Static_assert(offsetof(MLMetric, value) == 8, "MLMetric.value layout");
+_Static_assert(sizeof(MLTuning) == 16, "MLTuning layout");
+_Static_assert(offsetof(MLTuning, fps) == 8, "MLTuning.fps layout");
+_Static_assert(sizeof(MLTelemetryMessage) == 536, "MLTelemetryMessage layout");
+_Static_assert(offsetof(MLTelemetryMessage, tuning) == 8, "MLTelemetryMessage.tuning layout");
+_Static_assert(offsetof(MLTelemetryMessage, metrics) == 24, "MLTelemetryMessage.metrics layout");
+_Static_assert(sizeof(MLTelemetrySnapshot) == 1232, "MLTelemetrySnapshot layout");
+_Static_assert(offsetof(MLTelemetrySnapshot, last_end_age_seconds) == 1064, "MLTelemetrySnapshot.last_end_age_seconds layout");
+_Static_assert(offsetof(MLTelemetrySnapshot, last_end) == 1072, "MLTelemetrySnapshot.last_end layout");
+_Static_assert(offsetof(MLTelemetrySnapshot, tuning) == 24, "MLTelemetrySnapshot.tuning layout");
+_Static_assert(offsetof(MLTelemetrySnapshot, local) == 40, "MLTelemetrySnapshot.local layout");
+_Static_assert(offsetof(MLTelemetrySnapshot, peer) == 552, "MLTelemetrySnapshot.peer layout");
+_Static_assert(offsetof(MLSessionMessage, telemetry) == 192, "MLSessionMessage.telemetry layout");
 _Static_assert(offsetof(MLPeer, name) == 65, "MLPeer.name layout");
 _Static_assert(offsetof(MLPeer, address) == 321, "MLPeer.address layout");
 
@@ -189,6 +283,8 @@ const char *ml_session_error_string(int32_t status);
 int32_t ml_session_send_video(uint64_t session, const MLVideoFrame *frame, uint32_t timeout_ms);
 int32_t ml_session_send_input(uint64_t session, const MLInputEvent *event, uint32_t timeout_ms);
 int32_t ml_session_send_control(uint64_t session, const MLControlMessage *message, uint32_t timeout_ms);
+/* Both sides may send stats; only the viewer may send tuning. */
+int32_t ml_session_send_telemetry(uint64_t session, const MLTelemetryMessage *message, uint32_t timeout_ms);
 /* Viewers pass an ML_SESSION_MAX_VIDEO buffer; hosts may pass NULL and 0.
  * TIMEOUT is retryable when no frame bytes were read. Rust enforces direction,
  * geometry before video, rate limits and a 10 s idle limit (STALLED); hosts
@@ -201,6 +297,15 @@ int32_t ml_display_geometry_validate(const MLDisplayGeometry *geometry);
 int32_t ml_video_dimensions_validate(uint32_t width, uint32_t height);
 int32_t ml_video_frame_validate(const MLVideoFrame *frame);
 int32_t ml_input_event_validate(const MLInputEvent *event);
+/* 1 when a key stays on the viewing Mac while system shortcuts such as ⌘-Tab
+ * are captured for the remote Mac: Force Quit (⌘⌥Esc, optionally ⇧), Lock
+ * Screen (⌃⌘Q) and full screen (⌃⌘F or Globe-F); otherwise 0. */
+int32_t ml_input_keeps_local(uint16_t key_code, uint32_t modifiers);
+
+/* Automatic viewer reconnects after an unexpected end: milliseconds to wait
+ * before attempt 1...ML_RECONNECT_ATTEMPTS, then ML_SESSION_INVALID. A session
+ * that stayed connected ML_RECONNECT_STABLE_SECONDS starts a new budget. */
+int32_t ml_reconnect_delay_ms(uint32_t attempt);
 
 /* Host held-input state; calls are serialized internally. accept stages one
  * event and returns what to post; call commit after posting, and any other
@@ -228,6 +333,18 @@ int32_t ml_peers_load(const char *directory, MLPeer *out, size_t capacity, size_
 int32_t ml_peers_remember(const char *directory, const MLPairingCode *code, const char *address, MLPeer *out);
 int32_t ml_peers_forget(const char *directory, const char *id);
 int32_t ml_peers_import_legacy(const char *directory, const uint8_t *json, size_t length, size_t *imported);
+
+/* Local telemetry: an owner-only Unix socket, telemetry.sock, in the MacLink
+ * data directory (NULL selects MACLINK_HOME or Application Support). Clients
+ * read one JSON snapshot per line and write {"tune": {...}} lines. No network
+ * port is opened. start is a no-op when already serving; BUSY means another
+ * MacLink serves it. take_tuning returns 1 with a pending command, 0 without. */
+int32_t ml_telemetry_start(const char *directory);
+int32_t ml_telemetry_stop(void);
+int32_t ml_telemetry_publish(const MLTelemetrySnapshot *snapshot);
+int32_t ml_telemetry_take_tuning(MLTuning *out);
+int32_t ml_tuning_defaults(MLTuning *out);
+int32_t ml_tuning_merge(const MLTuning *current, const MLTuning *update, MLTuning *out);
 
 #ifdef __cplusplus
 }

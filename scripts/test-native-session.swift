@@ -117,6 +117,8 @@ enum NativeSessionTests {
         var unknown = MLControlMessage(); unknown.kind = 9
         try rejects("Unknown control kinds are rejected") { _ = try NativeControlMessage(validated: unknown) }
 
+        try testTelemetry()
+
         let token = NativeRunToken()
         try require(token.isActive, "Run token begins active")
         let winners = Counter()
@@ -201,6 +203,84 @@ enum NativeSessionTests {
                     "Rust supplies readable session errors")
         // Saturating the network writer belongs to the separate loopback stream
         // integration suite. This suite sends no network packets.
+    }
+}
+
+extension NativeSessionTests {
+    /// Tuning, telemetry wrappers, measurement intervals, and the real CLI
+    /// against the local socket in a temporary MACLINK_HOME.
+    static func testTelemetry() throws {
+        let defaults = NativeTuning.defaults
+        try require(defaults.bitrate == 25_000_000 && defaults.maxWidth == 3840 && defaults.fps == 60
+                    && defaults.inFlight == 2 && defaults.keyframeSeconds == 2, "Rust supplies the tuning defaults")
+        var change = MLTuning(); change.fps = 30; change.bitrate_kbps = 12_000
+        let merged = defaults.merged(NativeTuning(raw: change))
+        try require(merged?.fps == 30 && merged?.bitrate == 12_000_000 && merged?.maxWidth == 3840, "Tuning merges present fields")
+        var wide = MLTuning(); wide.max_width = 5120
+        try require(defaults.merged(NativeTuning(raw: wide)) == nil, "Out-of-bounds tuning is rejected")
+        let stats: NativeStats = [.captureFps: 42, .encodeMs: 23.5, .rttMs: 8]
+        guard case .stats(let restored) = try NativeTelemetry(validated: NativeTelemetry.stats(stats).raw), restored == stats else {
+            throw Failure("Stats round-trip the C ABI")
+        }
+        guard case .tuning(let tuning) = try NativeTelemetry(validated: NativeTelemetry.tuning(NativeTuning(raw: change)).raw),
+              tuning.fps == 30 else { throw Failure("Tuning round-trips the C ABI") }
+        checks += 2
+
+        let measurements = NativeSessionMeasurements()
+        _ = measurements.nextInterval()
+        for _ in 0..<30 { measurements.add("encoded_frames"); measurements.add("encode_ms_total", 20) }
+        measurements.recordMax("encode_ms", 31); measurements.recordMax("encode_ms", 12)
+        Thread.sleep(forTimeInterval: 0.5)
+        let interval = measurements.nextInterval()
+        try require(interval.delta("encoded_frames") == 30 && interval.average("encode_ms_total", per: "encoded_frames") == 20,
+                    "Intervals report counter changes and averages")
+        try require(abs(interval.rate("encoded_frames") - 30 / interval.seconds) < 0.001 && interval.maxima["encode_ms"] == 31,
+                    "Intervals report rates and maxima")
+        let next = measurements.nextInterval()
+        try require(next.delta("encoded_frames") == 0 && next.maxima.isEmpty, "Each interval starts fresh")
+
+        let arguments = CommandLine.arguments
+        guard arguments.count > 1 else { print("Skipping CLI telemetry check: no CLI path given."); return }
+        let home = "/tmp/mls-\(getpid())"
+        try? FileManager.default.removeItem(atPath: home)
+        setenv("MACLINK_HOME", home, 1)
+        defer { NativeTelemetryServer.stop(); try? FileManager.default.removeItem(atPath: home) }
+        try require(NativeTelemetryServer.start() == 0, "The local telemetry socket starts in MACLINK_HOME")
+        func cli(_ command: [String]) throws -> Process {
+            let process = Process(), output = Pipe()
+            process.executableURL = URL(fileURLWithPath: arguments[1])
+            process.arguments = ["--config-dir", home] + command
+            process.standardOutput = output; process.standardError = output
+            try process.run()
+            return process
+        }
+        func finish(_ process: Process, publishing: Bool = false) throws -> String {
+            let deadline = ProcessInfo.processInfo.systemUptime + 8
+            while process.isRunning && ProcessInfo.processInfo.systemUptime < deadline {
+                if publishing {
+                    NativeTelemetryServer.publish(role: Int(ML_ROLE_VIEWER), seconds: 3, local: [.rttMs: 7.5], peer: [.captureFps: 42],
+                                                  peerAge: 0.4, tuning: defaults)
+                }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            if process.isRunning { process.terminate(); throw Failure("CLI telemetry command timed out") }
+            let output = (process.standardOutput as! Pipe).fileHandleForReading.readDataToEndOfFile()
+            return String(decoding: output, as: UTF8.self)
+        }
+        let tune = try cli(["tune", "--fps", "24", "--bitrate-mbps", "18"])
+        let tuneOutput = try finish(tune)
+        try require(tune.terminationStatus == 0 && tuneOutput.contains("queued"), "maclink tune queues a command: \(tuneOutput)")
+        let taken = NativeTelemetryServer.takeTuning()
+        try require(taken?.fps == 24 && taken?.bitrate == 18_000_000, "The app takes the CLI's tuning")
+        let rejected = try cli(["tune", "--fps", "61"])
+        _ = try finish(rejected)
+        try require(rejected.terminationStatus != 0 && NativeTelemetryServer.takeTuning() == nil, "Out-of-bounds CLI tuning is refused")
+        let stream = try cli(["telemetry", "--count", "2"])
+        let streamOutput = try finish(stream, publishing: true)
+        let lines = streamOutput.split(separator: "\n")
+        try require(stream.terminationStatus == 0 && lines.count == 2 && lines[0].contains("\"rtt_ms\":7.5")
+                    && lines[0].contains("\"capture_fps\":42") && lines[0].contains("\"role\":\"viewer\""),
+                    "maclink telemetry streams snapshots: \(streamOutput)")
     }
 }
 

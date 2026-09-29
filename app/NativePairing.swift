@@ -3,7 +3,11 @@ import Security
 
 struct NativeSessionError: LocalizedError {
     let message: String
+    /// The Rust status when the error came from the session library, else 0.
+    var status: Int32 = 0
     var errorDescription: String? { message }
+    /// Authentication failures mean the pairing changed; retrying cannot help.
+    var isAuthenticationFailure: Bool { status == Int32(ML_SESSION_AUTH) }
 }
 
 /// The sharing Mac's Noise identity and pairing secret, stored only in Keychain.
