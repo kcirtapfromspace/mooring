@@ -2,7 +2,7 @@
 
 A small native Mac connection app with a Rust core. The product goal is reliable, responsive Mac-to-Mac remote control that chooses sensible quality automatically.
 
-**Current milestone:** a menu-bar utility with saved Macs, live target-network checks, conservative mode selection, and an experimental Apple Screen Sharing session controller. It can request Standard or High Performance, enter full screen, and reconnect a uniquely identified session after a sustained policy change. Apple supplies authentication and video. Its mode URL options are undocumented; actual negotiation, full screen, and switching still need two-Mac validation. There is no claim of performance parity or measured video bandwidth.
+**Current milestone:** enter a Mac's address and connect. Auto mode, full screen and reconnection on learned networks are the defaults. MacLink can request Standard or High Performance and supervise a uniquely identified Apple Screen Sharing session. Apple supplies authentication and video. Its mode URL options are undocumented; actual negotiation, full screen, and switching still need two-Mac validation. There is no claim of performance parity or measured video bandwidth.
 
 ## Run
 
@@ -13,9 +13,11 @@ Requires macOS 14 or newer, Xcode Command Line Tools, and Rust 1.89 or newer. Ap
 open dist/MacLink.app
 ```
 
-MacLink lives behind a display icon in the macOS menu bar. Add a Mac, then open **Settings** to enable automation, use Detect Network → Use This Network as Home, confirm High Performance support, and optionally enable login launch. Grant MacLink Accessibility access there for session tracking and full screen. **Mode Preference** and **Pause Automation** are available directly in the menu. MacLink never asks for or stores a remote password.
+MacLink lives behind a display icon in the macOS menu bar. Choose **Add Mac**, enter its hostname or IP, and click **Add & Connect**. On the first connection, **Enable & Connect** opens macOS Accessibility settings; once you grant access, the connection continues automatically. You can also connect without automation. Sign in through Apple Screen Sharing if prompted. MacLink never asks for or stores a remote password.
 
-Builds and GitHub preview releases target Apple silicon (arm64) only. Download the [menu-bar automation preview](https://github.com/kcirtapfromspace/maclink/releases/tag/v0.2.0-preview.2). Distribution uses Developer ID signing, Apple notarization, and a stapled ticket checked after extracting the final ZIP. Local development builds remain ad hoc by default. See [testing instructions](docs/TESTING.md), [automation behavior](docs/AUTOMATION.md), and the [notarization workflow](docs/NOTARIZATION.md).
+No home-network marking or capability checkbox is required to start. Auto starts with Standard and learns a direct network after an explicitly opened, identified session and sustained healthy checks. It may then make a bounded High Performance trial without claiming that support or bandwidth has been verified. Settings contains optional display, login and connection preferences; **Advanced** contains home overrides and detailed tuning. Previously configured preferences are preserved.
+
+Builds and GitHub preview releases target Apple silicon (arm64) only. Download the [simple setup preview](https://github.com/kcirtapfromspace/maclink/releases/tag/v0.2.0-preview.3). Distribution uses Developer ID signing, Apple notarization, and a stapled ticket checked after extracting the final ZIP. Local development builds remain ad hoc by default. See [testing instructions](docs/TESTING.md), [automation behavior](docs/AUTOMATION.md), and the [notarization workflow](docs/NOTARIZATION.md).
 
 ## CLI
 

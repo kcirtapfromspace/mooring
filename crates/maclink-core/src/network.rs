@@ -46,8 +46,9 @@ pub enum VpnStatus {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransportContext {
-    /// Explicit approval of a baseline for the current route. Never derive this
-    /// from a private IP, SSID, interface type, or Bonjour discovery alone.
+    /// A baseline approved by the user or learned after an explicitly initiated,
+    /// identified session and sustained healthy checks. Never derive this from
+    /// a private IP, SSID, interface type, or Bonjour discovery alone.
     /// A travel router can reproduce a home SSID/address without being at home.
     pub trusted_home_baseline: bool,
     /// Explicit user approval to consider this known route, including a tunnel.
@@ -56,6 +57,12 @@ pub struct TransportContext {
     /// Supplied by actual host/client capability checks or explicit configuration;
     /// a successful RFB greeting does not establish High Performance support.
     pub high_performance_supported: bool,
+    /// Permission to make an experimental request without claiming capability
+    /// support. Trials require a familiar direct physical path and the same
+    /// sustained evidence/dwell as confirmed support. Callers bound trial attempts
+    /// and disable this after a failed request; exported mode is not negotiation.
+    #[serde(default)]
+    pub automatic_high_performance_trial: bool,
     pub transport: NetworkTransport,
     pub vpn: VpnStatus,
     /// Optional opaque current-route fingerprint. A change clears accumulated
@@ -220,6 +227,7 @@ pub enum NetworkReason {
     ExplicitApprovalRequired,
     TunnelOverrideRequired,
     HighPerformanceUnsupported,
+    AutomaticTrialUnavailable,
     RetryBudgetExhausted,
     SwitchBudgetExhausted,
     ClockRegression,
@@ -258,7 +266,30 @@ pub struct NetworkEvaluation {
 
 fn eligibility(context: &TransportContext) -> Option<NetworkReason> {
     if !context.high_performance_supported {
-        Some(NetworkReason::HighPerformanceUnsupported)
+        if !context.automatic_high_performance_trial {
+            Some(NetworkReason::HighPerformanceUnsupported)
+        } else if context.transport == NetworkTransport::Unknown
+            || context.vpn == VpnStatus::Unknown
+            || context
+                .route_identity
+                .as_ref()
+                .is_none_or(|identity| identity.trim().is_empty())
+        {
+            Some(NetworkReason::UnknownTargetRoute)
+        } else if context.vpn == VpnStatus::Present {
+            // Trial permission is deliberately narrower than an override for
+            // confirmed support. A fast tunnel is not a direct physical path.
+            Some(NetworkReason::TunnelOverrideRequired)
+        } else if !context.trusted_home_baseline {
+            Some(NetworkReason::ExplicitApprovalRequired)
+        } else if !matches!(
+            context.transport,
+            NetworkTransport::Wifi | NetworkTransport::Ethernet
+        ) {
+            Some(NetworkReason::AutomaticTrialUnavailable)
+        } else {
+            None
+        }
     } else if context.transport == NetworkTransport::Unknown || context.vpn == VpnStatus::Unknown {
         Some(NetworkReason::UnknownTargetRoute)
     } else if context.vpn == VpnStatus::Present && !context.allow_high_performance_override {
@@ -554,6 +585,7 @@ mod tests {
             trusted_home_baseline: true,
             allow_high_performance_override: false,
             high_performance_supported: true,
+            automatic_high_performance_trial: false,
             transport: NetworkTransport::Wifi,
             vpn: VpnStatus::Absent,
             route_identity: Some("explicitly-approved-target-route".into()),
@@ -678,6 +710,138 @@ mod tests {
         let result = run(Some(promote().state), 33000, vec![good(33000)], route);
         assert_eq!(result.recommended_mode, RemoteDesktopMode::Standard);
         assert_eq!(result.reason, NetworkReason::HighPerformanceUnsupported);
+    }
+
+    #[test]
+    fn automatic_trial_requires_the_same_sustained_measurements_and_dwell() {
+        for transport in [NetworkTransport::Wifi, NetworkTransport::Ethernet] {
+            let mut route = context();
+            route.high_performance_supported = false;
+            route.automatic_high_performance_trial = true;
+            route.transport = transport;
+            let mut result = run(None, 0, vec![good(0)], route.clone());
+            for time in (3000..30000).step_by(3000) {
+                result = run(Some(result.state), time, vec![good(time)], route.clone());
+                assert_eq!(result.recommended_mode, RemoteDesktopMode::Standard);
+            }
+            result = run(Some(result.state), 30000, vec![good(30000)], route);
+            assert_eq!(result.recommended_mode, RemoteDesktopMode::HighPerformance);
+            assert_eq!(result.reason, NetworkReason::SustainedHealthyMeasurements);
+            assert!(
+                !result
+                    .state
+                    .last_context
+                    .unwrap()
+                    .high_performance_supported
+            );
+        }
+    }
+
+    #[test]
+    fn automatic_trial_never_overrides_tunnel_unknown_or_unfamiliar_paths() {
+        let mut baseline = context();
+        baseline.high_performance_supported = false;
+        baseline.automatic_high_performance_trial = true;
+        // This existing setting must not broaden unconfirmed trial eligibility.
+        baseline.allow_high_performance_override = true;
+        let cases = [
+            (
+                TransportContext {
+                    vpn: VpnStatus::Present,
+                    ..baseline.clone()
+                },
+                NetworkReason::TunnelOverrideRequired,
+            ),
+            (
+                TransportContext {
+                    vpn: VpnStatus::Unknown,
+                    ..baseline.clone()
+                },
+                NetworkReason::UnknownTargetRoute,
+            ),
+            (
+                TransportContext {
+                    transport: NetworkTransport::Unknown,
+                    ..baseline.clone()
+                },
+                NetworkReason::UnknownTargetRoute,
+            ),
+            (
+                TransportContext {
+                    transport: NetworkTransport::Cellular,
+                    ..baseline.clone()
+                },
+                NetworkReason::AutomaticTrialUnavailable,
+            ),
+            (
+                TransportContext {
+                    transport: NetworkTransport::Other,
+                    ..baseline.clone()
+                },
+                NetworkReason::AutomaticTrialUnavailable,
+            ),
+            (
+                TransportContext {
+                    trusted_home_baseline: false,
+                    ..baseline.clone()
+                },
+                NetworkReason::ExplicitApprovalRequired,
+            ),
+            (
+                TransportContext {
+                    route_identity: None,
+                    ..baseline.clone()
+                },
+                NetworkReason::UnknownTargetRoute,
+            ),
+            (
+                TransportContext {
+                    route_identity: Some("  ".into()),
+                    ..baseline
+                },
+                NetworkReason::UnknownTargetRoute,
+            ),
+        ];
+        for (route, reason) in cases {
+            let mut result = run(None, 0, vec![good(0)], route.clone());
+            for time in (3000..=60000).step_by(3000) {
+                result = run(Some(result.state), time, vec![good(time)], route.clone());
+            }
+            assert_eq!(result.recommended_mode, RemoteDesktopMode::Standard);
+            assert_eq!(result.reason, reason);
+            assert_eq!(result.evidence.consecutive_healthy_samples, 0);
+        }
+    }
+
+    #[test]
+    fn disabling_automatic_trials_clears_an_unconfirmed_promotion() {
+        let mut route = context();
+        route.high_performance_supported = false;
+        route.automatic_high_performance_trial = true;
+        let mut result = run(None, 0, vec![good(0)], route.clone());
+        for time in (3000..=30000).step_by(3000) {
+            result = run(Some(result.state), time, vec![good(time)], route.clone());
+        }
+        assert_eq!(result.recommended_mode, RemoteDesktopMode::HighPerformance);
+        route.automatic_high_performance_trial = false;
+        let result = run(Some(result.state), 33000, vec![good(33000)], route);
+        assert_eq!(result.recommended_mode, RemoteDesktopMode::Standard);
+        assert_eq!(result.reason, NetworkReason::HighPerformanceUnsupported);
+    }
+
+    #[test]
+    fn confirmed_support_retains_explicit_tunnel_override_behavior() {
+        let mut route = context();
+        route.automatic_high_performance_trial = true;
+        route.vpn = VpnStatus::Present;
+        route.transport = NetworkTransport::Other;
+        route.trusted_home_baseline = false;
+        route.allow_high_performance_override = true;
+        let mut result = run(None, 0, vec![good(0)], route.clone());
+        for time in (3000..=30000).step_by(3000) {
+            result = run(Some(result.state), time, vec![good(time)], route.clone());
+        }
+        assert_eq!(result.recommended_mode, RemoteDesktopMode::HighPerformance);
     }
 
     #[test]

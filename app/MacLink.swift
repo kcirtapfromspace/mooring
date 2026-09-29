@@ -172,40 +172,53 @@ private final class AddMacController: NSWindowController, NSTextFieldDelegate {
     let hostField = NSTextField(string: "")
     let portField = NSTextField(string: "5900")
     let errorLabel = label("", size: 12, color: .systemRed)
-    let saveButton = NSButton(title: "Add Mac", target: nil, action: nil)
+    let saveButton = NSButton(title: "Add & Connect", target: nil, action: nil)
     let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
+    private let optionsButton = NSButton(title: "More Options", target: nil, action: nil)
+    private var optionsForm: NSGridView!
     var onSave: ((String, String, String) -> Void)?
     var onCancel: (() -> Void)?
 
     init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 430, height: 350),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 330),
                               styleMask: [.titled], backing: .buffered, defer: false)
         super.init(window: window)
         window.title = "Add a Mac"
         let title = label("Add a Mac", size: 22, weight: .semibold)
-        let subtitle = label("Save an address so your next connection is one click away.", color: .secondaryLabelColor)
+        let subtitle = label("Enter your Mac’s address. Auto mode and full screen are ready to go.", color: .secondaryLabelColor)
         for field in [nameField, hostField, portField] {
             field.delegate = self
             field.controlSize = .large
         }
-        nameField.placeholderString = "Home Studio"
+        nameField.placeholderString = "Optional — uses the address"
         hostField.placeholderString = "Mac-Studio.local or 192.168.1.20"
         nameField.setAccessibilityLabel("Mac name")
         hostField.setAccessibilityLabel("Hostname or IP address")
         portField.setAccessibilityLabel("Screen Sharing port")
         errorLabel.maximumNumberOfLines = 3
         errorLabel.lineBreakMode = .byTruncatingTail
-        let form = NSGridView(views: [
+        let form = NSGridView(views: [[label("Address"), hostField]])
+        optionsForm = NSGridView(views: [
             [label("Name"), nameField],
-            [label("Address"), hostField],
             [label("Port"), portField]
         ])
-        form.translatesAutoresizingMaskIntoConstraints = false
-        form.rowSpacing = 12
-        form.columnSpacing = 16
-        form.column(at: 0).xPlacement = .trailing
-        form.column(at: 1).xPlacement = .fill
-        for row in 0..<3 { form.row(at: row).yPlacement = .center }
+        for grid in [form, optionsForm!] {
+            grid.translatesAutoresizingMaskIntoConstraints = false
+            grid.rowSpacing = 12
+            grid.columnSpacing = 16
+            grid.column(at: 0).width = 52
+            grid.column(at: 0).xPlacement = .trailing
+            grid.column(at: 1).xPlacement = .fill
+            for row in 0..<grid.numberOfRows { grid.row(at: row).yPlacement = .center }
+        }
+        optionsForm.isHidden = true
+        optionsButton.bezelStyle = .inline
+        optionsButton.setButtonType(.onOff)
+        optionsButton.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)
+        optionsButton.imagePosition = .imageLeading
+        optionsButton.target = self
+        optionsButton.action = #selector(toggleOptions)
+        optionsButton.setAccessibilityLabel("More Options: optional name and port")
         saveButton.bezelStyle = .rounded
         saveButton.keyEquivalent = "\r"
         saveButton.target = self
@@ -217,7 +230,8 @@ private final class AddMacController: NSWindowController, NSTextFieldDelegate {
         cancelButton.action = #selector(cancel)
         let spacer = NSView()
         let actions = stack([spacer, cancelButton, saveButton], orientation: .horizontal, spacing: 8)
-        let content = stack([title, subtitle, form, errorLabel, actions], spacing: 18)
+        let content = stack([title, subtitle, form, optionsButton, optionsForm, errorLabel, actions], spacing: 14)
+        content.detachesHiddenViews = true
         window.contentView!.addSubview(content)
         NSLayoutConstraint.activate([
             content.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 28),
@@ -226,29 +240,38 @@ private final class AddMacController: NSWindowController, NSTextFieldDelegate {
             content.bottomAnchor.constraint(lessThanOrEqualTo: window.contentView!.bottomAnchor, constant: -24),
             subtitle.widthAnchor.constraint(equalTo: content.widthAnchor),
             form.widthAnchor.constraint(equalTo: content.widthAnchor),
+            optionsForm.widthAnchor.constraint(equalTo: content.widthAnchor),
             errorLabel.widthAnchor.constraint(equalTo: content.widthAnchor),
             actions.widthAnchor.constraint(equalTo: content.widthAnchor)
         ])
-        window.initialFirstResponder = nameField
+        window.initialFirstResponder = hostField
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     func controlTextDidChange(_ obj: Notification) { validate() }
     private func validate() {
-        saveButton.isEnabled = !nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        saveButton.isEnabled = !hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     func setBusy(_ busy: Bool) {
         [nameField, hostField, portField].forEach { $0.isEnabled = !busy }
+        optionsButton.isEnabled = !busy
         cancelButton.isEnabled = !busy
         saveButton.isEnabled = !busy
-        saveButton.title = busy ? "Saving…" : "Add Mac"
+        saveButton.title = busy ? "Saving…" : "Add & Connect"
         if !busy { validate() }
     }
     @objc private func save() {
         guard saveButton.isEnabled else { return }
         errorLabel.stringValue = ""
-        onSave?(nameField.stringValue, hostField.stringValue, portField.stringValue)
+        let address = hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        onSave?(name.isEmpty ? String(address.prefix(80)) : name, address, portField.stringValue)
+    }
+    @objc private func toggleOptions() {
+        let expanded = optionsButton.state == .on
+        optionsForm.isHidden = !expanded
+        optionsButton.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
+        window?.setContentSize(NSSize(width: 460, height: expanded ? 420 : 330))
     }
     @objc private func cancel() { onCancel?() }
 }
@@ -256,8 +279,8 @@ private final class AddMacController: NSWindowController, NSTextFieldDelegate {
 /// Automation owns policy and session actions; the shell only renders this state.
 /// Coordinator callbacks and completions must be delivered on the main thread.
 struct AutomationMenuState {
-    var title: String = "Automation not configured"
-    var detail: String = "Open Settings to configure automation for a saved Mac."
+    var title: String = "Ready to connect"
+    var detail: String = "Add a Mac to get started. Auto mode and full screen are the defaults."
     var isConfigured: Bool = false
     var isPaused: Bool = false
     var isBusy: Bool = false
@@ -394,18 +417,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         addItem.isEnabled = available
         statusMenu.addItem(addItem)
         statusMenu.addItem(.separator())
-        let preference = NSMenuItem(title: "Mode Preference", action: nil, keyEquivalent: "")
-        let choices = NSMenu()
-        choices.autoenablesItems = false
-        for (title, value) in [("Auto", "auto"), ("Standard", "standard"), ("Prefer High Performance", "high_performance")] {
-            let item = NSMenuItem(title: title, action: #selector(changePreference(_:)), keyEquivalent: "")
-            item.target = self; item.representedObject = value
-            item.state = automation.selectedPreference == value ? .on : .off
-            item.isEnabled = automationState.isConfigured && !automationState.isBusy
-            choices.addItem(item)
+        if automationState.isConfigured && !AppleSession.isTrusted {
+            let permission = NSMenuItem(title: "Enable Full Screen & Auto Switching…", action: #selector(enableSessionControl), keyEquivalent: "")
+            permission.target = self
+            permission.isEnabled = available
+            statusMenu.addItem(permission)
         }
-        preference.submenu = choices
-        statusMenu.addItem(preference)
         let pauseItem = NSMenuItem(title: automationState.isPaused ? "Resume Automation" : "Pause Automation",
                                    action: #selector(toggleAutomation), keyEquivalent: "")
         pauseItem.target = self
@@ -439,10 +456,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         automation.togglePause()
     }
 
-    @objc private func changePreference(_ sender: NSMenuItem) {
-        guard let value = sender.representedObject as? String else { return }
-        automation.setPreference(value)
-    }
+    @objc private func enableSessionControl() { AppleSession.requestPermission() }
 
     private func buildMenu() {
         let menu = NSMenu()
@@ -655,7 +669,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         connectButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 112).isActive = true
         let content = stack([intro, statusBox, buttons], spacing: 26)
         main.addSubview(content)
-        let hint = label("Opens Apple Screen Sharing.\nDisplay mode is managed by Apple.", size: 12, color: .secondaryLabelColor)
+        let hint = label("Auto mode and full screen by default.\nCustomize anytime in Settings.", size: 12, color: .secondaryLabelColor)
         let help = NSButton(image: NSImage(systemSymbolName: "questionmark.circle", accessibilityDescription: "Connection help and display mode")!, target: self, action: #selector(showConnectionHelp))
         help.isBordered = false
         help.toolTip = "Connection help and display mode"
@@ -694,7 +708,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             titleLabel.toolTip = mac.name
             addressLabel.stringValue = mac.endpoint
             addressLabel.toolTip = mac.endpoint
-            setStatus("Ready when you are", "Connect opens Apple Screen Sharing. You’ll sign in there using the remote Mac’s account.")
+            setStatus("Ready when you are", "Connect to sign in with your remote Mac’s account. MacLink handles the connection settings for you.")
         } else {
             titleLabel.stringValue = "Your Macs,\nwithin reach."
             titleLabel.toolTip = nil
@@ -742,7 +756,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         return window?.attachedSheet == nil
     }
 
-    private func reloadConnections(select id: String? = nil) {
+    private func reloadConnections(select id: String? = nil, onLoaded: (() -> Void)? = nil) {
         let selection = id ?? selectedMac?.id
         setBusy(true)
         cli.run(["list"]) { [weak self] result in
@@ -773,6 +787,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
                     }
                     if self.initialLoad && self.connections.isEmpty { self.showConnections() }
                     self.initialLoad = false
+                    onLoaded?()
                 } catch {
                     self.setStatus("Couldn’t read saved Macs", "The MacLink command-line tool returned an unexpected response. \(error.localizedDescription)", error: true)
                     self.lastMenuAction = "Couldn’t read saved Macs"
@@ -812,7 +827,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
                     do {
                         let saved = try JSONDecoder().decode(SavedMac.self, from: data)
                         self.closeAddSheet()
-                        self.reloadConnections(select: saved.id)
+                        self.reloadConnections(select: saved.id) { [weak self] in
+                            guard let self, self.selectedMac?.id == saved.id else { return }
+                            self.connect()
+                        }
                     } catch {
                         // The write may have succeeded; refresh instead of inviting a duplicate save.
                         self.closeAddSheet()
@@ -871,7 +889,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
                 self.showConnections()
             case .success:
                 self.lastMenuAction = "Screen Sharing opened"
-                self.setStatus("Handed off to Screen Sharing", "Complete sign-in in Apple’s app. The MacLink menu shows automation and session status when configured. A launch alone does not confirm the requested display mode.", success: true)
+                self.setStatus("Screen Sharing opened", "Sign in with your remote Mac’s account if asked. Connection status and Pause are available from the MacLink menu.", success: true)
             }
             self.refreshStatusMenu()
         }
@@ -915,7 +933,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         showConnections()
         let alert = NSAlert()
         alert.messageText = "Connecting to a Mac"
-        alert.informativeText = "MacLink lives in your menu bar. Use its display icon to connect, open this window, or manage automation in Settings. Closing this window leaves MacLink running.\n\nOn the remote Mac, enable Screen Sharing in System Settings → General → Sharing, and allow the account you use to connect. Enter that Mac’s hostname or IP address in MacLink.\n\nApple Screen Sharing provides the remote session. Display-mode options depend on Apple’s app and the selected connection profile. Use MacLink Settings to configure available automation.\n\nMacLink saves names and addresses locally. Passwords are handled by Apple Screen Sharing."
+        alert.informativeText = "Add your Mac’s address and connect. MacLink uses Auto mode and full screen by default, and lives in your menu bar when this window is closed. Settings are there when you want to customize.\n\nOn the remote Mac, enable Screen Sharing in System Settings → General → Sharing, and allow the account you use to connect.\n\nmacOS asks for Accessibility permission so MacLink can enter full screen and manage its connection window. Use Enable Full Screen & Auto Switching in the MacLink menu if you skipped it.\n\nPasswords are handled by Apple Screen Sharing. MacLink saves names and addresses locally."
         alert.addButton(withTitle: "Done")
         alert.beginSheetModal(for: window) { [weak self] _ in self?.updateControls() }
         updateControls()

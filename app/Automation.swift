@@ -16,6 +16,10 @@ final class AutomationCoordinator: MacLinkAutomationService {
     private var settings: AutomationSettings
     private var connections: [SavedMac] = []
     private var settingsWindow: AutomationSettingsController?
+    private var permissionWindow: ConnectionPermissionController?
+    private var learningNetworkGeneration: Int?
+    private var trialPaths = Set<String>()
+    private var currentTrialKey: String?
     private let session = AppleSession()
     private let sessionQueue = DispatchQueue(label: "dev.maclink.session")
     private let monitor = NWPathMonitor()
@@ -64,9 +68,6 @@ final class AutomationCoordinator: MacLinkAutomationService {
     var selectedPreference: String { settings.preference }
     func setPreference(_ preference: String) {
         guard ["auto", "standard", "high_performance"].contains(preference), !launchBusy else { return }
-        if preference == "high_performance" && !settings.highPerformanceConfirmed {
-            showSettings(connections: connections, parentWindow: nil); return
-        }
         settings.preference = preference; save(); invalidateEvidence()
         if preference == "standard", requestedMode != "standard", sessionConnected, !settings.paused, let mac = target, AppleSession.isTrusted {
             reconnect(mac, mode: "standard")
@@ -117,24 +118,26 @@ final class AutomationCoordinator: MacLinkAutomationService {
     private func invalidateEvidence() {
         intent.cancel(); intent = AutomationIntent()
         generation += 1; policyState = nil; latestProbe = nil; firstProbeAt = nil
-        routeFingerprint = nil; reachable = false; recommendation = "standard"
+        routeFingerprint = nil; reachable = false; recommendation = "standard"; currentTrialKey = nil
         localNetworkFingerprint = nil
         nextProbeAt = 0; offlineCooling = false
     }
     private func invalidateNetwork(_ reason: String) {
         networkGeneration += 1
+        learningNetworkGeneration = nil
         invalidateEvidence()
         settingsWindow?.invalidateHomeCheck(reason: reason)
     }
     private func refreshIdleState() {
-        if !settings.enabled { publish("Automation is off", "Choose a Mac and enable automation in Settings.") }
-        else if target == nil { publish("Choose a Mac", "The saved automation target is missing. Open Settings.") }
+        if !settings.enabled { publish("Manual connections", "Automatic connections are off. Connect to any saved Mac from this menu.") }
+        else if target == nil { publish("Ready to connect", "Add a Mac or connect to a saved Mac. Automatic setup happens when you connect.") }
         else if settings.paused { publish("Automation paused", "Resume from this menu when you want automatic connections again.") }
-        else if !AppleSession.isTrusted { publish("Accessibility setup needed", "Open Settings to enable session tracking, full screen and reconnects.") }
+        else if !AppleSession.isTrusted { publish("Ready · full screen available", "Connect to enable full screen and automatic session changes, or use the permission button in this menu.") }
         else { publish("Evaluating connection…", "Checking the path to your saved Mac.") }
     }
     func togglePause() {
         settings.paused.toggle(); save(); invalidateEvidence()
+        learningNetworkGeneration = nil
         if !settings.paused {
             launches = 0
             if !sessionConnected { sessionRequested = false; sessionQueue.async { self.session.reset() } }
@@ -144,12 +147,13 @@ final class AutomationCoordinator: MacLinkAutomationService {
     func stop() {
         intent.cancel()
         stopped = true; generation += 1; timer?.invalidate(); monitor.cancel()
+        permissionWindow?.cancel(); permissionWindow = nil
         workspaceObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
         workspaceObservers.removeAll()
     }
     private func tick() {
-        guard !stopped, settings.enabled, !settings.paused, let mac = target else { return }
-        if sessionRequested && !launchBusy { observeSession() }
+        guard !stopped, permissionWindow == nil, settings.enabled, !settings.paused, let mac = target else { return }
+        if sessionRequested && !launchBusy && AppleSession.isTrusted { observeSession() }
         guard !probeBusy, !launchBusy, now >= nextProbeAt else { return }
         probe(mac)
     }
@@ -203,12 +207,27 @@ final class AutomationCoordinator: MacLinkAutomationService {
         let transport: String
         switch type { case .wifi: transport = "wifi"; case .wiredEthernet: transport = "ethernet"; case .cellular: transport = "cellular"; default: transport = route["tunnel"] as? Bool == true ? "other" : "unknown" }
         let vpn: String = (route["tunnel"] as? Bool).map { $0 ? "present" : "absent" } ?? "unknown"
-        // Keep previously saved target-route preferences working while new setup
-        // identifies the local network independently of the remote Mac.
+        // Remember a path only after an explicit connection yields an identified
+        // session and a sustained healthy span on the same physical network.
+        // This is familiarity, not proof of location, bandwidth or HP capability.
+        if learningNetworkGeneration == networkGeneration, sessionConnected,
+           vpn == "absent", ["wifi", "ethernet"].contains(transport),
+           now - (firstProbeAt ?? now) >= 35, let fingerprint = localNetworkFingerprint {
+            if !settings.recognizesPath(targetID: mac.id, fingerprint: fingerprint) {
+                settings.rememberFamiliarPath(targetID: mac.id, fingerprint: fingerprint); save()
+            }
+            learningNetworkGeneration = nil
+        }
         let home = [routeFingerprint, localNetworkFingerprint].compactMap { $0 }.contains { settings.homeRoutes.contains($0) }
+            || settings.recognizesPath(targetID: mac.id, fingerprint: localNetworkFingerprint)
+        currentTrialKey = routeFingerprint.map { $0 + "|" + (localNetworkFingerprint ?? "unknown") }
+        let trialAvailable = currentTrialKey.map { key in
+            (trialPaths.count < 32 && !trialPaths.contains(key)) || (sessionRequested && requestedMode == "high_performance")
+        } ?? false
         var context: [String: Any] = ["trusted_home_baseline": home,
                                      "allow_high_performance_override": settings.allowVPN || settings.preference == "high_performance",
-                                     "high_performance_supported": settings.highPerformanceConfirmed && settings.preference != "standard" && !crashFallback,
+                                     "high_performance_supported": (settings.highPerformanceConfirmed || settings.preference == "high_performance") && settings.preference != "standard" && !crashFallback,
+                                     "automatic_high_performance_trial": settings.automaticHighPerformanceTrial && trialAvailable && settings.preference == "auto" && !crashFallback,
                                      "transport": transport, "vpn": vpn]
         if let routeFingerprint { context["route_identity"] = routeFingerprint + "|" + (localNetworkFingerprint ?? "unknown-local-network") }
         var request: [String: Any] = ["now_ms": UInt64(now * 1000), "context": context, "probes": [sample]]
@@ -237,12 +256,12 @@ final class AutomationCoordinator: MacLinkAutomationService {
             if !AppleSession.isTrusted { self.refreshIdleState(); return }
             let displayMode = mode == "high_performance" ? "High Performance" : "Standard"
             let detail = "\(self.routeDescription). \(reason)" + (self.sessionIssue.map { " \($0)" } ?? "")
-            self.publish(self.sessionConnected ? "\(displayMode) recommended" : "\(displayMode) · \(home ? "home path" : "away / unknown path")", detail)
+            self.publish(self.sessionConnected ? "\(displayMode) recommended" : "\(displayMode) · \(home ? "familiar network" : "checking network")", detail)
             self.considerAction(mac: mac, home: home)
         }
     }
     private func considerAction(mac: SavedMac, home: Bool) {
-        guard reachable, path?.status == .satisfied, !launchBusy, AppleSession.isTrusted, now - lastLaunchAt >= 30 else { return }
+        guard reachable, path?.status == .satisfied, !launchBusy, permissionWindow == nil, AppleSession.isTrusted, now - lastLaunchAt >= 30 else { return }
         if sessionConnected, recommendation != requestedMode {
             reconnect(mac, mode: recommendation)
         } else if !sessionRequested, settings.autoConnect, home,
@@ -251,19 +270,81 @@ final class AutomationCoordinator: MacLinkAutomationService {
         }
     }
     func connect(_ connection: SavedMac, completion: @escaping (Result<Data, CLIError>) -> Void) {
-        guard settings.enabled, connection.id == settings.targetID else {
+        guard !launchBusy, permissionWindow == nil else {
+            completion(.failure(CLIError(message: "A connection is already being prepared."))); return
+        }
+        // Do not silently abandon a tracked session when choosing another Mac.
+        if sessionRequested {
+            verifyPreviousSessionClosed(connection, completion: completion); return
+        }
+        guard settings.enabled else {
             cli.run(["connect", connection.id], completion: completion); return
         }
-        guard !launchBusy else { completion(.failure(CLIError(message: "A connection change is already in progress."))); return }
-        // An explicit Connect resumes a deliberately paused automation target.
-        settings.paused = false; save(); launches = 0
-        let mode = settings.preference == "high_performance" && settings.highPerformanceConfirmed ? "high_performance" : settings.preference == "standard" ? "standard" : recommendation
-        if sessionConnected {
-            completion(.failure(CLIError(message: "The managed session is already open. Use its existing window."))); return
+        if connection.id != settings.targetID { crashFallback = false }
+        // An explicit retry starts with fresh evidence; keep exhausted trial paths.
+        invalidateEvidence()
+        settings.selectForConnection(connection.id); save()
+        launches = 0
+        learningNetworkGeneration = networkGeneration
+        if !AppleSession.isTrusted && !settings.permissionPromptShown {
+            let controller = ConnectionPermissionController(macName: connection.name)
+            permissionWindow = controller
+            controller.onComplete = { [weak self] allowed in
+                guard let self else { return }
+                self.permissionWindow = nil
+                guard !self.stopped, let allowed else {
+                    self.learningNetworkGeneration = nil
+                    self.settings.paused = true; self.save(); self.refreshIdleState()
+                    completion(.failure(CLIError(message: "Connection cancelled."))); return
+                }
+                self.settings.permissionPromptShown = true; self.save()
+                if allowed { self.connectPrepared(connection, completion: completion) }
+                else { self.connectManually(connection, completion: completion) }
+            }
+            controller.showWindow(nil); controller.window?.center(); NSApp.activate(ignoringOtherApps: true)
+            return
         }
-        guard !sessionRequested else {
-            completion(.failure(CLIError(message: "Complete or cancel the existing Screen Sharing connection first. Pause and resume automation to retry."))); return
+        connectPrepared(connection, completion: completion)
+    }
+    private func verifyPreviousSessionClosed(_ connection: SavedMac, completion: @escaping (Result<Data, CLIError>) -> Void) {
+        guard AppleSession.isTrusted, !observationBusy else {
+            completion(.failure(CLIError(message: "Finish or close the current Screen Sharing connection first."))); return
         }
+        launchBusy = true; observationBusy = true
+        let epoch = generation
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            // Read closure only: a paused session must never be raised or resized.
+            let observation = self.session.observe(fullscreen: false, shouldAct: { false })
+            DispatchQueue.main.async {
+                self.launchBusy = false; self.observationBusy = false
+                guard !self.stopped, self.generation == epoch else {
+                    completion(.failure(CLIError(message: "Connection cancelled."))); return
+                }
+                switch observation {
+                case .closed, .appExited:
+                    self.sessionRequested = false; self.sessionConnected = false
+                    if case .appExited = observation { self.crashFallback = true }
+                    self.connect(connection, completion: completion)
+                default:
+                    completion(.failure(CLIError(message: "Your remote session is still open or signing in. Close it before opening another connection.")))
+                }
+            }
+        }
+    }
+    private func connectManually(_ connection: SavedMac, completion: @escaping (Result<Data, CLIError>) -> Void) {
+        learningNetworkGeneration = nil
+        settings.paused = true; save()
+        publish("Manual session", "Enable Accessibility from the MacLink menu for full screen and automatic changes on your next connection.")
+        cli.run(["connect-mode", connection.id, settings.preference == "high_performance" ? "high_performance" : "standard"], completion: completion)
+    }
+    private func connectPrepared(_ connection: SavedMac, completion: @escaping (Result<Data, CLIError>) -> Void) {
+        guard !stopped, !launchBusy, !sessionRequested, settings.targetID == connection.id,
+              settings.enabled, !settings.paused else {
+            completion(.failure(CLIError(message: "Connection settings changed. Connect again when ready."))); return
+        }
+        guard AppleSession.isTrusted else { connectManually(connection, completion: completion); return }
+        let mode = settings.preference == "high_performance" && !crashFallback ? "high_performance" : settings.preference == "standard" ? "standard" : recommendation
         launch(connection, mode: mode, completion: completion)
     }
     private func launch(_ mac: SavedMac, mode: String, completion: @escaping (Result<Data, CLIError>) -> Void) {
@@ -272,6 +353,7 @@ final class AutomationCoordinator: MacLinkAutomationService {
             completion(.failure(CLIError(message: "Automatic reconnect limit reached."))); return
         }
         launchBusy = true; sessionRequested = true; sessionConnected = false; requestedMode = mode
+        if mode == "high_performance", let key = currentTrialKey, trialPaths.count < 32 { trialPaths.insert(key) }
         sessionIssue = nil
         launches += 1; lastLaunchAt = now
         let epoch = generation
@@ -373,6 +455,7 @@ final class AutomationCoordinator: MacLinkAutomationService {
     private func pauseForAttention(_ title: String, _ detail: String) {
         intent.cancel(); intent = AutomationIntent()
         settings.paused = true; save(); generation += 1
+        learningNetworkGeneration = nil
         publish(title, detail)
     }
     func showSettings(connections: [SavedMac], parentWindow: NSWindow?) {
@@ -409,8 +492,14 @@ final class AutomationCoordinator: MacLinkAutomationService {
         controller.onSave = { [weak self, weak controller] updated, launchAtLogin in
             guard let self else { return }
             let changedTarget = updated.targetID != self.settings.targetID
+            guard !changedTarget || !self.sessionRequested else {
+                let alert = NSAlert(); alert.messageText = "Close the current connection first"
+                alert.informativeText = "Your current remote session is still open. Close it before choosing a different Mac for automation."
+                alert.runModal(); return
+            }
+            self.learningNetworkGeneration = nil
             self.settings = updated; self.save(); self.invalidateEvidence()
-            self.launches = 0; self.crashFallback = false
+            if changedTarget { self.launches = 0; self.crashFallback = false }
             if changedTarget { self.sessionRequested = false; self.sessionConnected = false; self.requestedMode = nil }
             controller?.close(); self.refreshIdleState(); self.tick()
             // Login registration is independent of saving home preferences.
@@ -432,9 +521,10 @@ final class AutomationCoordinator: MacLinkAutomationService {
         case "sustained_healthy_measurements": return "Connection checks are stable. Available video bandwidth is still unknown."
         case "sustained_adverse_measurements", "awaiting_fallback_dwell": return "Connection checks are slow or uneven; Standard is the conservative choice."
         case "route_changed": return "The path changed; rebuilding connection evidence."
-        case "high_performance_unsupported": return "High Performance is disabled or has not been confirmed in Settings."
-        case "tunnel_override_required": return "VPN paths use Standard unless allowed in Settings."
-        case "explicit_approval_required": return "This path is not marked as home; using Standard."
+        case "high_performance_unsupported": return "Using Standard until a familiar network is ready for a High Performance attempt."
+        case "tunnel_override_required": return "Using Standard on this VPN path."
+        case "automatic_trial_unavailable": return "Using Standard while this network’s suitability is uncertain."
+        case "explicit_approval_required": return "Learning this connection before trying High Performance."
         case "unknown_target_route": return "The target route is uncertain; using Standard."
         case "retry_budget_exhausted": return "The Mac is unavailable. Checks slow to once a minute."
         case "switch_budget_exhausted": return "Repeated changes stopped further upgrades for this session."

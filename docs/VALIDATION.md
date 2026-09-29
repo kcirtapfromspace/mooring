@@ -5,7 +5,7 @@ Validated locally on an Apple M1 Ultra running macOS 26.6.2. Rust 1.98.1 and the
 ## Automated checks
 
 - Workspace formatting and Clippy with warnings denied.
-- 63 Rust tests: eight CLI/storage tests, 37 network/quality/mailbox/reconnect tests, and 18 platform tests.
+- 67 Rust tests: eight CLI/storage tests, 41 network/quality/mailbox/reconnect tests, and 18 platform tests.
 - 73 Swift connection-document parser and bounded-reader checks, including IPv6, ambiguous modes, invalid ports, oversized files, symlinks and FIFOs. These perform no Accessibility actions.
 - Packaged CLI integration against a live loopback RFB fixture verifies zero application bytes sent, real timing/route JSON, policy-state round-trip, and connection-refused output.
 - Storage tests exercise concurrent saves, corrupted/future schemas, private file permissions, oversized IDs, and malformed input.
@@ -37,6 +37,16 @@ The updated local detector completed in approximately 0.3 seconds on this host w
 A separate QA app verified Detect Network → Use This Network as Home → Save with no saved Mac, persisted home settings after adding a Mac, and successful detection while background checks repeatedly failed against an unreachable loopback target. The candidate remained usable after those failures. No Accessibility or login permissions were changed.
 
 Apple accepted the home-settings fix, `v0.2.0-preview.2`, as submission `3e09ae81-d055-4f19-89e2-0ccb1c2f1b12`. The final extracted ZIP passed strict code-signature verification, stapled-ticket validation and Gatekeeper assessment as Notarized Developer ID.
+
+## Automatic-defaults regression checks
+
+For `v0.2.0-preview.3`, the complete local validation script passed with 67 Rust tests, 73 Swift session-document checks and the expanded defaults/home-state suite. Tests cover automatic trial eligibility and dwell, VPN/unknown-route exclusion, revocation fallback, explicit target selection, target-isolated learned paths, bounded deduplicated persistence, legacy migration and preservation of explicitly disabled/custom settings.
+
+An isolated QA bundle showed the address-only Add & Connect form and expanded optional name/port controls without clipping. The contextual permission window was also observed. This check did not grant Accessibility, register login launch, or verify a real remote connection. Permission-granted automatic continuation, learned-path reconnect and High Performance trials still require the two-Mac checks below.
+
+Review corrected permission-completion duplicate-launch races, paused-session closure handling, stale recommendations on explicit reconnect, migration of explicitly disabled new settings and switching targets while an old session remains tracked.
+
+Apple accepted the automatic-defaults build as submission `bb184472-bbf6-4730-bdbb-5d3bc1ab01ef`. The final extracted arm64 ZIP passed strict signature, stapled-ticket and Gatekeeper validation as Notarized Developer ID.
 
 ## Media feasibility
 

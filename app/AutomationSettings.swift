@@ -13,10 +13,13 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
     private var draft: AutomationSettings
     private var homeCheck = HomeNetworkCheck()
     private var homePathsEdited = false
+    private let advancedButton = NSButton(title: "Advanced…", target: nil, action: nil)
+    private var advancedContent: NSStackView?
+    private let trialButton = NSButton(checkboxWithTitle: "Try High Performance automatically on familiar direct networks", target: nil, action: nil)
     private let enabledButton = NSButton(checkboxWithTitle: "Enable automation", target: nil, action: nil)
     private let targetPopup = NSPopUpButton()
     private let loginButton = NSButton(checkboxWithTitle: "Launch MacLink at login", target: nil, action: nil)
-    private let autoConnectButton = NSButton(checkboxWithTitle: "Connect automatically on a healthy home path", target: nil, action: nil)
+    private let autoConnectButton = NSButton(checkboxWithTitle: "Reconnect automatically on familiar networks", target: nil, action: nil)
     private let fullScreenButton = NSButton(checkboxWithTitle: "Open the remote session in full screen", target: nil, action: nil)
     private let preferencePopup = NSPopUpButton()
     private let preferenceDetail = label("", size: 12, color: .secondaryLabelColor)
@@ -34,7 +37,7 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
 
     init(settings: AutomationSettings, connections: [SavedMac]) {
         draft = settings
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 610, height: 660),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 610, height: 540),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "MacLink Settings"
         window.minSize = NSSize(width: 580, height: 540)
@@ -42,7 +45,7 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
         super.init(window: window)
         window.delegate = self
         window.center()
-        window.setFrameAutosaveName("MacLinkAutomationSettings")
+        window.setFrameAutosaveName("MacLinkSimpleSettings")
         configureControls(connections: connections)
         buildLayout()
         updatePreference()
@@ -57,10 +60,11 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
         autoConnectButton.state = draft.autoConnect ? .on : .off
         fullScreenButton.state = draft.fullScreen ? .on : .off
         supportedButton.state = draft.highPerformanceConfirmed ? .on : .off
+        trialButton.state = draft.automaticHighPerformanceTrial ? .on : .off
         vpnButton.state = draft.allowVPN ? .on : .off
         loginButton.state = SMAppService.mainApp.status == .enabled ? .on : .off
 
-        for button in [enabledButton, autoConnectButton, fullScreenButton, supportedButton, vpnButton, loginButton] {
+        for button in [enabledButton, autoConnectButton, fullScreenButton, supportedButton, trialButton, vpnButton, loginButton] {
             button.target = self
             button.action = #selector(controlChanged)
             button.setAccessibilityLabel(button.title)
@@ -115,8 +119,8 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
 
     private func buildLayout() {
         guard let window, let root = window.contentView else { return }
-        let title = label("Automation", size: 23, weight: .semibold)
-        let subtitle = label("Choose when MacLink connects and how it opens your Mac.", size: 13, color: .secondaryLabelColor)
+        let title = label("Settings", size: 23, weight: .semibold)
+        let subtitle = label("Ready by default. Change only what you need.", size: 13, color: .secondaryLabelColor)
         subtitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         subtitle.preferredMaxLayoutWidth = 540
         let heading = stack([title, subtitle], spacing: 6)
@@ -127,7 +131,7 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
         target.column(at: 0).width = 68
         target.column(at: 1).xPlacement = .fill
         target.row(at: 0).yPlacement = .center
-        var generalViews: [NSView] = [enabledButton, target, loginButton, autoConnectButton, fullScreenButton]
+        var generalViews: [NSView] = [autoConnectButton, fullScreenButton, loginButton]
         if draft.paused {
             generalViews.append(label("Automation is paused. Resume it from the MacLink menu when you’re ready.", size: 12, color: .secondaryLabelColor))
         }
@@ -141,10 +145,10 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
         mode.column(at: 0).width = 68
         mode.column(at: 1).xPlacement = .fill
         mode.row(at: 0).yPlacement = .center
-        let display = section("Display", [mode, preferenceDetail, supportedButton, vpnButton])
+        let display = section("Display", [mode, preferenceDetail])
 
         let homeActions = stack([checkHomeButton, markHomeButton], orientation: .horizontal, spacing: 8)
-        let networkIntro = label("Your remote Mac can be offline. This detects the network on this Mac; you do not need to choose a saved Mac first.", size: 12, color: .secondaryLabelColor)
+        let networkIntro = label("Optional override. MacLink remembers familiar direct networks after you connect. You can also mark home networks yourself.", size: 12, color: .secondaryLabelColor)
         let networkNote = label("Add your home Wi-Fi and Ethernet networks separately; up to eight are kept. A travel router or bridge can make locations look alike. Home detection does not guarantee available bandwidth.", size: 12, color: .secondaryLabelColor)
         let network = section("Home network", [networkIntro, routeDescription, homeActions, homeDescription, forgetHomeButton, networkNote])
 
@@ -156,7 +160,17 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
 
         let document = SettingsDocumentView()
         document.translatesAutoresizingMaskIntoConstraints = false
-        let body = stack([general, separator(), network, separator(), display, separator(), permissions, separator(), limitations], spacing: 20)
+        let advanced = stack([section("Automation", [enabledButton, target, trialButton, supportedButton, vpnButton]), separator(), network, separator(), permissions, separator(), limitations], spacing: 20)
+        advanced.isHidden = true
+        advancedContent = advanced
+        advancedButton.bezelStyle = .inline
+        advancedButton.setButtonType(.onOff)
+        advancedButton.target = self; advancedButton.action = #selector(toggleAdvanced)
+        advancedButton.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)
+        advancedButton.imagePosition = .imageLeading
+        let body = stack([general, separator(), display, advancedButton, advanced], spacing: 20)
+        body.detachesHiddenViews = true
+        for view in advanced.arrangedSubviews { view.widthAnchor.constraint(equalTo: advanced.widthAnchor).isActive = true }
         document.addSubview(body)
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -260,25 +274,23 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
     private func updatePreference() {
         switch selectedPreference {
         case "standard": preferenceDetail.stringValue = "Requests Standard mode for this Mac."
-        case "high_performance": preferenceDetail.stringValue = "Prefers High Performance when supported. Automation can fall back to Standard. Confirm below that both Macs support it."
-        default: preferenceDetail.stringValue = "Uses saved home paths and connection checks to choose a mode. Confirm support below before Auto can request High Performance."
+        case "high_performance": preferenceDetail.stringValue = "Requests High Performance. Both Macs must support it; MacLink can fall back if connection checks deteriorate."
+        default: preferenceDetail.stringValue = "Starts with Standard, learns familiar networks, and can try High Performance when connection checks stay healthy."
         }
         vpnButton.isEnabled = selectedPreference == "auto"
     }
 
     private func validate() {
-        let hasTarget = !selectedTargetID.isEmpty
         checkHomeButton.isEnabled = !homeCheck.isChecking
-        if enabledButton.state == .on && !hasTarget {
-            validationLabel.stringValue = "Choose a saved Mac to enable automation."
-            saveButton.isEnabled = false
-        } else if enabledButton.state == .on && selectedPreference == "high_performance" && supportedButton.state != .on {
-            validationLabel.stringValue = "Confirm both Macs support High Performance."
-            saveButton.isEnabled = false
-        } else {
-            validationLabel.stringValue = ""
-            saveButton.isEnabled = true
-        }
+        validationLabel.stringValue = ""
+        saveButton.isEnabled = true
+    }
+
+    @objc private func toggleAdvanced() {
+        let expanded = advancedButton.state == .on
+        advancedContent?.isHidden = !expanded
+        advancedButton.title = expanded ? "Hide Advanced" : "Advanced…"
+        advancedButton.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
     }
 
     @objc private func checkHome() {
@@ -301,15 +313,16 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
 
     @objc private func forgetHome() {
         draft.forgetHomes()
+        draft.familiarPaths = []
         homePathsEdited = true
         updateHomeDescription()
     }
 
     private func updateHomeDescription() {
         let routes = draft.homeRoutes
-        forgetHomeButton.isEnabled = !routes.isEmpty
+        forgetHomeButton.isEnabled = !routes.isEmpty || !draft.familiarPaths.isEmpty
         guard !routes.isEmpty else {
-            homeDescription.stringValue = homePathsEdited ? "Home paths cleared. Save to apply this change." : "No home paths saved."
+            homeDescription.stringValue = homePathsEdited ? "Remembered networks cleared. Save to apply this change." : "\(draft.familiarPaths.count) automatically remembered; no manual home overrides."
             return
         }
         let noun = routes.count == 1 ? "home path" : "home paths"
@@ -342,6 +355,7 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
         draft.targetID = selectedTargetID
         draft.allowVPN = vpnButton.state == .on
         draft.highPerformanceConfirmed = supportedButton.state == .on
+        draft.automaticHighPerformanceTrial = trialButton.state == .on
         draft.fullScreen = fullScreenButton.state == .on
         draft.autoConnect = autoConnectButton.state == .on
         draft.preference = selectedPreference

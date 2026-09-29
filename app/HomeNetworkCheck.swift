@@ -1,7 +1,7 @@
 import Foundation
 
 struct AutomationSettings: Codable {
-    var enabled = false
+    var enabled = true
     var paused = false
     var targetID = ""
     var homeRoute = ""
@@ -11,6 +11,36 @@ struct AutomationSettings: Codable {
     var fullScreen = true
     var autoConnect = true
     var preference = "auto"
+    var automaticHighPerformanceTrial = true
+    var familiarPaths: [String] = []
+    var permissionPromptShown = false
+
+    /// An explicit connection selects the managed Mac; browsing the list does not.
+    mutating func selectForConnection(_ id: String) {
+        guard enabled else { return }
+        targetID = id
+        paused = false
+    }
+
+    static func familiarKey(targetID: String, fingerprint: String) -> String {
+        targetID + "|" + fingerprint
+    }
+
+    mutating func rememberFamiliarPath(targetID: String, fingerprint: String) {
+        guard !targetID.isEmpty, !fingerprint.isEmpty else { return }
+        let key = Self.familiarKey(targetID: targetID, fingerprint: fingerprint)
+        familiarPaths = Self.normalizedFamiliarPaths([key] + familiarPaths)
+    }
+
+    private static func normalizedFamiliarPaths(_ paths: [String]) -> [String] {
+        var seen = Set<String>()
+        return Array(paths.filter { !$0.isEmpty && seen.insert($0).inserted }.prefix(8))
+    }
+
+    func recognizesPath(targetID: String, fingerprint: String?) -> Bool {
+        guard let fingerprint, !fingerprint.isEmpty else { return false }
+        return familiarPaths.contains(Self.familiarKey(targetID: targetID, fingerprint: fingerprint))
+    }
 
     var homeRoutes: [String] {
         var seen = Set<String>()
@@ -33,6 +63,7 @@ struct AutomationSettings: Codable {
     private enum CodingKeys: String, CodingKey {
         case enabled, paused, targetID, homeRoute, additionalHomeRoutes, allowVPN
         case highPerformanceConfirmed, fullScreen, autoConnect, preference
+        case automaticHighPerformanceTrial, familiarPaths, permissionPromptShown
     }
 }
 
@@ -50,6 +81,13 @@ extension AutomationSettings {
         fullScreen = try values.decodeIfPresent(Bool.self, forKey: .fullScreen) ?? fullScreen
         autoConnect = try values.decodeIfPresent(Bool.self, forKey: .autoConnect) ?? autoConnect
         preference = try values.decodeIfPresent(String.self, forKey: .preference) ?? preference
+        // Old unconfigured installs adopt the new connection defaults. A configured
+        // user's disabled automation, mode and display choices remain unchanged.
+        if targetID.isEmpty && !values.contains(.automaticHighPerformanceTrial) { enabled = true }
+        automaticHighPerformanceTrial = try values.decodeIfPresent(Bool.self, forKey: .automaticHighPerformanceTrial)
+            ?? (targetID.isEmpty || !values.contains(.highPerformanceConfirmed))
+        familiarPaths = Self.normalizedFamiliarPaths(try values.decodeIfPresent([String].self, forKey: .familiarPaths) ?? [])
+        permissionPromptShown = try values.decodeIfPresent(Bool.self, forKey: .permissionPromptShown) ?? false
         additionalHomeRoutes = Array(homeRoutes.filter { $0 != homeRoute }.prefix(homeRoute.isEmpty ? 8 : 7))
     }
 }
