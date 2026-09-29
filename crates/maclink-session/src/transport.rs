@@ -7,9 +7,10 @@
 //! offset, followed by the chunk. Nothing about a record is interpreted before
 //! it authenticates.
 
+use crate::clipboard::{self, ClipboardKind, ClipboardPacket, MAX_CLIPBOARD};
 use crate::control::ControlMessage;
 use crate::input::InputEvent;
-use crate::policy::{Admission, CONTROL, INPUT, ReceivePolicy, Role, TELEMETRY, VIDEO};
+use crate::policy::{Admission, CLIPBOARD, CONTROL, INPUT, ReceivePolicy, Role, TELEMETRY, VIDEO};
 use crate::telemetry::{MAX_TELEMETRY, TelemetryMessage};
 use crate::video::{VideoFrame, VideoPacket};
 use crate::{Error, Result};
@@ -25,7 +26,7 @@ use zeroize::{Zeroize, Zeroizing};
 pub(crate) const PATTERN: &str = "Noise_NKpsk0_25519_ChaChaPoly_BLAKE2s";
 pub(crate) const PROLOGUE: &[u8] = b"MacLink direct session v1";
 /// Names the application message formats; mismatched builds fail the handshake.
-pub(crate) const HANDSHAKE_PAYLOAD: &[u8] = b"maclink-session/3";
+pub(crate) const HANDSHAKE_PAYLOAD: &[u8] = b"maclink-session/4";
 pub(crate) const MAX_VIDEO: usize = crate::video::MAX_PACKET;
 pub(crate) const MAX_INPUT: usize = 256;
 pub(crate) const MAX_CONTROL: usize = 1024;
@@ -38,6 +39,10 @@ const MAX_HANDLES: usize = 128;
 /// to authenticate, so a legitimate viewer is not dropped mid-handshake.
 const HANDSHAKE_GRACE: Duration = Duration::from_secs(1);
 const MAX_RESOLVERS: usize = 4;
+/// Once a message's first byte arrives it may take this long to finish, even
+/// past the caller's receive deadline, which bounds only the wait for a new
+/// message. A message still incomplete after this ends the session.
+pub(crate) const MESSAGE_GRACE: Duration = Duration::from_secs(10);
 
 pub(crate) fn deadline(milliseconds: u32) -> Result<Instant> {
     if !(1..=30000).contains(&milliseconds) {
@@ -65,6 +70,7 @@ fn limit(kind: u8) -> Result<usize> {
         INPUT => Ok(MAX_INPUT),
         CONTROL => Ok(MAX_CONTROL),
         TELEMETRY => Ok(MAX_TELEMETRY),
+        CLIPBOARD => Ok(MAX_CLIPBOARD),
         _ => Err(Error::Invalid),
     }
 }
@@ -79,20 +85,25 @@ fn io_error(error: io::Error) -> Error {
     }
 }
 
+/// The first byte of a message extends `end` to at least `grace` from now.
 fn read_exact(
     stream: &TcpStream,
     mut output: &mut [u8],
-    end: Instant,
+    end: &mut Instant,
+    grace: Duration,
     progress: &mut usize,
 ) -> Result<()> {
     let mut reader = stream;
     while !output.is_empty() {
         stream
-            .set_read_timeout(Some(remaining(end)?))
+            .set_read_timeout(Some(remaining(*end)?))
             .map_err(io_error)?;
         match reader.read(output) {
             Ok(0) => return Err(Error::Closed),
             Ok(count) => {
+                if *progress == 0 {
+                    *end = (*end).max(Instant::now() + grace);
+                }
                 *progress += count;
                 output = &mut output[count..];
             }
@@ -120,17 +131,26 @@ pub(crate) fn write_exact(stream: &TcpStream, mut input: &[u8], end: Instant) ->
 pub(crate) fn read_record(
     stream: &TcpStream,
     output: &mut [u8],
-    end: Instant,
+    mut end: Instant,
+    progress: &mut usize,
+) -> Result<usize> {
+    read_record_within(stream, output, &mut end, Duration::ZERO, progress)
+}
+fn read_record_within(
+    stream: &TcpStream,
+    output: &mut [u8],
+    end: &mut Instant,
+    grace: Duration,
     progress: &mut usize,
 ) -> Result<usize> {
     let mut prefix = [0_u8; 2];
-    read_exact(stream, &mut prefix, end, progress)?;
+    read_exact(stream, &mut prefix, end, grace, progress)?;
     let size = usize::from(u16::from_be_bytes(prefix));
     // The unauthenticated wire length can only select a bounded stack slice.
     if size < 16 || size > output.len() {
         return Err(Error::Protocol);
     }
-    read_exact(stream, &mut output[..size], end, progress)?;
+    read_exact(stream, &mut output[..size], end, grace, progress)?;
     Ok(size)
 }
 pub(crate) fn write_record(stream: &TcpStream, data: &[u8], end: Instant) -> Result<()> {
@@ -210,14 +230,21 @@ pub(crate) enum Outgoing<'a> {
     Input(InputEvent),
     Control(ControlMessage),
     Telemetry(TelemetryMessage),
+    Clipboard(&'a [(ClipboardKind, &'a [u8])]),
 }
 #[derive(Debug, PartialEq)]
 pub(crate) enum Incoming {
-    /// Component ranges index the caller's video buffer.
+    /// Component ranges index the caller's large-message buffer.
     Video(VideoPacket),
     Input(InputEvent),
     Control(ControlMessage),
     Telemetry(TelemetryMessage),
+    /// Representation ranges index the caller's large-message buffer.
+    Clipboard(ClipboardPacket),
+}
+/// Video and clipboard arrive in the caller's buffer; the rest on the stack.
+fn is_large(kind: u8) -> bool {
+    matches!(kind, VIDEO | CLIPBOARD)
 }
 
 pub(crate) struct Counter {
@@ -235,6 +262,7 @@ impl Default for Counter {
 pub(crate) struct Inbound {
     counter: Counter,
     pub(crate) policy: ReceivePolicy,
+    pub(crate) grace: Duration,
 }
 pub(crate) struct Session {
     pub(crate) socket: TcpStream,
@@ -254,6 +282,7 @@ impl Session {
             receive: Mutex::new(Inbound {
                 counter: Counter::default(),
                 policy: ReceivePolicy::new(role, Instant::now()),
+                grace: MESSAGE_GRACE,
             }),
             closed: AtomicBool::new(false),
         }
@@ -284,6 +313,9 @@ impl Session {
                 self.send_bytes(TELEMETRY, &telemetry.encode()?, end)
             }
             Outgoing::Telemetry(_) => Err(Error::Invalid),
+            Outgoing::Clipboard(items) => {
+                self.send_bytes(CLIPBOARD, &clipboard::encode(items)?, end)
+            }
         }
     }
     pub(crate) fn send_bytes(&self, kind: u8, data: &[u8], end: Instant) -> Result<()> {
@@ -326,26 +358,31 @@ impl Session {
         result
     }
 
-    /// Receive one typed message. Video lands in the caller's buffer; input and
-    /// control use a fixed stack buffer. Messages the policy spaces out are
-    /// consumed and skipped within the same deadline.
+    /// Receive one typed message. Video and clipboard land in the caller's
+    /// buffer; input, control and telemetry use a fixed stack buffer. Messages
+    /// the policy spaces out are consumed and skipped within the same deadline.
     pub(crate) fn receive_message(&self, video: &mut [u8], end: Instant) -> Result<Incoming> {
         self.check_open()?;
         let mut inbound = direction(&self.receive)?;
-        let Inbound { counter, policy } = &mut *inbound;
+        let Inbound {
+            counter,
+            policy,
+            grace,
+        } = &mut *inbound;
         let mut small = [0_u8; SMALL_MESSAGE];
         loop {
-            let (kind, length) = match self.receive_locked(counter, video, &mut small, end, &mut 0)
-            {
-                Err(Error::Timeout) if policy.is_idle(Instant::now()) => {
-                    self.close();
-                    return Err(Error::Stalled);
-                }
-                other => other?,
-            };
+            let (kind, length) =
+                match self.receive_locked(counter, video, &mut small, end, *grace, &mut 0) {
+                    Err(Error::Timeout) if policy.is_idle(Instant::now()) => {
+                        self.close();
+                        return Err(Error::Stalled);
+                    }
+                    other => other?,
+                };
             let decoded = (|| {
                 let message = match kind {
                     VIDEO => Incoming::Video(VideoPacket::parse(&video[..length])?),
+                    CLIPBOARD => Incoming::Clipboard(ClipboardPacket::parse(&video[..length])?),
                     INPUT => Incoming::Input(InputEvent::decode(&small[..length])?),
                     CONTROL => Incoming::Control(ControlMessage::decode(&small[..length])?),
                     _ => Incoming::Telemetry(TelemetryMessage::decode(&small[..length])?),
@@ -356,7 +393,7 @@ impl Session {
                 Ok((Admission::Deliver, message)) => return Ok(message),
                 Ok((Admission::Skip, _)) => continue,
                 Err(error) => {
-                    if kind == VIDEO {
+                    if is_large(kind) {
                         video[..length].zeroize()
                     } else {
                         small[..length].zeroize()
@@ -379,7 +416,8 @@ impl Session {
     ) -> Result<(u8, usize)> {
         self.check_open()?;
         let mut inbound = direction(&self.receive)?;
-        self.receive_locked(&mut inbound.counter, video, small, end, needed)
+        let grace = inbound.grace;
+        self.receive_locked(&mut inbound.counter, video, small, end, grace, needed)
     }
 
     fn receive_locked(
@@ -387,7 +425,8 @@ impl Session {
         counter: &mut Counter,
         video: &mut [u8],
         small: &mut [u8],
-        end: Instant,
+        mut end: Instant,
+        grace: Duration,
         needed: &mut usize,
     ) -> Result<(u8, usize)> {
         let mut progress = 0;
@@ -398,7 +437,13 @@ impl Session {
             let mut plain = [0_u8; MAX_RECORD];
             loop {
                 self.check_open()?;
-                let size = read_record(&self.socket, &mut encrypted, end, &mut progress)?;
+                let size = read_record_within(
+                    &self.socket,
+                    &mut encrypted,
+                    &mut end,
+                    grace,
+                    &mut progress,
+                )?;
                 let count = self
                     .crypto
                     .read_message(counter.nonce, &encrypted[..size], &mut plain)
@@ -431,7 +476,7 @@ impl Session {
                 {
                     return Err(Error::Protocol);
                 }
-                let output: &mut [u8] = if kind == VIDEO {
+                let output: &mut [u8] = if is_large(kind) {
                     &mut *video
                 } else {
                     &mut *small
@@ -454,14 +499,15 @@ impl Session {
             Err(Error::Timeout) if progress == 0 => Err(Error::Timeout),
             Err(error) => {
                 if let Some((kind, _)) = expected {
-                    let output: &mut [u8] = if kind == VIDEO { video } else { small };
+                    let output: &mut [u8] = if is_large(kind) { video } else { small };
                     output[..offset].zeroize();
                 }
                 self.close();
                 // Partial frames cannot be retried: counters and framing may
                 // have advanced, and no plaintext is published to the caller.
+                // A message still incomplete after its grace period has stalled.
                 Err(if error == Error::Timeout {
-                    Error::Protocol
+                    Error::Stalled
                 } else {
                     error
                 })

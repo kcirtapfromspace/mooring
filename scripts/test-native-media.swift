@@ -102,7 +102,7 @@ struct NativeMediaTests {
             if index == 60 { encoder.requestKeyframe(); encoder.setTargetBitrate(16_000_000) }
             let pixel = try image(index: index, width: width, height: height)
             try require(encoder.encode(pixel, presentationTime: CMTime(value: Int64(index), timescale: 60)), "Paced frame admission \(index)")
-            try require(decoder.pendingFrameCount <= 1 && encoder.inFlightCount <= 1, "Pipeline queue bound")
+            try require(decoder.pendingFrameCount <= NativeVideoDecoder.maxPending && encoder.inFlightCount <= 1, "Pipeline queue bound")
         }
         for _ in NativeVideoEncoder.maxInFlight..<frames { try require(collector.decodeOutput.wait(timeout: .now() + 5) == .success, "Paced decode timed out") }
         let elapsed = ProcessInfo.processInfo.systemUptime - began
@@ -140,6 +140,7 @@ struct NativeMediaTests {
                     && !NativeVideoPacket.validDimensions(-2, 16), "Dimension rules come from Rust")
         try testRecovery(encoded)
         try testOverflow(encoded)
+        try testQueuedKeyframeSurvivesRecovery(encoded)
         try testFailureBudget(encoded)
         try testInFlightLimit()
         let inspected = try inspectBitstream(packets)
@@ -199,12 +200,35 @@ struct NativeMediaTests {
         decoder.onNeedsKeyframe = { keyframe.signal() }
         try require(decoder.decode(frames[0].packet), "Overflow test first admission")
         try require(entered.wait(timeout: .now() + 3) == .success, "Overflow test blocked decode callback")
-        try require(decoder.decode(frames[1].packet) && decoder.pendingFrameCount == 1, "One pending encoded packet")
-        try require(!decoder.decode(frames[2].packet) && decoder.pendingFrameCount == 0, "Overflow clears reference chain")
+        // A burst up to the bound waits without a keyframe request.
+        for index in 1...NativeVideoDecoder.maxPending {
+            try require(decoder.decode(frames[index].packet) && decoder.pendingFrameCount == index, "Pending encoded packet \(index)")
+        }
+        try require(keyframe.wait(timeout: .now() + 0.2) == .timedOut, "A bounded burst needs no keyframe")
+        try require(!decoder.decode(frames[NativeVideoDecoder.maxPending + 1].packet) && decoder.pendingFrameCount == 0,
+                    "Overflow clears reference chain")
         try require(keyframe.wait(timeout: .now() + 1) == .success, "Overflow requests IDR")
-        try require(decoder.decode(frames[60].packet), "Recovery keyframe occupies the one pending slot")
+        try require(decoder.decode(frames[60].packet), "Recovery keyframe waits in the pending queue")
         resume.signal()
         try require(recovered.wait(timeout: .now() + 3) == .success, "Overflow recovers with IDR")
+    }
+    /// A gap discovered while a keyframe already waits behind it recovers with
+    /// that keyframe, without asking the host for another.
+    static func testQueuedKeyframeSurvivesRecovery(_ frames: [NativeEncodedFrame]) throws {
+        let decoder = NativeVideoDecoder(), entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+        let recovered = DispatchSemaphore(value: 0), lock = NSLock()
+        var outputs = 0
+        defer { resume.signal(); decoder.stop() }
+        decoder.onFrame = { _ in
+            lock.lock(); outputs += 1; let first = outputs == 1; lock.unlock()
+            if first { entered.signal(); _ = resume.wait(timeout: .now() + 5) } else { recovered.signal() }
+        }
+        try require(frames[60].keyframe && !frames[5].keyframe, "Fixture: frame 60 is a keyframe, frame 5 is not")
+        try require(decoder.decode(frames[0].packet), "First keyframe admission")
+        try require(entered.wait(timeout: .now() + 3) == .success, "Decode callback held")
+        try require(decoder.decode(frames[5].packet) && decoder.decode(frames[60].packet), "A gap, then a keyframe, wait")
+        resume.signal()
+        try require(recovered.wait(timeout: .now() + 3) == .success, "The queued keyframe restarts the chain")
     }
     /// Live tuning can serialize encoding and sending again.
     static func testInFlightLimit() throws {

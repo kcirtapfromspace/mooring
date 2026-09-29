@@ -95,6 +95,30 @@ Review made these corrections before release:
 - encoder counters no longer go backward after a restart;
 - telemetry commands from clients that disconnect immediately still apply.
 
+## Shared clipboard and receive grace
+
+For `v0.3.0-preview.4`, the complete local validation script passed with 153 Rust tests (84 session) and every native Swift suite. Clipboards cross the real encrypted loopback in both directions: all three kinds to the host, 3 MB of text to the viewer, and the 4 MiB maximum through a live channel while 1,000 pointer moves merge behind it. New checks cover:
+
+- each malformed clipboard message, including clearing rejected plaintext;
+- the per-second limit;
+- private-marker filtering, echo prevention across apply and reconnect, off-main TIFF conversion and superseded conversions, on a private uniquely named pasteboard;
+- a two-record message whose second record arrives after the caller's receive deadline, which previously ended the session;
+- the viewer decoder's six-packet bound, and recovery from a keyframe that's already queued (the previous flush fails this test).
+
+Review before release led to these changes:
+
+- clipboard items Rust would reject are dropped rather than ending the session;
+- pairing codes are never shared;
+- a fresh pairing doesn't share the current clipboard;
+- pointer moves merge behind large writes;
+- image conversions are limited to one at a time;
+- a version mismatch at connect is explained;
+- a keyframe queued during recovery is kept.
+
+macOS 15.4 and later may ask before MacLink reads the clipboard in the background; that prompt has not been exercised here.
+
+A live preview 3 session between two Macs, watched from the sharing Mac, recorded one drop: `The other Mac sent an invalid or incomplete session message`. It came right after round-trip spikes of 104–136 ms, and the viewer reconnected in 0.8 s. The receive grace addresses that path. Whether it removes every drop still needs two-Mac confirmation.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

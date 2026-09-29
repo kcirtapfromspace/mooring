@@ -3,8 +3,9 @@
 // No Keychain access, accepted peer, packet traffic, live capture, input
 // injection, or permission request. A loopback-only ephemeral listener is closed
 // immediately to test channel queue state safely; peers use a temporary folder.
+// Clipboard checks use a private, uniquely named pasteboard, never the user's.
 // Built and run by scripts/test-native.sh, which links the arm64 Rust static library.
-import Foundation
+import AppKit
 import CoreGraphics
 
 @main
@@ -44,7 +45,7 @@ enum NativeSessionTests {
     static func main() {
         do {
             try run()
-            print("Native session tests passed: \(checks) checks; Rust pairing, peer store, control and display boundaries, cancellation, bounded delivery, and diagnostics. Loopback listener only; no packets, Keychain, capture, or input access.")
+            print("Native session tests passed: \(checks) checks; Rust pairing, peer store, control and display boundaries, cancellation, bounded delivery, diagnostics and the shared clipboard. Loopback listener only; no packets, Keychain, capture, or input access.")
         } catch {
             fputs("Native session tests failed: \(error.localizedDescription)\n", stderr)
             exit(1)
@@ -118,6 +119,7 @@ enum NativeSessionTests {
         try rejects("Unknown control kinds are rejected") { _ = try NativeControlMessage(validated: unknown) }
 
         try testTelemetry()
+        try testClipboard()
 
         let token = NativeRunToken()
         try require(token.isActive, "Run token begins active")
@@ -299,5 +301,80 @@ private struct LegacyCredential: Encodable {
             if let number = value as? Int { try container.encode(number, forKey: Key(stringValue: key)) }
             else if let text = value as? String { try container.encode(text, forKey: Key(stringValue: key)) }
         }
+    }
+}
+
+extension NativeSessionTests {
+    /// The pasteboard side of the shared clipboard, on a private named pasteboard.
+    static func testClipboard() throws {
+        let board = NSPasteboard(name: NSPasteboard.Name("dev.maclink.tests.\(getpid())"))
+        defer { board.releaseGlobally() }
+        board.clearContents()
+        try require(NativePasteboard.read(board) == nil, "An empty pasteboard shares nothing")
+        for marker in ["org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType", "com.agilebits.onepassword"] {
+            board.clearContents()
+            board.setString("not for sharing", forType: .string)
+            board.setData(Data(), forType: NSPasteboard.PasteboardType(marker))
+            try require(NativePasteboard.read(board) == nil, "Items marked \(marker) are never shared")
+        }
+
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0])
+        let content = NativeClipboardContent(text: "héllo ✓", rtf: Data("{\\rtf1 hi}".utf8), png: png)
+        NativePasteboard.write(content, to: board)
+        let read = NativePasteboard.read(board)
+        try require(read?.content == content && read?.tiff == nil, "Text, rich text and PNG round-trip a pasteboard")
+        try require(content.isValid && content.summary.hasPrefix("text, rich text, image"), "Rust accepts it; the log names kinds only")
+
+        let limit = NativeClipboardContent.maxBytes
+        let largest = String(repeating: "a", count: limit)
+        try require(NativeClipboardContent(text: largest + "a").fitted() == nil, "Text over 4 MiB is not shared")
+        let full = NativeClipboardContent(text: largest, png: png).fitted()
+        try require(full?.text == largest && full?.png == nil && full?.isValid == true, "Text is kept; an image that no longer fits is dropped")
+        try require(NativeClipboardContent(text: "", png: png).fitted() == NativeClipboardContent(png: png), "Empty text is omitted")
+        try require(!NativeClipboardContent(text: "x", rtf: Data("plain".utf8)).isValid, "Rust rejects rich text without its signature")
+        try require(!NativeClipboardContent(png: Data("GIF89a".utf8)).isValid, "Rust rejects an image that is not PNG")
+        let mixed = NativeClipboardContent(text: "keep", rtf: Data("\u{FEFF}{\\rtf1 x}".utf8), png: Data("GIF89a".utf8)).fitted()
+        try require(mixed == NativeClipboardContent(text: "keep"), "Representations Rust would reject are dropped, never sent")
+        try require(NativeClipboardContent(text: "code: MLP1.eyJhIjoxfQ==").fitted() == nil, "MacLink pairing codes are never shared")
+        board.clearContents(); board.setString("MLP1.eyJhIjoxfQ==", forType: .string)
+        try require(NativePasteboard.read(board) == nil, "A pairing code without its concealed marker is still not shared")
+        NativePasteboard.write(content, to: board)
+
+        var sent: [NativeClipboardContent] = []
+        let sync = NativeClipboardSync(pasteboard: board)
+        sync.onSend = { sent.append($0) }
+        sync.start(includeCurrent: true)
+        try require(sent == [content], "A new viewer session shares what is already copied")
+        sync.poll()
+        try require(sent.count == 1, "Nothing new, nothing sent")
+        let remote = NativeClipboardContent(text: "from the other Mac")
+        sync.apply(remote); sync.poll()
+        try require(sent.count == 1 && NativePasteboard.read(board)?.content == remote, "The other Mac's copy is applied and never echoed back")
+        sync.start(includeCurrent: true)
+        try require(sent.count == 1, "A reconnect does not resend what was last exchanged")
+        board.clearContents(); board.setString("copied again", forType: .string)
+        sync.poll()
+        try require(sent.count == 2 && sent.last?.text == "copied again", "A new copy is sent")
+
+        let image = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4, bitsPerSample: 8, samplesPerPixel: 4,
+                                     hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+        guard let tiff = image?.tiffRepresentation else { throw Failure("Synthetic TIFF") }
+        board.clearContents(); board.setData(tiff, forType: .tiff)
+        sync.poll()
+        let deadline = ProcessInfo.processInfo.systemUptime + 3
+        while sent.count < 3 && ProcessInfo.processInfo.systemUptime < deadline { RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01)) }
+        try require(sent.count == 3 && sent.last?.png?.starts(with: png.prefix(8)) == true && sent.last?.isValid == true,
+                    "A TIFF image is shared as PNG, converted off the main thread")
+
+        board.clearContents(); board.setData(tiff, forType: .tiff); sync.poll()
+        sync.apply(remote) // superseded before the conversion finishes
+        let settle = ProcessInfo.processInfo.systemUptime + 0.5
+        while ProcessInfo.processInfo.systemUptime < settle { RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01)) }
+        try require(sent.count == 3, "A conversion overtaken by the other Mac's copy is dropped")
+
+        board.clearContents(); board.writeObjects([NSURL(fileURLWithPath: "/tmp/example.txt")])
+        if let files = NativePasteboard.read(board) {
+            try require(files.content.png == nil && files.content.rtf == nil && files.tiff == nil, "Copied files share names only")
+        } else { checks += 1 }
     }
 }

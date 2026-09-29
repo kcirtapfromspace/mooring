@@ -51,7 +51,7 @@ Viewing Mac:
 
 ## Session log
 
-Session starts and ends, reconnect attempts, automatic sharing and tuning changes are also written to the macOS log with MacLink's reason text; never addresses, names, pairing codes, input or screen content:
+Session starts and ends, reconnect attempts, automatic sharing, tuning changes and shared-clipboard transfers (their kinds and sizes) are also written to the macOS log with MacLink's reason text; never addresses, names, pairing codes, input or screen content:
 
 ```sh
 /usr/bin/log show --last 2h --style compact --predicate 'subsystem == "dev.maclink"'

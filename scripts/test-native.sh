@@ -37,7 +37,7 @@ printf '%s\n' 'Native media tests passed: hardware codec, Rust packet rules, rec
 swiftc -swift-version 5 -warnings-as-errors -parse-as-library -target arm64-apple-macosx14.0 \
   "${media_frameworks[@]}" "${bridge[@]}" \
   app/NativePairing.swift app/NativeTransport.swift app/NativeSessionState.swift app/NativeMedia.swift \
-  app/NativePrivacyGuard.swift app/NativeInput.swift \
+  app/NativePrivacyGuard.swift app/NativeInput.swift app/NativeClipboard.swift \
   scripts/test-native-session.swift -o target/maclink-native-session-tests
 # The session check drives the real CLI against the app's local telemetry socket.
 target/maclink-native-session-tests target/aarch64-apple-darwin/release/maclink

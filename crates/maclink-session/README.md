@@ -91,6 +91,15 @@ each second. At most four clients are served; a slow client or a command line ov
 first, and a non-socket file at that path is never replaced. No network port is
 opened. See `docs/TELEMETRY.md` and the CLI's `telemetry` and `tune` commands.
 
+## Shared clipboard
+
+Either side may send a clipboard message: one to three representations of one
+copied item (UTF-8 text, RTF, PNG) in ascending kind order, each non-empty and
+carrying its format's signature, at most 4 MiB in total. Rust validates it before
+sending and after receiving, and at most four arrive per second. Received
+representations land in the caller's large-message buffer, so hosts now pass a
+buffer of at least `ML_CLIPBOARD_MAX_MESSAGE` bytes.
+
 ## Viewer shortcuts and reconnects
 
 `ml_input_keeps_local` names the chords that stay on the viewing Mac while it
@@ -101,11 +110,13 @@ budget after a session stays connected for 20 s.
 
 ## Lifecycle
 
-Deadlines are absolute across each operation, 1–30000 ms, except that a connection
-accepted near the end of an accept window gets up to 1 s to authenticate. An idle
-receive timeout
-is retryable. A timeout after any frame bytes, malformed or authentication failure,
-or failed send closes the session. Each direction has independent counters and a
+Deadlines are absolute across each operation, 1–30000 ms, with two graces: a
+connection accepted near the end of an accept window gets up to 1 s to
+authenticate, and a message whose first byte has arrived gets 10 s to finish even
+past the receive deadline, which bounds only the wait for a new message. An idle
+receive timeout is retryable. A message still incomplete after its grace
+(`STALLED`), malformed input, an authentication failure or a failed send closes
+the session. Each direction has independent counters and a
 separate operation lock; a video writer cannot hold the input reader's lock. Close
 removes the numeric handle and shuts down sockets; in-flight calls keep Arc
 ownership rather than dereferencing freed handles. IDs are not reused. The registry

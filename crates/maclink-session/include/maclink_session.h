@@ -24,7 +24,9 @@ enum {
     ML_SESSION_INTERNAL = -9, ML_SESSION_RATE_LIMITED = -10,
     ML_SESSION_STALLED = -11, ML_SESSION_STORAGE = -12
 };
-enum { ML_SESSION_VIDEO = 1, ML_SESSION_INPUT = 2, ML_SESSION_CONTROL = 3, ML_SESSION_TELEMETRY = 4 };
+enum { ML_SESSION_VIDEO = 1, ML_SESSION_INPUT = 2, ML_SESSION_CONTROL = 3, ML_SESSION_TELEMETRY = 4, ML_SESSION_CLIPBOARD = 5 };
+/* Clipboard representations: UTF-8 plain text, Rich Text Format, PNG. */
+enum { ML_CLIPBOARD_TEXT = 1, ML_CLIPBOARD_RTF = 2, ML_CLIPBOARD_PNG = 3 };
 enum { ML_TELEMETRY_STATS = 1, ML_TELEMETRY_TUNING = 2 };
 enum { ML_ROLE_IDLE = 0, ML_ROLE_HOST = 1, ML_ROLE_VIEWER = 2 };
 /* Measurement IDs; the local JSON uses the lowercase names after ML_METRIC_. */
@@ -80,6 +82,9 @@ enum {
 #define ML_PEERS_MAX 32u
 #define ML_TELEMETRY_MAX_METRICS 32u
 #define ML_REASON_CAPACITY 160u
+#define ML_CLIPBOARD_MAX_ITEMS 3u
+#define ML_CLIPBOARD_MAX_BYTES 4194304u /* 4 MiB of representation bytes per message */
+#define ML_CLIPBOARD_MAX_MESSAGE 4194332u /* the smallest receive buffer for a host */
 #define ML_RECONNECT_ATTEMPTS 5u
 #define ML_RECONNECT_STABLE_SECONDS 20u
 
@@ -166,6 +171,29 @@ typedef struct {
     MLMetric metrics[ML_TELEMETRY_MAX_METRICS];
 } MLTelemetryMessage;
 
+/* One representation to send: 1-3 per message, kinds strictly ascending,
+ * each non-empty with its format's signature, 4 MiB in total. */
+typedef struct {
+    const uint8_t *bytes;
+    size_t length;
+    uint8_t kind;
+    uint8_t reserved[7];
+} MLClipboardItem;
+
+/* One received representation at `offset` in the caller's receive buffer. */
+typedef struct {
+    size_t offset;
+    size_t length;
+    uint8_t kind;
+    uint8_t reserved[7];
+} MLClipboardRange;
+
+typedef struct {
+    uint8_t count;
+    uint8_t reserved[7];
+    MLClipboardRange items[ML_CLIPBOARD_MAX_ITEMS];
+} MLClipboardMessage;
+
 /* kind selects the one populated member. */
 typedef struct {
     uint8_t kind;
@@ -174,6 +202,7 @@ typedef struct {
     MLInputEvent input;
     MLControlMessage control;
     MLTelemetryMessage telemetry;
+    MLClipboardMessage clipboard;
 } MLSessionMessage;
 
 /* One local snapshot. peer_age_seconds is negative before peer stats arrive.
@@ -235,7 +264,11 @@ _Static_assert(offsetof(MLVideoFrame, avcc_length) == 72, "MLVideoFrame.avcc_len
 _Static_assert(sizeof(MLVideoPacket) == 80, "MLVideoPacket layout");
 _Static_assert(offsetof(MLVideoPacket, sps_offset) == 32, "MLVideoPacket.sps_offset layout");
 _Static_assert(offsetof(MLVideoPacket, avcc_length) == 72, "MLVideoPacket.avcc_length layout");
-_Static_assert(sizeof(MLSessionMessage) == 728, "MLSessionMessage layout");
+_Static_assert(sizeof(MLSessionMessage) == 808, "MLSessionMessage layout");
+_Static_assert(offsetof(MLSessionMessage, clipboard) == 728, "MLSessionMessage.clipboard layout");
+_Static_assert(sizeof(MLClipboardItem) == 24 && offsetof(MLClipboardItem, kind) == 16, "MLClipboardItem layout");
+_Static_assert(sizeof(MLClipboardRange) == 24 && offsetof(MLClipboardRange, kind) == 16, "MLClipboardRange layout");
+_Static_assert(sizeof(MLClipboardMessage) == 80 && offsetof(MLClipboardMessage, items) == 8, "MLClipboardMessage layout");
 _Static_assert(offsetof(MLSessionMessage, video) == 8, "MLSessionMessage.video layout");
 _Static_assert(offsetof(MLSessionMessage, input) == 88, "MLSessionMessage.input layout");
 _Static_assert(offsetof(MLSessionMessage, control) == 136, "MLSessionMessage.control layout");
@@ -285,8 +318,12 @@ int32_t ml_session_send_input(uint64_t session, const MLInputEvent *event, uint3
 int32_t ml_session_send_control(uint64_t session, const MLControlMessage *message, uint32_t timeout_ms);
 /* Both sides may send stats; only the viewer may send tuning. */
 int32_t ml_session_send_telemetry(uint64_t session, const MLTelemetryMessage *message, uint32_t timeout_ms);
-/* Viewers pass an ML_SESSION_MAX_VIDEO buffer; hosts may pass NULL and 0.
- * TIMEOUT is retryable when no frame bytes were read. Rust enforces direction,
+/* Either side may send a clipboard; at most four arrive per second. */
+int32_t ml_session_send_clipboard(uint64_t session, const MLClipboardItem *items, size_t count, uint32_t timeout_ms);
+/* Pass an ML_SESSION_MAX_VIDEO buffer: video (to viewers) and clipboard (to
+ * either side) arrive in it. TIMEOUT is retryable when no message bytes were
+ * read; the deadline bounds only the wait for a new message, and a message
+ * that has started gets 10 s to finish (else STALLED). Rust enforces direction,
  * geometry before video, rate limits and a 10 s idle limit (STALLED); hosts
  * silently skip pings under 250 ms and keyframe requests under 500 ms apart.
  * Any peer violation closes the session and clears rejected plaintext. */
@@ -297,6 +334,7 @@ int32_t ml_display_geometry_validate(const MLDisplayGeometry *geometry);
 int32_t ml_video_dimensions_validate(uint32_t width, uint32_t height);
 int32_t ml_video_frame_validate(const MLVideoFrame *frame);
 int32_t ml_input_event_validate(const MLInputEvent *event);
+int32_t ml_clipboard_validate(const MLClipboardItem *items, size_t count);
 /* 1 when a key stays on the viewing Mac while system shortcuts such as ⌘-Tab
  * are captured for the remote Mac: Force Quit (⌘⌥Esc, optionally ⇧), Lock
  * Screen (⌃⌘Q) and full screen (⌃⌘F or Globe-F); otherwise 0. */

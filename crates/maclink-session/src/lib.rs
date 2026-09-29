@@ -7,10 +7,11 @@
 //!
 //! Rust owns the session protocol: sockets, framing, deadlines, typed wire
 //! formats and their validation, per-role direction and rate policy, the host's
-//! held-input state, pairing codes, and saved peer metadata. Swift owns Apple
-//! media/input APIs, Keychain storage, caller buffers and the UI. Nothing
-//! listens automatically.
+//! held-input state, shared-clipboard validation, pairing codes, and saved peer
+//! metadata. Swift owns Apple media/input/pasteboard APIs, Keychain storage,
+//! caller buffers and the UI. Nothing listens automatically.
 
+mod clipboard;
 mod control;
 pub mod ffi;
 mod input;

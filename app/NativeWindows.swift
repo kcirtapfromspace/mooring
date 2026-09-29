@@ -8,15 +8,17 @@ final class NativeShareWindow: NSWindowController, NSWindowDelegate {
     var onControlPermission: (() -> Void)?
     var onDiagnostics: (() -> Void)?
     var onAutomaticChange: ((Bool) -> Void)?
+    var onClipboardChange: ((Bool) -> Void)?
     let status = label("Sharing is off", size: 14, weight: .medium)
     let detail = label("Start sharing, then copy the pairing code to MacLink on your other Mac.", color: .secondaryLabelColor)
     let toggle = NSButton(title: "Start Sharing", target: nil, action: nil)
     let copy = NSButton(title: "Copy Pairing Code", target: nil, action: nil)
     let control = NSButton(title: "Enable Keyboard & Mouse…", target: nil, action: nil)
     let automatic = NSButton(checkboxWithTitle: "Share this Mac automatically", target: nil, action: nil)
+    let clipboard = NSButton(checkboxWithTitle: "Share clipboard with the connected Mac", target: nil, action: nil)
 
     init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 420),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 470),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Share This Mac"
         window.isReleasedWhenClosed = false
@@ -31,10 +33,12 @@ final class NativeShareWindow: NSWindowController, NSWindowDelegate {
         copy.target = self; copy.action = #selector(copyCode); copy.isEnabled = false
         control.target = self; control.action = #selector(enableControl)
         automatic.target = self; automatic.action = #selector(changeAutomatic)
+        clipboard.target = self; clipboard.action = #selector(changeClipboard)
+        clipboard.toolTip = "Copy on one Mac and paste on the other while connected. Items password managers mark as private are never shared."
         for button in [toggle, copy, control, reset, diagnostics] { button.bezelStyle = .rounded }
         let actions = stack([toggle, copy], orientation: .horizontal, spacing: 10)
         let extras = stack([reset, diagnostics], orientation: .horizontal, spacing: 10)
-        let body = stack([title, status, detail, actions, control, stack([automatic, automaticNote], spacing: 4), note, extras], spacing: 15)
+        let body = stack([title, status, detail, actions, control, stack([automatic, automaticNote], spacing: 4), clipboard, note, extras], spacing: 15)
         let root = window.contentView!; root.addSubview(body)
         NSLayoutConstraint.activate([
             body.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 26),
@@ -46,6 +50,7 @@ final class NativeShareWindow: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     @objc private func toggleSharing() { onToggle?() }
     @objc private func changeAutomatic() { onAutomaticChange?(automatic.state == .on) }
+    @objc private func changeClipboard() { onClipboardChange?(clipboard.state == .on) }
     @objc private func copyCode() { onCopy?() }
     @objc private func resetPairing() { onReset?() }
     @objc private func enableControl() { onControlPermission?() }
@@ -198,6 +203,7 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
         ])
         window.initialFirstResponder = video
         window.acceptsMouseMovedEvents = true
+        status.toolTip = "The sharing Mac sends a frame only when its screen changes, up to 60 per second. Moving your own pointer does not count."
 
         // Shown over the cleared video when a session ends, so the reason is not
         // lost in a full-screen black window.

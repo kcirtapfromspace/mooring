@@ -3,7 +3,7 @@
 
 use crate::Error;
 use crate::ffi::*;
-use crate::policy::{CONTROL, INPUT, TELEMETRY, VIDEO};
+use crate::policy::{CLIPBOARD, CONTROL, INPUT, TELEMETRY, VIDEO};
 use crate::transport::{
     HANDSHAKE_PAYLOAD, MAX_CONTROL, MAX_INPUT, MAX_RECORD, MAX_VIDEO, PROLOGUE, builder, deadline,
     read_record, session, write_exact, write_record,
@@ -107,7 +107,16 @@ fn receive(id: u64, capacity: usize, timeout: u32) -> (i32, u8, usize, Vec<u8>) 
         value.receive_bytes(&mut video, &mut small, deadline(timeout)?, &mut needed)
     });
     match result {
-        Ok((kind, size)) => (0, kind, size, if kind == VIDEO { video } else { small }),
+        Ok((kind, size)) => (
+            0,
+            kind,
+            size,
+            if kind == VIDEO || kind == CLIPBOARD {
+                video
+            } else {
+                small
+            },
+        ),
         Err(error) => (error as i32, 0, needed, [video, small].concat()),
     }
 }
@@ -296,7 +305,7 @@ fn authenticated_header_bounds_types_offsets_sequences_and_direction_are_enforce
         plain(INPUT, (MAX_INPUT + 1) as u32, 0, 0, b"x"),
         plain(CONTROL, (MAX_CONTROL + 1) as u32, 0, 0, b"x"),
         plain(VIDEO, 1, 0, 0, b"x"), // a host never receives video
-        plain(5, 1, 0, 0, b"x"),
+        plain(6, 1, 0, 0, b"x"),
         plain(INPUT, 1, 1, 0, b"x"),
         plain(INPUT, 1, 0, 1, b"x"),
         plain(INPUT, 1, 0, 0, b"xx"),
@@ -325,9 +334,14 @@ fn record_replay_cannot_reuse_a_directional_nonce() {
     assert_eq!(receive(host.0, MAX_INPUT, 1000).0, Error::Auth as i32);
 }
 
+fn set_grace(id: u64, grace: Duration) {
+    session(id).unwrap().receive.lock().unwrap().grace = grace;
+}
+
 #[test]
-fn idle_receive_timeout_is_retryable_but_partial_frame_timeout_closes() {
+fn idle_receive_timeout_is_retryable_but_a_stalled_partial_message_closes() {
     let (viewer, host) = pair();
+    set_grace(host.0, Duration::from_millis(60));
     assert_eq!(receive(host.0, MAX_INPUT, 30).0, Error::Timeout as i32);
     assert_eq!(send(viewer.0, INPUT, b"after-timeout"), 0);
     assert_eq!(receive(host.0, MAX_INPUT, 1000).0, 0);
@@ -337,8 +351,32 @@ fn idle_receive_timeout_is_retryable_but_partial_frame_timeout_closes() {
         deadline(1000).unwrap(),
     )
     .unwrap();
-    assert_eq!(receive(host.0, MAX_INPUT, 30).0, Error::Protocol as i32);
+    let started = Instant::now();
+    assert_eq!(receive(host.0, MAX_INPUT, 30).0, Error::Stalled as i32);
+    assert!(
+        started.elapsed() >= Duration::from_millis(55),
+        "the grace outlasts the receive deadline"
+    );
     assert_eq!(receive(host.0, MAX_INPUT, 30).0, Error::Closed as i32);
+}
+
+#[test]
+fn a_message_started_near_the_receive_deadline_may_finish_after_it() {
+    // Before this grace, a message whose first record arrived just before the
+    // caller's deadline failed as a protocol error and ended the session.
+    let (viewer, host) = pair();
+    let id = viewer.0;
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(120));
+        inject(id, &encrypted(id, 0, &plain(INPUT, 2, 0, 0, b"x")));
+        std::thread::sleep(Duration::from_millis(200));
+        inject(id, &encrypted(id, 1, &plain(INPUT, 2, 0, 1, b"y")));
+    });
+    let result = receive(host.0, MAX_INPUT, 200);
+    writer.join().unwrap();
+    assert_eq!((result.0, result.1, result.2), (0, INPUT, 2));
+    assert_eq!(&result.3[..2], b"xy");
+    assert!(!is_closed(host.0));
 }
 
 #[test]
@@ -437,7 +475,7 @@ fn listener_handshake_and_accept_timeouts_remain_usable() {
 #[test]
 fn validation_rejects_bad_arguments_without_closing_the_session() {
     let (viewer, host) = pair();
-    assert_eq!(send(viewer.0, 5, b"x"), Error::Invalid as i32);
+    assert_eq!(send(viewer.0, 6, b"x"), Error::Invalid as i32);
     assert_eq!(
         send(viewer.0, INPUT, &vec![0; MAX_INPUT + 1]),
         Error::Invalid as i32
@@ -1368,4 +1406,141 @@ fn reconnect_budget_and_local_shortcuts_cross_the_c_abi() {
     );
     assert_eq!(ml_input_keeps_local(53, 8 | 4), 1); // ⌘⌥Esc
     assert_eq!(ml_input_keeps_local(48, 8), 0); // ⌘-Tab goes to the remote Mac
+}
+
+fn clipboard_item(kind: u8, bytes: &[u8]) -> MLClipboardItem {
+    MLClipboardItem {
+        bytes: bytes.as_ptr(),
+        length: bytes.len(),
+        kind,
+        reserved: [0; 7],
+    }
+}
+
+#[test]
+fn clipboards_cross_both_ways_in_the_callers_buffer() {
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\nimage";
+    let (viewer, host) = pair();
+    let text = "Copied on the viewer ✓".as_bytes();
+    let items = [clipboard_item(1, text), clipboard_item(3, PNG)];
+    assert_eq!(
+        unsafe { ml_clipboard_validate(items.as_ptr(), items.len()) },
+        0
+    );
+    assert_eq!(
+        unsafe { ml_session_send_clipboard(viewer.0, items.as_ptr(), items.len(), 1000) },
+        0
+    );
+    let mut buffer = vec![0; ML_SESSION_MAX_MESSAGE];
+    let (status, message) = typed(host.0, &mut buffer, 1000);
+    assert_eq!(
+        (status, message.kind, message.clipboard.count),
+        (0, CLIPBOARD, 2)
+    );
+    let range = |index: usize| {
+        let item = message.clipboard.items[index];
+        (
+            item.kind,
+            buffer[item.offset..item.offset + item.length].to_vec(),
+        )
+    };
+    assert_eq!(range(0), (1, text.to_vec()));
+    assert_eq!(range(1), (3, PNG.to_vec()));
+
+    // The largest allowed clipboard crosses in the other direction.
+    let sender = host.0;
+    let sending = std::thread::spawn(move || {
+        let largest = vec![b'z'; ML_CLIPBOARD_MAX_BYTES];
+        let item = [clipboard_item(1, &largest)];
+        unsafe { ml_session_send_clipboard(sender, item.as_ptr(), 1, 5000) }
+    });
+    let (status, message) = typed(viewer.0, &mut buffer, 5000);
+    assert_eq!(sending.join().unwrap(), 0);
+    assert_eq!(
+        (status, message.kind, message.clipboard.items[0].length),
+        (0, CLIPBOARD, ML_CLIPBOARD_MAX_BYTES)
+    );
+    assert!(
+        buffer[message.clipboard.items[0].offset..][..ML_CLIPBOARD_MAX_BYTES]
+            .iter()
+            .all(|byte| *byte == b'z')
+    );
+}
+
+#[test]
+fn invalid_clipboards_fail_before_sending_and_leave_the_session_open() {
+    let (viewer, host) = pair();
+    let over = vec![b'a'; ML_CLIPBOARD_MAX_BYTES + 1];
+    let rtf = b"{\\rtf1 x}";
+    for items in [
+        vec![],
+        vec![clipboard_item(1, b"")],
+        vec![clipboard_item(4, b"a")],
+        vec![clipboard_item(1, &over)],
+        vec![clipboard_item(1, b"\xff")],
+        vec![clipboard_item(2, b"plain")],
+        vec![clipboard_item(2, rtf), clipboard_item(1, b"a")],
+        vec![clipboard_item(1, b"a"), clipboard_item(1, b"b")],
+        vec![
+            clipboard_item(1, b"a"),
+            clipboard_item(2, rtf),
+            clipboard_item(3, b"no"),
+            clipboard_item(1, b"c"),
+        ],
+    ] {
+        let pointer = if items.is_empty() {
+            std::ptr::null()
+        } else {
+            items.as_ptr()
+        };
+        assert_eq!(
+            unsafe { ml_clipboard_validate(pointer, items.len()) },
+            Error::Invalid as i32
+        );
+        assert_eq!(
+            unsafe { ml_session_send_clipboard(viewer.0, pointer, items.len(), 1000) },
+            Error::Invalid as i32
+        );
+    }
+    assert!(!is_closed(viewer.0));
+    let good = [clipboard_item(2, rtf)];
+    assert_eq!(
+        unsafe { ml_session_send_clipboard(viewer.0, good.as_ptr(), 1, 1000) },
+        0
+    );
+    let mut buffer = vec![0; ML_SESSION_MAX_MESSAGE];
+    assert_eq!(typed(host.0, &mut buffer, 1000).1.kind, CLIPBOARD);
+}
+
+#[test]
+fn a_malformed_clipboard_closes_the_receiver_and_clears_it() {
+    let (viewer, host) = pair();
+    // Authenticated but malformed: Text whose bytes are not UTF-8.
+    let body = [1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 2, 0xff, 0xfe];
+    inject(
+        viewer.0,
+        &encrypted(
+            viewer.0,
+            0,
+            &plain(CLIPBOARD, body.len() as u32, 0, 0, &body),
+        ),
+    );
+    let result = receive(host.0, 4096, 1000);
+    assert_eq!(result.0, 0, "the untyped path only frames");
+    let (viewer, host) = pair();
+    inject(
+        viewer.0,
+        &encrypted(
+            viewer.0,
+            0,
+            &plain(CLIPBOARD, body.len() as u32, 0, 0, &body),
+        ),
+    );
+    let mut buffer = vec![0x55; 4096];
+    assert_eq!(typed(host.0, &mut buffer, 1000).0, Error::Protocol as i32);
+    assert!(
+        buffer[..body.len()].iter().all(|byte| *byte == 0),
+        "rejected plaintext is cleared"
+    );
+    assert!(is_closed(host.0));
 }

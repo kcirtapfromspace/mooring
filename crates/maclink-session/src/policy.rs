@@ -12,6 +12,7 @@ pub(crate) const VIDEO: u8 = 1;
 pub(crate) const INPUT: u8 = 2;
 pub(crate) const CONTROL: u8 = 3;
 pub(crate) const TELEMETRY: u8 = 4;
+pub(crate) const CLIPBOARD: u8 = 5;
 
 /// No complete authenticated message for this long ends the session. Viewers
 /// ping every second and hosts answer, so a healthy idle desktop stays open.
@@ -20,6 +21,9 @@ const WINDOW: Duration = Duration::from_secs(1);
 const HOST_MESSAGES_PER_WINDOW: u32 = 1000;
 /// Control and telemetry together; hosts send a few of each per second.
 const VIEWER_CONTROLS_PER_WINDOW: u32 = 32;
+/// Clipboard messages from either side. Senders poll their pasteboard at most
+/// twice a second, so this only stops a peer flooding large messages.
+const CLIPBOARDS_PER_WINDOW: u32 = 4;
 const PING_SPACING: Duration = Duration::from_millis(250);
 /// Viewers retry keyframe requests at a longer interval, so a request dropped
 /// here is always followed by one that is honored.
@@ -53,7 +57,8 @@ impl Role {
     pub(crate) fn may_send(self, kind: u8) -> bool {
         matches!(
             (self, kind),
-            (Self::Host, VIDEO | CONTROL | TELEMETRY) | (Self::Viewer, INPUT | CONTROL | TELEMETRY)
+            (Self::Host, VIDEO | CONTROL | TELEMETRY | CLIPBOARD)
+                | (Self::Viewer, INPUT | CONTROL | TELEMETRY | CLIPBOARD)
         )
     }
     pub(crate) fn may_receive(self, kind: u8) -> bool {
@@ -91,6 +96,7 @@ pub(crate) struct ReceivePolicy {
     role: Role,
     window_start: Instant,
     window_count: u32,
+    clipboard_count: u32,
     last_ping: Option<Instant>,
     last_keyframe: Option<Instant>,
     has_geometry: bool,
@@ -104,6 +110,7 @@ impl ReceivePolicy {
             role,
             window_start: now,
             window_count: 0,
+            clipboard_count: 0,
             last_ping: None,
             last_keyframe: None,
             has_geometry: false,
@@ -121,6 +128,7 @@ impl ReceivePolicy {
             Incoming::Input(_) => (INPUT, true),
             Incoming::Control(control) => (CONTROL, peer.may_send_control(control.kind())),
             Incoming::Telemetry(telemetry) => (TELEMETRY, peer.may_send_telemetry(telemetry)),
+            Incoming::Clipboard(_) => (CLIPBOARD, true),
         };
         if !allowed || !self.role.may_receive(kind) {
             return Err(Error::Protocol);
@@ -128,6 +136,13 @@ impl ReceivePolicy {
         if now.saturating_duration_since(self.window_start) >= WINDOW {
             self.window_start = now;
             self.window_count = 0;
+            self.clipboard_count = 0;
+        }
+        if kind == CLIPBOARD {
+            self.clipboard_count += 1;
+            if self.clipboard_count > CLIPBOARDS_PER_WINDOW {
+                return Err(Error::RateLimited);
+            }
         }
         let (counted, limit) = match self.role {
             Role::Host => (true, HOST_MESSAGES_PER_WINDOW),
@@ -208,6 +223,9 @@ mod tests {
     fn stats() -> Incoming {
         Incoming::Telemetry(TelemetryMessage::Stats(vec![]))
     }
+    fn clipboard() -> Incoming {
+        Incoming::Clipboard(crate::clipboard::ClipboardPacket { items: vec![] })
+    }
     fn tuning() -> Incoming {
         Incoming::Telemetry(TelemetryMessage::Tuning(Tuning {
             fps: 30,
@@ -228,7 +246,8 @@ mod tests {
                 && !Role::Viewer.may_send(VIDEO)
         );
         assert!(Role::Host.may_send(TELEMETRY) && Role::Viewer.may_send(TELEMETRY));
-        assert!(!Role::Host.may_send(0) && !Role::Viewer.may_send(5));
+        assert!(Role::Host.may_send(CLIPBOARD) && Role::Viewer.may_send(CLIPBOARD));
+        assert!(!Role::Host.may_send(0) && !Role::Viewer.may_send(6));
         for kind in [
             ControlKind::Geometry,
             ControlKind::InputState,
@@ -306,6 +325,26 @@ mod tests {
             assert!(policy.admit(&message, now).is_ok());
         }
         assert_eq!(policy.admit(&stats(), now), Err(Error::RateLimited));
+    }
+
+    #[test]
+    fn both_sides_limit_clipboard_messages_per_second() {
+        let now = Instant::now();
+        for role in [Role::Host, Role::Viewer] {
+            let mut policy = ReceivePolicy::new(role, now);
+            for _ in 0..CLIPBOARDS_PER_WINDOW {
+                assert_eq!(policy.admit(&clipboard(), now), Ok(Admission::Deliver));
+            }
+            assert_eq!(policy.admit(&clipboard(), now), Err(Error::RateLimited));
+            let mut policy = ReceivePolicy::new(role, now);
+            for _ in 0..CLIPBOARDS_PER_WINDOW {
+                policy.admit(&clipboard(), now).unwrap();
+            }
+            assert!(
+                policy.admit(&clipboard(), now + WINDOW).is_ok(),
+                "a new window resets the budget"
+            );
+        }
     }
 
     #[test]

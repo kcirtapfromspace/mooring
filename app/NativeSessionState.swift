@@ -254,6 +254,11 @@ final class NativeSessionChannel: @unchecked Sendable {
     private let lock = NSLock()
     private var pending = 0
     private var pendingMain = 0
+    /// The newest pointer move not yet written. Later moves replace it until
+    /// another message queues behind it, so moves never reorder with key or
+    /// button edges and a slow write (a large clipboard) cannot fill the queue.
+    private final class PendingMove { var event: NativeInputEvent; init(_ event: NativeInputEvent) { self.event = event } }
+    private var openMove: PendingMove?
     private var peerStats = NativeStats()
     private var peerStatsTime: TimeInterval?
     var onFailure: ((String) -> Void)?
@@ -267,26 +272,46 @@ final class NativeSessionChannel: @unchecked Sendable {
     }
     init(_ transport: NativeTransport) { self.transport = transport }
     func send(_ message: NativeSessionMessage, completion: (() -> Void)? = nil) {
+        var move: NativeInputEvent?
+        if case .input(let event) = message, event.kind == .pointerMove { move = event }
         lock.lock()
+        if let move, let open = openMove {
+            open.event = move; lock.unlock(); completion?()
+            return
+        }
         guard token.isActive, pending < 64 else {
             lock.unlock(); completion?()
             if token.isActive { fail("The connection could not keep up. Reconnect to resume safely.") }
             return
         }
-        pending += 1; lock.unlock()
+        pending += 1
+        let slot = move.map(PendingMove.init)
+        openMove = slot
+        lock.unlock()
         writer.async { [self] in
             defer { lock.lock(); pending -= 1; lock.unlock(); completion?() }
+            var outgoing = message
+            if let slot {
+                lock.lock(); if openMove === slot { openMove = nil }; outgoing = .input(slot.event); lock.unlock()
+            }
             guard token.isActive else { return }
             let began = ProcessInfo.processInfo.systemUptime
             do {
-                try transport.send(message)
+                try transport.send(outgoing)
                 if case .video(let packet) = message {
                     let milliseconds = (ProcessInfo.processInfo.systemUptime - began) * 1000
                     measurements.add("video_send_ms_total", milliseconds); measurements.recordMax("video_send_ms", milliseconds)
                     measurements.set("last_video_send_ms", milliseconds)
                     measurements.add("sent_video_frames"); measurements.add("sent_video_bytes", Double(packet.wireSize))
                 }
-            } catch { fail(error.localizedDescription) }
+            } catch {
+                // Rust refuses an invalid clipboard before writing; the session is unaffected.
+                if case .clipboard = outgoing, (error as? NativeSessionError)?.status == Int32(ML_SESSION_INVALID) {
+                    NativeLog.session.notice("clipboard not sent: Rust rejected its contents")
+                    return
+                }
+                fail(error.localizedDescription)
+            }
         }
     }
     func deliverControl(_ body: @escaping () -> Void) {

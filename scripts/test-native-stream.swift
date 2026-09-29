@@ -22,6 +22,11 @@ struct NativeStreamIntegration {
         let returnedControl = DispatchSemaphore(value: 0)
         let receivedStats = DispatchSemaphore(value: 0)
         let receivedTuning = DispatchSemaphore(value: 0)
+        let hostClipboard = DispatchSemaphore(value: 0)
+        let largeClipboard = DispatchSemaphore(value: 0)
+        let finalMove = DispatchSemaphore(value: 0)
+        var moves = 0
+        let viewerClipboard = DispatchSemaphore(value: 0)
         let writer = DispatchQueue(label: "native-test-writer")
         func fail(_ message: String) { lock.lock(); if error == nil { error = message }; lock.unlock(); decoded.signal(); returnedControl.signal(); accepted.signal() }
     }
@@ -55,6 +60,11 @@ struct NativeStreamIntegration {
     static func main() {
         do { try run() } catch { fputs("Native stream integration failed: \(error.localizedDescription)\n", stderr); exit(1) }
     }
+    /// Synthetic clipboards: never read from or written to a real pasteboard.
+    static let viewerCopy = NativeClipboardContent(text: "Copied on the viewer ✓", rtf: Data("{\\rtf1\\ansi viewer}".utf8),
+                                                   png: Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3]))
+    static let hostCopy = NativeClipboardContent(text: String(repeating: "host ", count: 600_000))
+    static let largeCopy = NativeClipboardContent(text: String(repeating: "v", count: Int(ML_CLIPBOARD_MAX_BYTES)))
     static func run() throws {
         let state = State(), token = NativeRunToken()
         let identity = try NativeHostIdentity.create()
@@ -69,6 +79,11 @@ struct NativeStreamIntegration {
                     switch try server.receive() {
                     case .input(let event)? where event.kind == .releaseAll: state.returnedControl.signal()
                     case .telemetry(.tuning(let tuning))? where tuning.fps == 30: state.receivedTuning.signal()
+                    case .clipboard(let content)? where content == viewerCopy: state.hostClipboard.signal()
+                    case .clipboard(let content)? where content == largeCopy: state.largeClipboard.signal()
+                    case .input(let event)? where event.kind == .pointerMove:
+                        state.lock.lock(); state.moves += 1; state.lock.unlock()
+                        if event.x == 1 { state.finalMove.signal() }
                     case nil: continue
                     default: state.fail("Unexpected return message"); return
                     }
@@ -107,6 +122,7 @@ struct NativeStreamIntegration {
                     switch message {
                     case .control(.geometry): continue
                     case .telemetry(.stats(let stats)) where stats[.captureFps] == 60: state.receivedStats.signal()
+                    case .clipboard(let content) where content == hostCopy: state.viewerClipboard.signal()
                     case .video(let packet):
                         _ = decoder.decode(packet)
                         // An ordinary typed event, never passed to CGEvent injection.
@@ -139,6 +155,22 @@ struct NativeStreamIntegration {
         var tuning = MLTuning(); tuning.fps = 30
         try client.send(.telemetry(.tuning(NativeTuning(raw: tuning))))
         try require(state.receivedTuning.wait(timeout: .now() + 5) == .success, "Viewer tuning reaches the host")
+        // The shared clipboard crosses both ways: all three kinds to the host, 3 MB of text to the viewer.
+        try require(viewerCopy.isValid && hostCopy.isValid, "Rust accepts the synthetic clipboards")
+        try client.send(.clipboard(viewerCopy))
+        try require(state.hostClipboard.wait(timeout: .now() + 5) == .success, "The viewer's clipboard reaches the host")
+        try server.send(.clipboard(hostCopy))
+        try require(state.viewerClipboard.wait(timeout: .now() + 5) == .success, "The host's clipboard reaches the viewer")
+        // Pointer moves queued behind a 4 MiB clipboard merge, so the send queue
+        // cannot overflow, and the newest position always arrives.
+        let channel = NativeSessionChannel(client)
+        channel.onFailure = { state.fail("Channel failed: \($0)") }
+        channel.send(.clipboard(largeCopy))
+        for index in 1...1000 { channel.send(.input(try NativeInputEvent(kind: .pointerMove, x: Double(index) / 1000, y: 0.5))) }
+        try require(state.largeClipboard.wait(timeout: .now() + 5) == .success, "The largest clipboard crosses a channel")
+        try require(state.finalMove.wait(timeout: .now() + 5) == .success, "The newest pointer position arrives")
+        state.lock.lock(); let moves = state.moves; state.lock.unlock()
+        try require(channel.token.isActive && moves < 1000, "Queued pointer moves merge instead of filling the queue (\(moves) sent)")
         try require(state.frames == total && encoder.snapshot.encoded_frames == total && decoder.hardwareDecoder, "Incomplete native pipeline")
         let sorted = state.roundTripMS.sorted(), encodes = state.encodeMS.sorted()
         let report: [String: Any] = ["kind": "synthetic encrypted loopback, not display/input latency", "frames": state.frames,
@@ -151,7 +183,7 @@ struct NativeStreamIntegration {
         let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
         let path = CommandLine.arguments.dropFirst().first ?? "target/native-stream-loopback.json"
         try data.write(to: URL(fileURLWithPath: path), options: .atomic)
-        print("Native encrypted stream: \(total)/\(total) 1080p frames, return controls and live telemetry both ways; hardware decode verified. Report: \(path)")
+        print("Native encrypted stream: \(total)/\(total) 1080p frames, return controls, live telemetry and clipboards both ways; hardware decode verified. Report: \(path)")
         token.cancel(); client.close(); server.close()
     }
 }

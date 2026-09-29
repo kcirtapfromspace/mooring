@@ -38,6 +38,7 @@ private struct NativeEncoderCounters {
 /// authenticated wire; this class coordinates public Apple media/input APIs.
 final class NativeSessionCoordinator {
     private static let automaticSharingKey = "native.shareAutomatically"
+    private static let sharedClipboardKey = "native.shareClipboard"
     private let defaults: UserDefaults
     private let keychain = NativeKeychain()
     private let peerStore = NativePeerStore()
@@ -94,6 +95,9 @@ final class NativeSessionCoordinator {
     private var lastViewerEnd = ""
     /// Sends ⌘-Tab and other system shortcuts to the remote Mac while it has focus.
     private var systemKeys: NativeSystemKeyCapture?
+    /// Exchanges this Mac's clipboard with a connected Mac, polled twice a second.
+    private let clipboard = NativeClipboardSync()
+    private var clipboardTimer: Timer?
     /// Stop Sharing holds automatic sharing off until sharing is started again.
     private var userStoppedSharing = false
     private var nextAutomaticShare: TimeInterval = 0
@@ -106,6 +110,18 @@ final class NativeSessionCoordinator {
     var sharesAutomatically: Bool {
         get { defaults.bool(forKey: Self.automaticSharingKey) }
         set { defaults.set(newValue, forKey: Self.automaticSharingKey) }
+    }
+    /// Copy on one Mac, paste on the other, while a session is connected. On by
+    /// default; items marked private by password managers are never shared.
+    var sharesClipboard: Bool {
+        get { defaults.object(forKey: Self.sharedClipboardKey) as? Bool ?? true }
+        set {
+            defaults.set(newValue, forKey: Self.sharedClipboardKey)
+            NativeLog.session.notice("shared clipboard \(newValue ? "on" : "off", privacy: .public)")
+            if newValue { clipboard.start(includeCurrent: false) }
+            shareWindow?.clipboard.state = newValue ? .on : .off
+            onChange?()
+        }
     }
     var status: String? {
         if isSharing { return hostChannel == nil ? "Sharing this Mac · waiting" : "Sharing this Mac · connected" }
@@ -138,6 +154,9 @@ final class NativeSessionCoordinator {
             self.stopSharing(reason: self.pausedReason("Sharing stopped because this Mac locked or its display went to sleep."))
             self.disconnectViewer(reason: "This Mac locked or its display went to sleep. Reconnect when ready.")
         }
+        clipboard.onSend = { [weak self] content in self?.sendClipboard(content) }
+        let poll = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.pollClipboard() }
+        RunLoop.main.add(poll, forMode: .common); clipboardTimer = poll
         DispatchQueue.main.async { [weak self] in self?.resumeSharingIfAutomatic() }
     }
 
@@ -162,6 +181,7 @@ final class NativeSessionCoordinator {
                 if enabled && !self.isSharing { self.userStoppedSharing = false; self.startSharing() } else { self.refreshShare() }
             }
             controller.onDiagnostics = { [weak self] in self?.saveDiagnostics(self?.lastHostMeasurements) }
+            controller.onClipboardChange = { [weak self] enabled in self?.sharesClipboard = enabled }
         }
         refreshShare()
         shareWindow?.showWindow(nil); shareWindow?.window?.center(); NSApp.activate(ignoringOtherApps: true)
@@ -175,6 +195,7 @@ final class NativeSessionCoordinator {
         shareWindow?.control.isEnabled = !NativeInputInjector.isTrusted
         shareWindow?.control.title = NativeInputInjector.isTrusted ? "Keyboard & Mouse Enabled" : "Enable Keyboard & Mouse…"
         shareWindow?.automatic.state = sharesAutomatically ? .on : .off
+        shareWindow?.clipboard.state = sharesClipboard ? .on : .off
         if let message { shareWindow?.detail.stringValue = message }
         onChange?()
     }
@@ -249,6 +270,7 @@ final class NativeSessionCoordinator {
         hostChannel = channel; lastHostMeasurements = channel.measurements
         retiredEncoderCounters = NativeEncoderCounters(); hostInputGate.invalidate()
         NativeLog.session.notice("host session started")
+        if !isConnected { clipboard.start(includeCurrent: false) }
         let injector = NativeInputInjector(); hostInjector = injector
         hostActivity = hostActivity ?? ProcessInfo.processInfo.beginActivity(
             options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled, .userInitiated],
@@ -404,6 +426,11 @@ final class NativeSessionCoordinator {
                         channel.deliverControl { [weak self, weak channel] in
                             guard let self, let channel, self.hostChannel === channel else { return }
                             self.applyTuning(tuning)
+                        }
+                    case .clipboard(let content):
+                        channel.deliverControl { [weak self, weak channel] in
+                            guard let self, let channel, self.hostChannel === channel else { return }
+                            self.applyClipboard(content, from: channel)
                         }
                     case .control, .video:
                         throw NativeSessionError(message: "The viewer sent an unexpected session message.")
@@ -561,7 +588,7 @@ final class NativeSessionCoordinator {
                         let peer = (try? self.peerStore.remember(code, address: address)) ?? NativePeer(code: code, address: address)
                         self.peers = (try? self.peerStore.load()) ?? self.peers
                         self.pairWindow?.code.stringValue = ""; self.pairWindow?.close()
-                        self.beginViewer(transport, peer: peer, activate: true)
+                        self.beginViewer(transport, peer: peer, activate: true, pairing: true)
                     } catch { transport.close(); self.connectFailed(error, peerID: peerID, pairing: true) }
                 }
             } catch {
@@ -577,7 +604,11 @@ final class NativeSessionCoordinator {
     /// Pairing reports in its form. A window already showing this Mac reports
     /// in place and retries within the budget; a first connect shows an alert.
     private func connectFailed(_ error: Error, peerID: String, pairing: Bool = false) {
-        let message = error.localizedDescription
+        var message = error.localizedDescription
+        // Different versions end the handshake without a reason on the other side.
+        if [Int32(ML_SESSION_CLOSED), Int32(ML_SESSION_PROTOCOL)].contains((error as? NativeSessionError)?.status ?? 0) {
+            message += " If the other Mac runs a different MacLink version, update both Macs."
+        }
         if pairing {
             if pairWindow?.window?.isVisible == true { pairWindow?.error.stringValue = message } else { showError(message) }
             return
@@ -640,11 +671,18 @@ final class NativeSessionCoordinator {
         if viewerChannel == nil, let window = viewerWindow, !window.isClosed, window.isReconnecting { window.showEnded(reason: reason) }
     }
 
-    private func beginViewer(_ transport: NativeTransport, peer: NativePeer, activate: Bool) {
+    /// `pairing`: the clipboard may still hold the code just pasted, so what is
+    /// already copied is not shared for this first session.
+    private func beginViewer(_ transport: NativeTransport, peer: NativePeer, activate: Bool, pairing: Bool = false) {
         let channel = NativeSessionChannel(transport), decoder = NativeVideoDecoder()
         viewerChannel = channel; self.decoder = decoder; lastViewerMeasurements = channel.measurements
         firstFrame = false; viewerInputEnabled = false; pendingPing = nil; lastPresented = 0; lastStatusTime = uptime
         viewerStarted = uptime; reconnectWork?.cancel(); reconnectWork = nil
+        // What is already copied here is available to paste on the other Mac.
+        clipboard.start(includeCurrent: sharesClipboard && !pairing)
+        if sharesClipboard {
+            NativeLog.session.notice("clipboard access: \(NativePasteboard.accessDescription(.general), privacy: .public)")
+        }
         NativeLog.session.notice("viewer session started\(self.reconnectAttempts > 0 ? " after reconnecting" : "", privacy: .public)")
         // Reconnecting keeps the window, and its full-screen space, for the same Mac.
         let window: NativeViewerWindow, reused = openViewerWindow(for: peer.id) != nil
@@ -768,6 +806,11 @@ final class NativeSessionCoordinator {
                         }
                     case .telemetry(.stats(let stats)):
                         channel.storePeerStats(stats)
+                    case .clipboard(let content):
+                        channel.deliverControl { [weak self, weak channel] in
+                            guard let self, let channel, self.viewerChannel === channel else { return }
+                            self.applyClipboard(content, from: channel)
+                        }
                     case .input, .telemetry(.tuning):
                         throw NativeSessionError(message: "The sharing Mac sent an unexpected message.")
                     }
@@ -830,8 +873,9 @@ final class NativeSessionCoordinator {
         lastPresented = count; lastStatusTime = now
         channel.measurements.set("last_presented_fps", fps)
         let rtt = snapshot["network_round_trip_ms"].map { String(format: "%.0f ms RTT", $0) } ?? "checking connection"
-        // The sharing Mac sends frames only when its screen changes.
-        let rate = fps < 0.5 ? "screen unchanged" : String(format: "%.0f fps", fps)
+        // The sharing Mac sends frames only when its screen changes, so the rate
+        // follows activity there; it is not a cap.
+        let rate = fps < 0.5 ? "screen unchanged" : String(format: "%.0f fps as the screen changes", fps)
         let size = viewerWindow?.video.geometry.map { " · \($0.pixelWidth)×\($0.pixelHeight)" } ?? ""
         viewerWindow?.status.stringValue = "\(viewerInputEnabled ? "Connected" : "View only") · \(rate) · \(rtt)\(size)"
         if let pendingPing, now - pendingPing.1 > 8 { channel.fail("The sharing Mac stopped answering connection checks."); return }
@@ -869,6 +913,27 @@ final class NativeSessionCoordinator {
             viewerWindow?.showEnded(reason: reason)
         }
         onChange?()
+    }
+
+    private func pollClipboard() {
+        guard sharesClipboard, isConnected || hostChannel?.token.isActive == true else { return }
+        clipboard.poll()
+    }
+    private func sendClipboard(_ content: NativeClipboardContent) {
+        guard sharesClipboard else { return }
+        var sent = false
+        for channel in [viewerChannel, hostChannel].compactMap({ $0 }) where channel.token.isActive {
+            channel.send(.clipboard(content))
+            channel.measurements.add("clipboard_sent"); channel.measurements.add("clipboard_sent_bytes", Double(content.byteCount))
+            sent = true
+        }
+        if sent { NativeLog.session.notice("clipboard sent: \(content.summary, privacy: .public)") }
+    }
+    private func applyClipboard(_ content: NativeClipboardContent, from channel: NativeSessionChannel) {
+        guard sharesClipboard else { return }
+        clipboard.apply(content)
+        channel.measurements.add("clipboard_received"); channel.measurements.add("clipboard_received_bytes", Double(content.byteCount))
+        NativeLog.session.notice("clipboard received: \(content.summary, privacy: .public)")
     }
 
     /// Once a second: resume automatic sharing, exchange stats with the
@@ -949,6 +1014,7 @@ final class NativeSessionCoordinator {
     }
     func stop() {
         telemetryTimer?.invalidate(); telemetryTimer = nil
+        clipboardTimer?.invalidate(); clipboardTimer = nil
         NativeTelemetryServer.stop()
         stopSharing(); disconnectViewer(reason: "MacLink stopped.")
         systemKeys?.stop(); systemKeys = nil

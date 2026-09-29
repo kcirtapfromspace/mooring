@@ -447,6 +447,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             let stop = NSMenuItem(title: "Stop Sharing This Mac", action: #selector(stopNativeSharing), keyEquivalent: "")
             stop.target = self; statusMenu.addItem(stop)
         }
+        let clipboard = NSMenuItem(title: "Shared Clipboard", action: #selector(toggleSharedClipboard), keyEquivalent: "")
+        clipboard.target = self; clipboard.state = native.sharesClipboard ? .on : .off
+        clipboard.toolTip = "Copy on one Mac and paste on the other during a MacLink session."
+        statusMenu.addItem(clipboard)
         statusMenu.addItem(.separator())
         let connectMenuItem = NSMenuItem(title: "Apple Screen Sharing", action: nil, keyEquivalent: "")
         let connectMenu = NSMenu()
@@ -501,6 +505,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     @objc private func connectNative() { native.showConnect() }
     @objc private func shareNative() { native.showShare() }
     @objc private func stopNativeSharing() { native.stopSharingByUser() }
+    @objc private func toggleSharedClipboard() { native.sharesClipboard.toggle() }
     @objc private func connectNativePeer(_ sender: NSMenuItem) {
         if let id = sender.representedObject as? String { native.connect(peerID: id) }
     }

@@ -536,9 +536,10 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 }
 
-/// One synchronous hardware decode in progress plus at most one pending packet.
-/// Packets arrive validated by Rust or from the local encoder.
-/// Overflow discards the pending chain and requests an IDR. Render callbacks run
+/// One synchronous hardware decode in progress plus up to `maxPending` waiting packets.
+/// Packets arrive validated by Rust or from the local encoder. Up to
+/// `maxPending` wait while one decodes, absorbing packets that arrive together
+/// after a network pause. Overflow discards the pending chain and requests an IDR. Render callbacks run
 /// on the decoder queue; use NativeVideoView.display(), which safely coalesces.
 final class NativeVideoDecoder {
     var onFrame: ((CVPixelBuffer) -> Void)?
@@ -553,7 +554,9 @@ final class NativeVideoDecoder {
     var overflows: UInt64 { lock.lock(); defer { lock.unlock() }; return overflowCount }
     private var active = true
     private var busy = false
-    private var pending: NativeVideoPacket?
+    /// About 0.1 s at 60 fps; decoding takes about 5 ms, so a burst drains quickly.
+    static let maxPending = 6
+    private var pending: [NativeVideoPacket] = []
     private var discontinuity = true
     private var discontinuityEpoch: UInt64 = 0
     private var requestOutstanding = false
@@ -568,7 +571,7 @@ final class NativeVideoDecoder {
     private var lastSequence: UInt64?
     private var usingHardwareDecoder = false
     var hardwareDecoder: Bool { lock.lock(); defer { lock.unlock() }; return usingHardwareDecoder }
-    var pendingFrameCount: Int { lock.lock(); defer { lock.unlock() }; return pending == nil ? 0 : 1 }
+    var pendingFrameCount: Int { lock.lock(); defer { lock.unlock() }; return pending.count }
 
     /// The host ignores keyframe requests less than 0.5 s apart, so the retry
     /// interval must exceed that or a dropped request stalls until the next IDR.
@@ -586,13 +589,13 @@ final class NativeVideoDecoder {
         lock.lock()
         guard active else { lock.unlock(); return false }
         if busy {
-            guard pending == nil else {
-                pending = nil; discontinuity = true; discontinuityEpoch &+= 1; overflowCount &+= 1
+            guard pending.count < Self.maxPending else {
+                pending.removeAll(); discontinuity = true; discontinuityEpoch &+= 1; overflowCount &+= 1
                 let notify = claimKeyframeRequestLocked(); lock.unlock()
                 if notify { onNeedsKeyframe?() }
                 return false
             }
-            pending = packet; lock.unlock(); return true
+            pending.append(packet); lock.unlock(); return true
         }
         busy = true; lock.unlock()
         queue.async { [weak self] in self?.process(packet) }
@@ -603,7 +606,9 @@ final class NativeVideoDecoder {
     private func notifyRecovery(_ message: String, reportError: Bool = true) {
         lock.lock()
         guard active else { lock.unlock(); return }
-        discontinuity = true; discontinuityEpoch &+= 1; pending = nil
+        discontinuity = true; discontinuityEpoch &+= 1
+        // Only a keyframe can restart the chain: keep a queued one and what follows it.
+        if let keyframe = pending.firstIndex(where: { $0.keyframe }) { pending.removeFirst(keyframe) } else { pending.removeAll() }
         if reportError { consecutiveFailures += 1 }
         let fatal = reportError && consecutiveFailures >= Self.failureBudget
         let notify = claimKeyframeRequestLocked(); lock.unlock()
@@ -613,7 +618,8 @@ final class NativeVideoDecoder {
     private func process(_ packet: NativeVideoPacket) {
         defer {
             lock.lock()
-            let next = active ? pending : nil; pending = nil
+            let next = active && !pending.isEmpty ? pending.removeFirst() : nil
+            if !active { pending.removeAll() }
             if next == nil { busy = false }
             lock.unlock()
             if let next { queue.async { [weak self] in self?.process(next) } }
@@ -685,7 +691,7 @@ final class NativeVideoDecoder {
         lock.lock(); usingHardwareDecoder = true; lock.unlock()
     }
     func stop() {
-        lock.lock(); active = false; pending = nil; lock.unlock()
+        lock.lock(); active = false; pending.removeAll(); lock.unlock()
         queue.async { [self] in if let session { VTDecompressionSessionInvalidate(session); self.session = nil }; format = nil }
     }
     deinit { if let session { VTDecompressionSessionInvalidate(session) } }

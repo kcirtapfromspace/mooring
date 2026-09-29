@@ -14,6 +14,7 @@ enum NativeSessionMessage {
     case input(NativeInputEvent)
     case control(NativeControlMessage)
     case telemetry(NativeTelemetry)
+    case clipboard(NativeClipboardContent)
 }
 
 /// Blocking Rust I/O is called only from dedicated network queues. Registry IDs
@@ -76,14 +77,19 @@ final class NativeTransport: @unchecked Sendable {
         case .input(let event): var raw = event.raw; status = ml_session_send_input(session, &raw, timeout)
         case .control(let control): var raw = control.raw; status = ml_session_send_control(session, &raw, timeout)
         case .telemetry(let telemetry): var raw = telemetry.raw; status = ml_session_send_telemetry(session, &raw, timeout)
+        case .clipboard(let content):
+            status = content.withItems { ml_session_send_clipboard(session, $0.baseAddress, $0.count, timeout) }
         }
         try Self.check(status)
     }
     /// Exactly one receiver per connection; returned packets own their bytes.
     func receive() throws -> NativeSessionMessage? {
-        // Allocated on first receive, and only by viewers. Keep this a stored
-        // property: accessor-backed inout access would copy it per call.
-        if receivesVideo && videoBuffer.isEmpty { videoBuffer = [UInt8](repeating: 0, count: Int(ML_SESSION_MAX_VIDEO)) }
+        // Allocated on first receive: viewers receive video and clipboards, hosts
+        // clipboards only. Keep this a stored property: accessor-backed inout
+        // access would copy it per call.
+        if videoBuffer.isEmpty {
+            videoBuffer = [UInt8](repeating: 0, count: Int(receivesVideo ? ML_SESSION_MAX_VIDEO : ML_CLIPBOARD_MAX_MESSAGE))
+        }
         let session = id
         var message = MLSessionMessage()
         let result = videoBuffer.withUnsafeMutableBufferPointer { buffer in
@@ -101,6 +107,24 @@ final class NativeTransport: @unchecked Sendable {
         case ML_SESSION_INPUT: return .input(try NativeInputEvent(message.input))
         case ML_SESSION_CONTROL: return .control(try NativeControlMessage(validated: message.control))
         case ML_SESSION_TELEMETRY: return .telemetry(try NativeTelemetry(validated: message.telemetry))
+        case ML_SESSION_CLIPBOARD:
+            let clipboard = message.clipboard
+            let ranges = withUnsafeBytes(of: clipboard.items) { Array($0.bindMemory(to: MLClipboardRange.self).prefix(Int(clipboard.count))) }
+            var content = NativeClipboardContent()
+            videoBuffer.withUnsafeMutableBytes { buffer in
+                for range in ranges {
+                    let bytes = UnsafeMutableRawBufferPointer(rebasing: buffer[range.offset..<(range.offset + range.length)])
+                    let data = Data(bytes)
+                    // Clipboard contents do not linger in the reused receive buffer.
+                    bytes.initializeMemory(as: UInt8.self, repeating: 0)
+                    switch Int(range.kind) {
+                    case ML_CLIPBOARD_TEXT: content.text = String(decoding: data, as: UTF8.self) // UTF-8 checked in Rust
+                    case ML_CLIPBOARD_RTF: content.rtf = data
+                    default: content.png = data
+                    }
+                }
+            }
+            return .clipboard(content)
         default:
             close(); throw NativeSessionError(message: "The peer sent an unsupported message.")
         }

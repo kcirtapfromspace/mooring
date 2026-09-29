@@ -3,6 +3,7 @@
 //! so a failed call never leaves partial results. Validation lives in Rust:
 //! Swift converts between Apple types and these fixed-layout structs only.
 
+use crate::clipboard::{self, ClipboardKind, MAX_CLIPBOARD, MAX_CLIPBOARD_BYTES, MAX_ITEMS};
 use crate::control::{ControlMessage, DisplayGeometry};
 use crate::input::{InputEvent, InputReducer, MAX_RELEASES, keeps_local};
 use crate::pairing::{PairingCode, normalize_address};
@@ -92,6 +93,30 @@ pub struct MLVideoPacket {
     pub avcc_offset: usize,
     pub avcc_length: usize,
 }
+/// One clipboard representation to send.
+#[repr(C)]
+pub struct MLClipboardItem {
+    pub bytes: *const u8,
+    pub length: usize,
+    pub kind: u8,
+    pub reserved: [u8; 7],
+}
+/// One received representation, at `offset` in the caller's buffer.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MLClipboardRange {
+    pub offset: usize,
+    pub length: usize,
+    pub kind: u8,
+    pub reserved: [u8; 7],
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MLClipboardMessage {
+    pub count: u8,
+    pub reserved: [u8; 7],
+    pub items: [MLClipboardRange; MAX_ITEMS],
+}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MLSessionMessage {
@@ -101,7 +126,18 @@ pub struct MLSessionMessage {
     pub input: MLInputEvent,
     pub control: MLControlMessage,
     pub telemetry: MLTelemetryMessage,
+    pub clipboard: MLClipboardMessage,
 }
+pub const ML_CLIPBOARD_MAX_ITEMS: usize = 3;
+pub const ML_CLIPBOARD_MAX_BYTES: usize = 4_194_304;
+pub const ML_SESSION_MAX_MESSAGE: usize = 12_582_912;
+pub const ML_CLIPBOARD_MAX_MESSAGE: usize = 4_194_332;
+const _: () = assert!(ML_CLIPBOARD_MAX_MESSAGE == MAX_CLIPBOARD);
+const _: () = assert!(ML_CLIPBOARD_MAX_ITEMS == MAX_ITEMS);
+const _: () = assert!(ML_CLIPBOARD_MAX_BYTES == MAX_CLIPBOARD_BYTES);
+const _: () = assert!(
+    ML_SESSION_MAX_MESSAGE == transport::MAX_VIDEO && MAX_CLIPBOARD <= transport::MAX_VIDEO
+);
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MLMetric {
@@ -221,7 +257,14 @@ const _: () = {
     assert!(size_of::<MLVideoPacket>() == 80);
     assert!(offset_of!(MLVideoPacket, sps_offset) == 32);
     assert!(offset_of!(MLVideoPacket, avcc_length) == 72);
-    assert!(size_of::<MLSessionMessage>() == 728);
+    assert!(size_of::<MLSessionMessage>() == 808);
+    assert!(offset_of!(MLSessionMessage, clipboard) == 728);
+    assert!(size_of::<MLClipboardItem>() == 24);
+    assert!(offset_of!(MLClipboardItem, kind) == 16);
+    assert!(size_of::<MLClipboardRange>() == 24);
+    assert!(offset_of!(MLClipboardRange, kind) == 16);
+    assert!(size_of::<MLClipboardMessage>() == 80);
+    assert!(offset_of!(MLClipboardMessage, items) == 8);
     assert!(offset_of!(MLSessionMessage, video) == 8);
     assert!(offset_of!(MLSessionMessage, input) == 88);
     assert!(offset_of!(MLSessionMessage, control) == 136);
@@ -738,6 +781,54 @@ pub unsafe extern "C" fn ml_session_send_telemetry(
     })
 }
 /// # Safety
+/// `items` must be readable for `count` entries, each `bytes` readable for its
+/// `length` during the call.
+unsafe fn clipboard_items<'a>(
+    items: *const MLClipboardItem,
+    count: usize,
+) -> Result<Vec<(ClipboardKind, &'a [u8])>> {
+    if items.is_null() || !(1..=MAX_ITEMS).contains(&count) {
+        return Err(Error::Invalid);
+    }
+    // SAFETY: caller promises `count` readable entries.
+    let raw = unsafe { std::slice::from_raw_parts(items, count) };
+    raw.iter()
+        .map(|item| {
+            if item.bytes.is_null() || item.length == 0 || item.length > MAX_CLIPBOARD_BYTES {
+                return Err(Error::Invalid);
+            }
+            // SAFETY: caller promises `length` readable bytes.
+            let data = unsafe { std::slice::from_raw_parts(item.bytes, item.length) };
+            Ok((ClipboardKind::from_raw(item.kind)?, data))
+        })
+        .collect()
+}
+/// Either side may send. Rust validates kinds, order, signatures and the size
+/// bound before any byte is written.
+/// # Safety
+/// As for `clipboard_items`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_session_send_clipboard(
+    id: u64,
+    items: *const MLClipboardItem,
+    count: usize,
+    timeout_ms: u32,
+) -> i32 {
+    ffi(|| {
+        let values = unsafe { clipboard_items(items, count)? };
+        transport::session(id)?.send_message(&Outgoing::Clipboard(&values), deadline(timeout_ms)?)
+    })
+}
+/// # Safety
+/// As for `clipboard_items`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_clipboard_validate(items: *const MLClipboardItem, count: usize) -> i32 {
+    ffi(|| {
+        let values = unsafe { clipboard_items(items, count)? };
+        clipboard::validate(values.iter().map(|(kind, data)| (*kind, *data)))
+    })
+}
+/// # Safety
 /// `out` must be writable; a non-null `video_buffer` writable for `capacity`
 /// bytes and not aliased by another call.
 #[unsafe(no_mangle)]
@@ -787,6 +878,18 @@ pub unsafe extern "C" fn ml_session_receive(
             Incoming::Telemetry(message) => {
                 out.kind = crate::policy::TELEMETRY;
                 out.telemetry = telemetry_out(&message);
+            }
+            Incoming::Clipboard(packet) => {
+                out.kind = crate::policy::CLIPBOARD;
+                out.clipboard.count = packet.items.len() as u8;
+                for (slot, (kind, range)) in out.clipboard.items.iter_mut().zip(&packet.items) {
+                    *slot = MLClipboardRange {
+                        offset: range.start,
+                        length: range.len(),
+                        kind: *kind as u8,
+                        reserved: [0; 7],
+                    };
+                }
             }
         }
         Ok(())
