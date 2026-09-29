@@ -15,7 +15,7 @@ open dist/MacLink.app
 
 Add a Mac by hostname or IP, then click **Connect**. **Check Connection** only reads the server's initial RFB greeting; it does not authenticate or demonstrate High Performance support. Use Apple Screen Sharing to authenticate and select the display mode. MacLink never asks for or stores a remote password.
 
-Builds and GitHub preview releases target Apple silicon (arm64) only. The first preview is ad hoc signed and not notarized. The [notarization workflow](docs/NOTARIZATION.md) prepares Developer ID signed, Apple-verified releases when a local notarization Keychain profile is configured. See [testing on another Mac](docs/TESTING.md).
+Builds and GitHub preview releases target Apple silicon (arm64) only. [Preview 2](https://github.com/kcirtapfromspace/maclink/releases/tag/v0.1.0-preview.2) is Developer ID signed and notarized by Apple, with a stapled ticket verified in the final ZIP. The first preview was ad hoc signed; replace it with preview 2 for testing on another Mac. Local development builds remain ad hoc by default. See [testing instructions](docs/TESTING.md) and the [notarization workflow](docs/NOTARIZATION.md).
 
 ## CLI
 

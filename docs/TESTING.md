@@ -3,14 +3,14 @@
 Download the release ZIP and its SHA-256 checksum file while signed in to the GitHub account that can access this repository. This app supports Apple silicon (arm64) only and requires macOS 14 or later. Apple's High Performance sharing requires supported Apple silicon Macs at both ends.
 
 1. Verify the downloaded ZIP against `SHA256SUMS.txt` with `shasum -a 256 -c SHA256SUMS.txt` in the download directory.
-2. Extract the ZIP, then move `MacLink.app` to Applications or run it from the extracted folder.
+2. Quit any older MacLink copy. Extract the ZIP, then replace the previous `MacLink.app` in Applications (or run the new copy from its extracted folder). Saved connections remain in Application Support.
 3. Add the remote Mac's hostname or IP. Use the normal Screen Sharing port, 5900, unless your setup uses another port.
 4. Use **Check Connection**. A successful check confirms only an RFB service responds; the TCP time is not desktop latency or a throughput test.
 5. Click **Connect** and complete sign-in in Apple Screen Sharing. Choose High Performance there if supported.
 
-This preview is signed ad hoc for integrity, not with a Developer ID certificate, and is not notarized. macOS may require approval for a downloaded app. It does not contain a custom video engine or automatically change Apple's sharing mode.
+Preview 2 is signed with Developer ID and notarized by Apple. Its ticket is stapled to the app and validated after extracting the final ZIP. macOS may still show its normal first-launch downloaded-app confirmation; the "Apple could not verify" warning should no longer appear for this new artifact. This preview does not contain a custom video engine or automatically change Apple's sharing mode.
 
-If the first preview shows **Apple could not verify MacLink.app**, after attempting to open it go to **System Settings → Privacy & Security → Open Anyway**, then confirm **Open**. This adds an exception for that app. Future verified builds use the [Developer ID and notarization workflow](NOTARIZATION.md).
+If you still see **Apple could not verify MacLink.app**, confirm you downloaded `MacLink-v0.1.0-preview.2-macos-arm64.zip` and are opening the extracted new app, not an earlier copy. The first preview was not notarized. Use the new download instead of changing Gatekeeper settings.
 
 ## What to report
 
@@ -25,11 +25,13 @@ Do not include passwords, clipboard contents, private screen recordings, or sess
 
 ## Local build and release checks
 
-All compilation, tests, linting, signing, and archive creation run on the local development Mac. There are no GitHub Actions workflows. GitHub stores source code and downloadable release assets only.
+All compilation, tests, linting, signing, archive creation, and Gatekeeper validation run on the local development Mac. Apple scans the submitted signed archive through its notarization service. There are no GitHub Actions workflows. GitHub stores source code and downloadable release assets only.
 
 ```sh
 ./scripts/ci-local.sh
-./scripts/package-release.sh v0.1.0-preview.1
+MACLINK_CODESIGN_IDENTITY='Developer ID Application: YOUR NAME (TEAM_ID)' \
+  MACLINK_NOTARY_PROFILE=MacLink \
+  ./scripts/notarize-release.sh v0.1.0-preview.2
 ```
 
 The published release includes local validation output and checksums. Testing on the second Apple silicon Mac is still required to validate the remote connection and user experience.

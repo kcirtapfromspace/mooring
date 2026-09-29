@@ -12,6 +12,10 @@ Validated locally on an Apple M1 Ultra running macOS 26.6.2. Rust 1.98.1 and the
 - Adaptive-policy tests use synthetic telemetry. They do not measure live video latency or demonstrate automatic Apple mode switching.
 - Native Swift compilation, bundle metadata lint, ad hoc code signature validation, and release archive checks.
 
+## Preview 2 notarization
+
+The complete local validation script passed again with all 40 tests. Both executables were signed with Developer ID, hardened runtime, and secure timestamps. Apple accepted submission `33b0a81d-3418-411e-9bc8-e3f072bfad76`; its log reports no issues. The final ZIP contains the stapled app. `stapler validate`, strict signature verification, and `spctl --assess --type execute` all passed after extracting that ZIP; Gatekeeper reported `source=Notarized Developer ID`. No Gatekeeper override was used.
+
 ## GUI check
 
 Used a separate app identifier and isolated connection store. Verified empty state, Add Mac, the saved connection list, an RFB check against a localhost mock server, a clear refused-connection error after that server stopped, and readable/scrollable diagnostics. No real remote session was initiated by this QA flow.
