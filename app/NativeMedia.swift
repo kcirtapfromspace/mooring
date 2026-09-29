@@ -554,8 +554,10 @@ final class NativeVideoDecoder {
     var overflows: UInt64 { lock.lock(); defer { lock.unlock() }; return overflowCount }
     private var active = true
     private var busy = false
-    /// About 0.1 s at 60 fps; decoding takes about 5 ms, so a burst drains quickly.
-    static let maxPending = 6
+    /// About 0.27 s at 60 fps. The largest burst is at connect, when frames
+    /// captured while the viewer was still starting arrive together; decoding
+    /// takes about 5 ms, so even a full queue drains in about 80 ms.
+    static let maxPending = 16
     private var pending: [NativeVideoPacket] = []
     private var discontinuity = true
     private var discontinuityEpoch: UInt64 = 0

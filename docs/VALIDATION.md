@@ -134,6 +134,10 @@ For `v0.3.0-preview.6`, the complete local validation script passed with 153 Rus
 
 The embedded Sparkle 2.10.0 framework is pinned by SHA-256, thinned to arm64 and stripped of its unused XPC services and headers. Each nested component is signed before the app. An update between the two Macs from the public feed has not yet been observed; the first will be the release after preview 6.
 
+## First automatic update
+
+`v0.3.0-preview.7` raises the viewer decoder's bound from 6 to 16 packets. Two-Mac telemetry on previews 4 and 6 showed a single overflow in the first second of each session: the sharing Mac captured about 30 frames while the viewing Mac was still starting its decoder. The complete local validation script passed with 153 Rust tests and every native Swift suite. It is the first release published for installed copies to pick up by themselves.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.
