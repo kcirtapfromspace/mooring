@@ -7,9 +7,23 @@
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub mod network_probe;
+
+/// MacLink's per-user data directory: `MACLINK_HOME` when set, otherwise
+/// `~/Library/Application Support/MacLink`. Shared by the CLI and native session.
+pub fn support_directory() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("MACLINK_HOME") {
+        if path.is_empty() {
+            return Err("MACLINK_HOME must not be empty".into());
+        }
+        return Ok(PathBuf::from(path));
+    }
+    let home = std::env::var_os("HOME").ok_or("HOME is unavailable; set MACLINK_HOME")?;
+    Ok(PathBuf::from(home).join("Library/Application Support/MacLink"))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HostInspection {

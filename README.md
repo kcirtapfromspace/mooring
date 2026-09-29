@@ -4,6 +4,8 @@ A small native Mac connection app with a Rust core. The product goal is reliable
 
 **Current milestone:** enter a Mac's address and connect. Auto mode, full screen and reconnection on learned networks are the defaults. MacLink can request Standard or High Performance and supervise a uniquely identified Apple Screen Sharing session. Apple supplies authentication and video. Its mode URL options are undocumented; actual negotiation, full screen, and switching still need two-Mac validation. There is no claim of performance parity or measured video bandwidth.
 
+**Experimental:** a direct native session. **Share This Mac** captures the main display with ScreenCaptureKit and hardware H.264; **Connect with MacLink** pairs with a copied code and views or controls it over an encrypted, authenticated LAN connection. It has not yet been tested between two Macs. See the [release notes](docs/release-notes-v0.3.0-preview.1.md) for limits.
+
 ## Run
 
 Requires macOS 14 or newer, Xcode Command Line Tools, and Rust 1.89 or newer. Apple High Performance additionally requires compatible Apple silicon Macs at both ends.
@@ -17,7 +19,7 @@ MacLink lives behind a display icon in the macOS menu bar. Choose **Add Mac**, e
 
 No home-network marking or capability checkbox is required to start. Auto starts with Standard and learns a direct network after an explicitly opened, identified session and sustained healthy checks. It may then make a bounded High Performance trial without claiming that support or bandwidth has been verified. Settings contains optional display, login and connection preferences; **Advanced** contains home overrides and detailed tuning. Previously configured preferences are preserved.
 
-Builds and GitHub preview releases target Apple silicon (arm64) only. Download the [simple setup preview](https://github.com/kcirtapfromspace/maclink/releases/tag/v0.2.0-preview.3). Distribution uses Developer ID signing, Apple notarization, and a stapled ticket checked after extracting the final ZIP. Local development builds remain ad hoc by default. See [testing instructions](docs/TESTING.md), [automation behavior](docs/AUTOMATION.md), and the [notarization workflow](docs/NOTARIZATION.md).
+Builds and GitHub preview releases target Apple silicon (arm64) only. Download the [native session preview](https://github.com/kcirtapfromspace/maclink/releases/tag/v0.3.0-preview.1). Distribution uses Developer ID signing, Apple notarization, and a stapled ticket checked after extracting the final ZIP. Local development builds remain ad hoc by default. See [testing instructions](docs/TESTING.md), [automation behavior](docs/AUTOMATION.md), and the [notarization workflow](docs/NOTARIZATION.md).
 
 ## CLI
 
@@ -39,6 +41,7 @@ cargo run -p maclink-cli -- simulate
 - `crates/maclink-core`: live target-network mode policy plus the separate simulated streaming quality/mailbox/reconnect foundation.
 - `crates/maclink-platform`: validated Apple Screen Sharing launch URLs and read-only RFB greeting diagnostics.
 - `crates/maclink-cli`: JSON command interface and persistent saved Macs.
+- `crates/maclink-session`: experimental native session (static library): encrypted transport, typed wire formats and validation, per-role policy, host input state, pairing codes and saved peers. See its [README](crates/maclink-session/README.md).
 - `app`: native menu, settings, network-change notifications and bounded Accessibility session supervision; Rust handles mode policy, connection validation, diagnostics, and saved Macs.
 - `scripts/probe-codecs.swift`: public VideoToolbox capability probe; no screen capture or transmission.
 - `docs/apple-backend.md`: Apple interoperability research and limitations.

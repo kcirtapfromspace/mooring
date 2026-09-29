@@ -1,0 +1,1144 @@
+//! Loopback transport and C ABI tests. The accepting side is always the host;
+//! the connecting side is the viewer.
+
+use crate::Error;
+use crate::ffi::*;
+use crate::policy::{CONTROL, INPUT, VIDEO};
+use crate::transport::{
+    HANDSHAKE_PAYLOAD, MAX_CONTROL, MAX_INPUT, MAX_RECORD, MAX_VIDEO, PROLOGUE, builder, deadline,
+    read_record, session, write_exact, write_record,
+};
+use crate::video::tests::{IDR, P_SLICE, PPS, SPS};
+use std::ffi::{CString, c_char};
+use std::net::{Shutdown, TcpStream};
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+struct Owned(u64);
+impl Drop for Owned {
+    fn drop(&mut self) {
+        let _ = ml_session_close(self.0);
+    }
+}
+fn identity() -> ([u8; 32], [u8; 32], [u8; 32]) {
+    let (mut private, mut public, mut psk) = ([0; 32], [0; 32], [0; 32]);
+    assert_eq!(
+        unsafe {
+            ml_session_generate_identity(
+                private.as_mut_ptr(),
+                public.as_mut_ptr(),
+                psk.as_mut_ptr(),
+            )
+        },
+        0
+    );
+    (private, public, psk)
+}
+fn bind(private: &[u8; 32], psk: &[u8; 32]) -> Owned {
+    let mut id = 0;
+    assert_eq!(
+        unsafe {
+            ml_session_listen(
+                c"127.0.0.1".as_ptr(),
+                0,
+                private.as_ptr(),
+                psk.as_ptr(),
+                &mut id,
+            )
+        },
+        0
+    );
+    assert_ne!(ml_session_listener_port(id), 0);
+    Owned(id)
+}
+fn connect(port: u16, public: &[u8; 32], psk: &[u8; 32], timeout: u32, out: &mut u64) -> i32 {
+    unsafe {
+        ml_session_connect(
+            c"127.0.0.1".as_ptr(),
+            port,
+            public.as_ptr(),
+            psk.as_ptr(),
+            timeout,
+            out,
+        )
+    }
+}
+/// Returns (viewer, host).
+fn pair() -> (Owned, Owned) {
+    let (private, public, psk) = identity();
+    let listener = bind(&private, &psk);
+    let id = listener.0;
+    let accept = std::thread::spawn(move || {
+        let mut host = 0;
+        assert_eq!(unsafe { ml_session_accept(id, 5000, &mut host) }, 0);
+        Owned(host)
+    });
+    let mut viewer = 0;
+    assert_eq!(
+        connect(
+            ml_session_listener_port(id),
+            &public,
+            &psk,
+            5000,
+            &mut viewer
+        ),
+        0
+    );
+    (Owned(viewer), accept.join().unwrap())
+}
+fn status(result: crate::Result<()>) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(error) => error as i32,
+    }
+}
+fn send(id: u64, kind: u8, value: &[u8]) -> i32 {
+    status(
+        session(id)
+            .and_then(|value_session| value_session.send_bytes(kind, value, deadline(5000)?)),
+    )
+}
+/// Untyped receive. Returns the buffer the message used, or both on failure.
+fn receive(id: u64, capacity: usize, timeout: u32) -> (i32, u8, usize, Vec<u8>) {
+    let (mut video, mut small) = (vec![0; capacity], vec![0; capacity.min(MAX_CONTROL)]);
+    let mut needed = 0;
+    let result = session(id).and_then(|value| {
+        value.receive_bytes(&mut video, &mut small, deadline(timeout)?, &mut needed)
+    });
+    match result {
+        Ok((kind, size)) => (0, kind, size, if kind == VIDEO { video } else { small }),
+        Err(error) => (error as i32, 0, needed, [video, small].concat()),
+    }
+}
+fn plain(kind: u8, total: u32, sequence: u64, offset: u32, payload: &[u8]) -> Vec<u8> {
+    let mut data = vec![1, kind, 0, 0];
+    data.extend_from_slice(&sequence.to_be_bytes());
+    data.extend_from_slice(&total.to_be_bytes());
+    data.extend_from_slice(&offset.to_be_bytes());
+    data.extend_from_slice(payload);
+    data
+}
+fn encrypted(id: u64, nonce: u64, payload: &[u8]) -> Vec<u8> {
+    let sender = session(id).unwrap();
+    let mut cipher = vec![0; MAX_RECORD];
+    let count = sender
+        .crypto
+        .write_message(nonce + 1, payload, &mut cipher)
+        .unwrap();
+    cipher.truncate(count);
+    cipher
+}
+fn inject(id: u64, cipher: &[u8]) {
+    write_record(
+        &session(id).unwrap().socket,
+        cipher,
+        deadline(5000).unwrap(),
+    )
+    .unwrap();
+}
+fn is_closed(id: u64) -> bool {
+    session(id)
+        .map(|value| value.closed.load(Ordering::Acquire))
+        .unwrap_or(true)
+}
+
+fn geometry(kind: u8) -> MLControlMessage {
+    MLControlMessage {
+        geometry: MLDisplayGeometry {
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+            pixel_width: 1920,
+            pixel_height: 1080,
+        },
+        kind,
+        input_enabled: 1,
+        ..Default::default()
+    }
+}
+fn control(kind: u8, ping_id: u64) -> MLControlMessage {
+    MLControlMessage {
+        kind,
+        ping_id,
+        ..Default::default()
+    }
+}
+fn frame(avcc: &[u8], keyframe: bool, sequence: u64) -> MLVideoFrame {
+    MLVideoFrame {
+        header: MLVideoHeader {
+            sequence,
+            timestamp_us: 99,
+            width: 1920,
+            height: 1080,
+            keyframe: keyframe.into(),
+            reserved: [0; 7],
+        },
+        sps: SPS.as_ptr(),
+        sps_length: SPS.len(),
+        pps: PPS.as_ptr(),
+        pps_length: PPS.len(),
+        avcc: avcc.as_ptr(),
+        avcc_length: avcc.len(),
+    }
+}
+fn key_event(kind: u8, code: u16) -> MLInputEvent {
+    MLInputEvent {
+        kind,
+        key_code: code,
+        ..Default::default()
+    }
+}
+fn send_control(id: u64, message: &MLControlMessage) -> i32 {
+    unsafe { ml_session_send_control(id, message, 1000) }
+}
+fn send_input(id: u64, event: &MLInputEvent) -> i32 {
+    unsafe { ml_session_send_input(id, event, 1000) }
+}
+fn send_video(id: u64, value: &MLVideoFrame) -> i32 {
+    unsafe { ml_session_send_video(id, value, 1000) }
+}
+fn typed(id: u64, buffer: &mut [u8], timeout: u32) -> (i32, MLSessionMessage) {
+    let mut message = MLSessionMessage::default();
+    let status =
+        unsafe { ml_session_receive(id, buffer.as_mut_ptr(), buffer.len(), &mut message, timeout) };
+    (status, message)
+}
+
+#[test]
+fn generated_identity_has_independent_random_pairing_secrets() {
+    let (private, public, psk) = identity();
+    let (private2, public2, psk2) = identity();
+    assert!(private != [0; 32] && public != [0; 32] && psk != [0; 32]);
+    assert!(private != private2 && public != public2 && psk != psk2 && private != psk);
+}
+
+#[test]
+fn authenticated_duplex_chunks_video_without_blocking_return_input() {
+    let (viewer, host) = pair();
+    let host_id = host.0;
+    let video = vec![0xAB; MAX_VIDEO];
+    let writer = std::thread::spawn(move || send(host_id, VIDEO, &video));
+    let (finished, received) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        let result = receive(host_id, MAX_INPUT, 3000);
+        finished
+            .send((result.0, result.1, result.3[..result.2].to_vec()))
+            .unwrap();
+    });
+    assert_eq!(send(viewer.0, INPUT, b"keyboard-input"), 0);
+    // Return input arrives before the viewer drains the large video stream.
+    assert_eq!(
+        received.recv_timeout(Duration::from_secs(2)).unwrap(),
+        (0, INPUT, b"keyboard-input".to_vec())
+    );
+    let result = receive(viewer.0, MAX_VIDEO, 5000);
+    assert_eq!((result.0, result.1, result.2), (0, VIDEO, MAX_VIDEO));
+    assert!(result.3.iter().all(|byte| *byte == 0xAB));
+    assert_eq!(writer.join().unwrap(), 0);
+    reader.join().unwrap();
+    assert_eq!(send(viewer.0, CONTROL, b"configuration"), 0);
+    let result = receive(host.0, MAX_CONTROL, 1000);
+    assert_eq!((result.0, result.1, result.2), (0, CONTROL, 13));
+}
+
+#[test]
+fn wrong_psk_and_wrong_pinned_identity_never_publish_session_handles() {
+    for wrong_identity in [false, true] {
+        let (private, mut public, mut psk) = identity();
+        let listener = bind(&private, &psk);
+        let id = listener.0;
+        let accepting = std::thread::spawn(move || {
+            let mut handle = 99;
+            let status = unsafe { ml_session_accept(id, 1500, &mut handle) };
+            (status, handle)
+        });
+        if wrong_identity {
+            public = identity().1;
+        } else {
+            psk = identity().2;
+        }
+        let mut handle = 99;
+        assert_ne!(
+            connect(
+                ml_session_listener_port(id),
+                &public,
+                &psk,
+                1500,
+                &mut handle
+            ),
+            0
+        );
+        assert_eq!(handle, 0);
+        let (status, handle) = accepting.join().unwrap();
+        assert_ne!(status, 0);
+        assert_eq!(handle, 0);
+    }
+}
+
+#[test]
+fn authentication_tamper_closes_without_returning_plaintext() {
+    let (viewer, host) = pair();
+    let mut cipher = encrypted(viewer.0, 0, &plain(INPUT, 6, 0, 0, b"secret"));
+    cipher[3] ^= 0x40;
+    inject(viewer.0, &cipher);
+    let result = receive(host.0, MAX_INPUT, 1000);
+    assert_eq!((result.0, result.1, result.2), (Error::Auth as i32, 0, 0));
+    assert!(result.3.iter().all(|byte| *byte == 0));
+    assert_eq!(send(host.0, CONTROL, b"retry"), Error::Closed as i32);
+}
+
+#[test]
+fn authenticated_header_bounds_types_offsets_sequences_and_direction_are_enforced() {
+    let cases = [
+        plain(VIDEO, (MAX_VIDEO + 1) as u32, 0, 0, b"x"),
+        plain(INPUT, (MAX_INPUT + 1) as u32, 0, 0, b"x"),
+        plain(CONTROL, (MAX_CONTROL + 1) as u32, 0, 0, b"x"),
+        plain(VIDEO, 1, 0, 0, b"x"), // a host never receives video
+        plain(4, 1, 0, 0, b"x"),
+        plain(INPUT, 1, 1, 0, b"x"),
+        plain(INPUT, 1, 0, 1, b"x"),
+        plain(INPUT, 1, 0, 0, b"xx"),
+        plain(INPUT, 1, 0, 0, b""),
+        vec![0; 3],
+    ];
+    for invalid in cases {
+        let (viewer, host) = pair();
+        inject(viewer.0, &encrypted(viewer.0, 0, &invalid));
+        let result = receive(host.0, MAX_INPUT, 1000);
+        assert_eq!(
+            (result.0, result.1, result.2),
+            (Error::Protocol as i32, 0, 0)
+        );
+        assert!(is_closed(host.0));
+    }
+}
+
+#[test]
+fn record_replay_cannot_reuse_a_directional_nonce() {
+    let (viewer, host) = pair();
+    let cipher = encrypted(viewer.0, 0, &plain(INPUT, 1, 0, 0, b"x"));
+    inject(viewer.0, &cipher);
+    assert_eq!(receive(host.0, MAX_INPUT, 1000).0, 0);
+    inject(viewer.0, &cipher);
+    assert_eq!(receive(host.0, MAX_INPUT, 1000).0, Error::Auth as i32);
+}
+
+#[test]
+fn idle_receive_timeout_is_retryable_but_partial_frame_timeout_closes() {
+    let (viewer, host) = pair();
+    assert_eq!(receive(host.0, MAX_INPUT, 30).0, Error::Timeout as i32);
+    assert_eq!(send(viewer.0, INPUT, b"after-timeout"), 0);
+    assert_eq!(receive(host.0, MAX_INPUT, 1000).0, 0);
+    write_exact(
+        &session(viewer.0).unwrap().socket,
+        &[0],
+        deadline(1000).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(receive(host.0, MAX_INPUT, 30).0, Error::Protocol as i32);
+    assert_eq!(receive(host.0, MAX_INPUT, 30).0, Error::Closed as i32);
+}
+
+#[test]
+fn truncated_record_and_too_small_caller_buffer_close_session() {
+    let (viewer, host) = pair();
+    let socket = &session(viewer.0).unwrap().socket;
+    write_exact(socket, &[0, 40, 1, 2, 3], deadline(1000).unwrap()).unwrap();
+    socket.shutdown(Shutdown::Write).unwrap();
+    let result = receive(host.0, MAX_INPUT, 1000);
+    assert_ne!(result.0, 0);
+    assert_eq!(result.2, 0);
+    assert!(is_closed(host.0));
+
+    let (viewer, host) = pair();
+    assert_eq!(send(viewer.0, INPUT, b"12345"), 0);
+    let result = receive(host.0, 3, 1000);
+    assert_eq!((result.0, result.1, result.2), (Error::Buffer as i32, 0, 5));
+    assert_eq!(receive(host.0, MAX_INPUT, 30).0, Error::Closed as i32);
+}
+
+#[test]
+fn cancel_accept_and_pending_handshake_have_bounded_latency() {
+    for during_handshake in [false, true] {
+        let (private, _, psk) = identity();
+        let listener = bind(&private, &psk);
+        let id = listener.0;
+        let raw = during_handshake
+            .then(|| TcpStream::connect(("127.0.0.1", ml_session_listener_port(id))).unwrap());
+        let accepting = std::thread::spawn(move || {
+            let mut handle = 99;
+            let status = unsafe { ml_session_accept(id, 5000, &mut handle) };
+            (status, handle)
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        let start = Instant::now();
+        assert_eq!(ml_session_close(id), 0);
+        let result = accepting.join().unwrap();
+        assert_ne!(result.0, 0);
+        assert_eq!(result.1, 0);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        drop(raw);
+    }
+}
+
+#[test]
+fn cancel_receive_preserves_arc_lifetime_and_stale_handles_never_reopen() {
+    let (_viewer, host) = pair();
+    let id = host.0;
+    let receiver = std::thread::spawn(move || receive(id, MAX_INPUT, 5000));
+    std::thread::sleep(Duration::from_millis(30));
+    let start = Instant::now();
+    assert_eq!(ml_session_close(id), 0);
+    assert_ne!(receiver.join().unwrap().0, 0);
+    assert!(start.elapsed() < Duration::from_secs(1));
+    assert_eq!(send(id, CONTROL, b"late"), Error::Closed as i32);
+    assert_eq!(ml_session_close(id), Error::Closed as i32);
+}
+
+#[test]
+fn listener_handshake_and_accept_timeouts_remain_usable() {
+    let (private, public, psk) = identity();
+    let listener = bind(&private, &psk);
+    let id = listener.0;
+    let mut output = 99;
+    assert_eq!(
+        unsafe { ml_session_accept(id, 30, &mut output) },
+        Error::Timeout as i32
+    );
+    assert_eq!(output, 0);
+    let raw = TcpStream::connect(("127.0.0.1", ml_session_listener_port(id))).unwrap();
+    assert_eq!(
+        unsafe { ml_session_accept(id, 30, &mut output) },
+        Error::Timeout as i32
+    );
+    drop(raw);
+    let accepting = std::thread::spawn(move || {
+        let mut value = 0;
+        assert_eq!(unsafe { ml_session_accept(id, 3000, &mut value) }, 0);
+        Owned(value)
+    });
+    let mut viewer = 0;
+    assert_eq!(
+        connect(
+            ml_session_listener_port(id),
+            &public,
+            &psk,
+            3000,
+            &mut viewer
+        ),
+        0
+    );
+    drop(Owned(viewer));
+    drop(accepting.join().unwrap());
+}
+
+#[test]
+fn validation_rejects_bad_arguments_without_closing_the_session() {
+    let (viewer, host) = pair();
+    assert_eq!(send(viewer.0, 4, b"x"), Error::Invalid as i32);
+    assert_eq!(
+        send(viewer.0, INPUT, &vec![0; MAX_INPUT + 1]),
+        Error::Invalid as i32
+    );
+    let event = key_event(1, 0);
+    assert_eq!(
+        unsafe { ml_session_send_input(viewer.0, std::ptr::null(), 1000) },
+        Error::Invalid as i32
+    );
+    assert_eq!(
+        unsafe { ml_session_send_input(viewer.0, &event, 0) },
+        Error::Invalid as i32
+    );
+    assert_eq!(
+        unsafe { ml_session_send_input(viewer.0, &event, 30001) },
+        Error::Invalid as i32
+    );
+    let mut message = MLSessionMessage::default();
+    assert_eq!(
+        unsafe { ml_session_receive(host.0, std::ptr::null_mut(), 5, &mut message, 1000) },
+        Error::Invalid as i32
+    );
+    assert_eq!(
+        unsafe { ml_session_receive(host.0, std::ptr::null_mut(), 0, std::ptr::null_mut(), 1000) },
+        Error::Invalid as i32
+    );
+    let mut null_frame = frame(IDR, true, 1);
+    null_frame.avcc = std::ptr::null();
+    assert_eq!(send_video(host.0, &null_frame), Error::Invalid as i32);
+    assert_eq!(send_input(viewer.0, &event), 0, "the session stays open");
+    let bad = CString::new("http://user:secret@host/").unwrap();
+    let (_, public, psk) = identity();
+    let mut handle = 99;
+    let status = unsafe {
+        ml_session_connect(
+            bad.as_ptr(),
+            45900,
+            public.as_ptr(),
+            psk.as_ptr(),
+            1000,
+            &mut handle,
+        )
+    };
+    assert_eq!((status, handle), (Error::Invalid as i32, 0));
+}
+
+#[test]
+fn concurrent_reader_rejected_without_affecting_other_direction() {
+    let (viewer, host) = pair();
+    let value = session(host.0).unwrap();
+    let _reader = value.receive.lock().unwrap();
+    assert_eq!(receive(host.0, MAX_INPUT, 50).0, Error::Busy as i32);
+    assert_eq!(send(host.0, CONTROL, b"duplex"), 0);
+    assert_eq!(receive(viewer.0, MAX_INPUT, 1000).0, 0);
+}
+
+#[test]
+fn matching_first_handshake_without_fresh_key_confirmation_never_publishes_session() {
+    let (private, public, psk) = identity();
+    let listener = bind(&private, &psk);
+    let id = listener.0;
+    let accepting = std::thread::spawn(move || {
+        let mut value = 99;
+        let status = unsafe { ml_session_accept(id, 1000, &mut value) };
+        (status, value)
+    });
+    let mut noise = builder()
+        .unwrap()
+        .remote_public_key(&public)
+        .unwrap()
+        .psk(0, &psk)
+        .unwrap()
+        .prologue(PROLOGUE)
+        .unwrap()
+        .build_initiator()
+        .unwrap();
+    let raw = TcpStream::connect(("127.0.0.1", ml_session_listener_port(id))).unwrap();
+    let mut record = [0; 1024];
+    let count = noise.write_message(HANDSHAKE_PAYLOAD, &mut record).unwrap();
+    write_record(&raw, &record[..count], deadline(1000).unwrap()).unwrap();
+    assert!(read_record(&raw, &mut record, deadline(1000).unwrap(), &mut 0).is_ok());
+    // A copied first handshake has no fresh transport keys and cannot finish.
+    drop(raw);
+    let result = accepting.join().unwrap();
+    assert_ne!(result.0, 0);
+    assert_eq!(result.1, 0);
+}
+
+#[test]
+fn authenticated_chunk_metadata_cannot_change_mid_message() {
+    let (viewer, host) = pair();
+    inject(
+        viewer.0,
+        &encrypted(viewer.0, 0, &plain(INPUT, 2, 0, 0, b"x")),
+    );
+    inject(
+        viewer.0,
+        &encrypted(viewer.0, 1, &plain(CONTROL, 2, 0, 1, b"y")),
+    );
+    let result = receive(host.0, MAX_INPUT, 1000);
+    assert_eq!(
+        (result.0, result.1, result.2),
+        (Error::Protocol as i32, 0, 0)
+    );
+    assert!(result.3.iter().all(|byte| *byte == 0));
+}
+
+#[test]
+fn send_deadline_and_cancellation_close_blocked_video_writer() {
+    let (_viewer, host) = pair();
+    let payload = vec![1; MAX_VIDEO];
+    let result = session(host.0)
+        .unwrap()
+        .send_bytes(VIDEO, &payload, deadline(30).unwrap());
+    assert_eq!(result, Err(Error::Timeout));
+    assert_eq!(
+        send(host.0, CONTROL, b"cannot-retry-partial-write"),
+        Error::Closed as i32
+    );
+
+    let (_viewer, host) = pair();
+    let id = host.0;
+    let writer = std::thread::spawn(move || send(id, VIDEO, &payload));
+    std::thread::sleep(Duration::from_millis(30));
+    let start = Instant::now();
+    assert_eq!(ml_session_close(id), 0);
+    assert_ne!(writer.join().unwrap(), 0);
+    assert!(start.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn typed_messages_round_trip_through_the_c_abi() {
+    let (viewer, host) = pair();
+    let mut buffer = vec![0; MAX_VIDEO];
+    assert_eq!(send_control(host.0, &geometry(1)), 0);
+    assert_eq!(send_video(host.0, &frame(IDR, true, 1)), 0);
+    assert_eq!(send_video(host.0, &frame(P_SLICE, false, 2)), 0);
+    assert_eq!(send_control(host.0, &control(4, u64::MAX)), 0);
+    let (status, message) = typed(viewer.0, &mut buffer, 1000);
+    assert_eq!(
+        (
+            status,
+            message.kind,
+            message.control.kind,
+            message.control.input_enabled
+        ),
+        (0, CONTROL, 1, 1)
+    );
+    assert_eq!(
+        (
+            message.control.geometry.pixel_width,
+            message.control.geometry.height
+        ),
+        (1920, 1080.0)
+    );
+    for (avcc, keyframe, sequence) in [(IDR, 1, 1), (P_SLICE, 0, 2)] {
+        let (status, message) = typed(viewer.0, &mut buffer, 1000);
+        assert_eq!((status, message.kind), (0, VIDEO));
+        let packet = message.video;
+        assert_eq!(
+            (
+                packet.header.keyframe,
+                packet.header.sequence,
+                packet.header.timestamp_us
+            ),
+            (keyframe, sequence, 99)
+        );
+        assert_eq!(
+            &buffer[packet.sps_offset..packet.sps_offset + packet.sps_length],
+            SPS
+        );
+        assert_eq!(
+            &buffer[packet.pps_offset..packet.pps_offset + packet.pps_length],
+            PPS
+        );
+        assert_eq!(
+            &buffer[packet.avcc_offset..packet.avcc_offset + packet.avcc_length],
+            avcc
+        );
+    }
+    let (status, message) = typed(viewer.0, &mut buffer, 1000);
+    assert_eq!(
+        (
+            status,
+            message.kind,
+            message.control.kind,
+            message.control.ping_id
+        ),
+        (0, CONTROL, 4, u64::MAX)
+    );
+
+    let scroll = MLInputEvent {
+        kind: 6,
+        x: 0.25,
+        y: 1.0,
+        delta_x: -3.5,
+        delta_y: 12.0,
+        modifiers: 0b1000,
+        ..Default::default()
+    };
+    assert_eq!(send_input(viewer.0, &scroll), 0);
+    assert_eq!(send_control(viewer.0, &control(3, 7)), 0);
+    assert_eq!(send_control(viewer.0, &control(5, 0)), 0);
+    let (status, message) = typed(host.0, &mut [], 1000);
+    assert_eq!((status, message.kind), (0, INPUT));
+    let input = message.input;
+    assert_eq!(
+        (
+            input.kind,
+            input.x,
+            input.y,
+            input.delta_x,
+            input.delta_y,
+            input.modifiers
+        ),
+        (6, 0.25, 1.0, -3.5, 12.0, 0b1000)
+    );
+    assert_eq!(typed(host.0, &mut [], 1000).1.control.ping_id, 7);
+    assert_eq!(typed(host.0, &mut [], 1000).1.control.kind, 5);
+}
+
+#[test]
+fn misdirected_or_invalid_sends_fail_without_closing() {
+    let (viewer, host) = pair();
+    assert_eq!(
+        send_video(viewer.0, &frame(IDR, true, 1)),
+        Error::Invalid as i32,
+        "viewers never send video"
+    );
+    assert_eq!(
+        send_input(host.0, &key_event(1, 0)),
+        Error::Invalid as i32,
+        "hosts never send input"
+    );
+    assert_eq!(
+        send_control(host.0, &control(3, 1)),
+        Error::Invalid as i32,
+        "hosts never ping"
+    );
+    assert_eq!(
+        send_control(viewer.0, &geometry(1)),
+        Error::Invalid as i32,
+        "viewers never send geometry"
+    );
+    let mut invalid_geometry = geometry(1);
+    invalid_geometry.geometry.pixel_width = 1921;
+    assert_eq!(
+        send_control(host.0, &invalid_geometry),
+        Error::Invalid as i32
+    );
+    assert_eq!(
+        send_input(viewer.0, &key_event(1, 128)),
+        Error::Invalid as i32
+    );
+    let mut reserved = key_event(1, 0);
+    reserved.reserved[0] = 1;
+    assert_eq!(send_input(viewer.0, &reserved), Error::Invalid as i32);
+    assert_eq!(
+        send_video(host.0, &frame(IDR, false, 1)),
+        Error::Invalid as i32,
+        "forged keyframe flag"
+    );
+    assert!(!is_closed(viewer.0) && !is_closed(host.0));
+    assert_eq!(send_control(host.0, &geometry(1)), 0);
+    assert_eq!(typed(viewer.0, &mut vec![0; MAX_VIDEO], 1000).0, 0);
+}
+
+#[test]
+fn peer_protocol_violations_close_the_receiving_session() {
+    let valid_video = crate::video::tests::frame(IDR, true).encode().unwrap();
+    // Video before geometry, a malformed typed payload, and a malformed packet.
+    for (kind, bytes) in [
+        (VIDEO, valid_video.clone()),
+        (CONTROL, vec![1; 51]),
+        (VIDEO, valid_video[..40].to_vec()),
+    ] {
+        let (viewer, host) = pair();
+        if bytes.len() == 40 {
+            assert_eq!(send_control(host.0, &geometry(1)), 0);
+            assert_eq!(typed(viewer.0, &mut vec![0; MAX_VIDEO], 1000).0, 0);
+        }
+        assert_eq!(send(host.0, kind, &bytes), 0);
+        let mut buffer = vec![0; MAX_VIDEO];
+        assert_eq!(typed(viewer.0, &mut buffer, 1000).0, Error::Protocol as i32);
+        assert!(is_closed(viewer.0));
+        assert!(
+            buffer.iter().all(|byte| *byte == 0),
+            "no rejected plaintext remains"
+        );
+    }
+}
+
+#[test]
+fn viewer_control_flood_is_rate_limited() {
+    let (viewer, host) = pair();
+    let mut buffer = vec![0; MAX_VIDEO];
+    assert_eq!(send_control(host.0, &geometry(1)), 0);
+    for _ in 0..32 {
+        assert_eq!(send_control(host.0, &control(4, 1)), 0);
+    }
+    for _ in 0..32 {
+        assert_eq!(typed(viewer.0, &mut buffer, 1000).0, 0);
+    }
+    assert_eq!(
+        typed(viewer.0, &mut buffer, 1000).0,
+        Error::RateLimited as i32
+    );
+    assert!(is_closed(viewer.0));
+}
+
+#[test]
+fn hosts_skip_closely_spaced_pings_and_stall_idle_viewers() {
+    let (viewer, host) = pair();
+    assert_eq!(send_control(viewer.0, &control(3, 1)), 0);
+    assert_eq!(send_control(viewer.0, &control(3, 2)), 0);
+    assert_eq!(typed(host.0, &mut [], 1000).1.control.ping_id, 1);
+    assert_eq!(
+        typed(host.0, &mut [], 50).0,
+        Error::Timeout as i32,
+        "the second ping is consumed, not returned"
+    );
+    assert!(!is_closed(host.0));
+    session(host.0)
+        .unwrap()
+        .receive
+        .lock()
+        .unwrap()
+        .policy
+        .idle_limit = Duration::from_millis(60);
+    std::thread::sleep(Duration::from_millis(70));
+    assert_eq!(typed(host.0, &mut [], 30).0, Error::Stalled as i32);
+    assert!(is_closed(host.0));
+}
+
+fn events(capacity: usize) -> Vec<MLInputEvent> {
+    vec![MLInputEvent::default(); capacity]
+}
+
+#[test]
+fn input_state_abi_stages_commits_releases_and_stops() {
+    let state = ml_input_state_new();
+    let mut out = events(131);
+    let mut count = 99;
+    let down = key_event(1, 4);
+    unsafe {
+        assert_eq!(
+            ml_input_state_accept(
+                state,
+                &down,
+                1.0,
+                out.as_mut_ptr(),
+                130,
+                &mut count,
+                std::ptr::null_mut()
+            ),
+            Error::Invalid as i32
+        );
+        assert_eq!(count, 0);
+        assert_eq!(
+            ml_input_state_accept(
+                state,
+                &down,
+                1.0,
+                out.as_mut_ptr(),
+                131,
+                &mut count,
+                std::ptr::null_mut()
+            ),
+            0
+        );
+        assert_eq!((count, out[0].kind, out[0].key_code), (1, 1, 4));
+        assert_eq!(
+            ml_input_state_release_all(state, out.as_mut_ptr(), 131, &mut count),
+            0
+        );
+        assert_eq!(count, 0, "uncommitted presses are not held");
+        assert_eq!(
+            ml_input_state_accept(
+                state,
+                &down,
+                1.0,
+                out.as_mut_ptr(),
+                131,
+                &mut count,
+                std::ptr::null_mut()
+            ),
+            0
+        );
+        assert_eq!(ml_input_state_commit(state), 0);
+        let click = MLInputEvent {
+            kind: 4,
+            button: 1,
+            click_count: 1,
+            x: 0.5,
+            y: 0.5,
+            ..Default::default()
+        };
+        let mut held = 99;
+        assert_eq!(
+            ml_input_state_accept(
+                state,
+                &click,
+                1.0,
+                out.as_mut_ptr(),
+                131,
+                &mut count,
+                &mut held
+            ),
+            0
+        );
+        assert_eq!(
+            (count, held),
+            (1, 0b010),
+            "held buttons describe the staged transition"
+        );
+        assert_eq!(
+            ml_input_state_accept(
+                state,
+                &down,
+                1.1,
+                out.as_mut_ptr(),
+                131,
+                &mut count,
+                std::ptr::null_mut()
+            ),
+            0
+        );
+        assert_eq!(count, 0, "duplicate press");
+        let mut invalid = down;
+        invalid.key_code = 200;
+        assert_eq!(
+            ml_input_state_accept(
+                state,
+                &invalid,
+                1.0,
+                out.as_mut_ptr(),
+                131,
+                &mut count,
+                std::ptr::null_mut()
+            ),
+            Error::Invalid as i32
+        );
+        assert_eq!(
+            ml_input_state_stop(state, out.as_mut_ptr(), 131, &mut count),
+            0
+        );
+        assert_eq!((count, out[0].kind, out[0].key_code), (1, 2, 4));
+        assert_eq!(
+            ml_input_state_accept(
+                state,
+                &down,
+                2.0,
+                out.as_mut_ptr(),
+                131,
+                &mut count,
+                std::ptr::null_mut()
+            ),
+            Error::Closed as i32
+        );
+        ml_input_state_free(state);
+        ml_input_state_free(std::ptr::null_mut());
+    }
+}
+
+fn text<const N: usize>(value: &[c_char; N]) -> String {
+    let end = value.iter().position(|byte| *byte == 0).unwrap();
+    String::from_utf8(value[..end].iter().map(|byte| *byte as u8).collect()).unwrap()
+}
+fn empty_code() -> MLPairingCode {
+    MLPairingCode {
+        address: [0; ML_TEXT_CAPACITY],
+        name: [0; ML_TEXT_CAPACITY],
+        peer_id: [0; ML_PEER_ID_CAPACITY],
+        public_key: [0; 32],
+        secret: [0; 32],
+    }
+}
+
+#[test]
+fn pairing_abi_round_trips_codes_and_credentials() {
+    let (_, public, psk) = identity();
+    let mut code = empty_code();
+    let name = CString::new("Pat’s\u{200d} Mac\n").unwrap();
+    let status = unsafe {
+        ml_pairing_code_for_host(
+            c"Studio.local".as_ptr(),
+            name.as_ptr(),
+            public.as_ptr(),
+            psk.as_ptr(),
+            &mut code,
+        )
+    };
+    assert_eq!(status, 0);
+    assert_eq!(
+        (text(&code.address), text(&code.name), code.secret),
+        ("studio.local".into(), "Pat’s Mac".into(), psk)
+    );
+    assert_eq!(text(&code.peer_id).len(), 64);
+    let mut encoded = vec![0 as c_char; ML_PAIRING_CODE_CAPACITY];
+    assert_eq!(
+        unsafe { ml_pairing_code_encode(&code, encoded.as_mut_ptr(), 2048) },
+        Error::Invalid as i32
+    );
+    assert_eq!(
+        unsafe { ml_pairing_code_encode(&code, encoded.as_mut_ptr(), encoded.len()) },
+        0
+    );
+    let mut parsed = empty_code();
+    assert_eq!(
+        unsafe { ml_pairing_code_parse(encoded.as_ptr(), &mut parsed) },
+        0
+    );
+    assert_eq!(
+        (text(&parsed.peer_id), parsed.public_key, parsed.secret),
+        (text(&code.peer_id), public, psk)
+    );
+    let mut credential = vec![0; ML_CREDENTIAL_CAPACITY];
+    let mut length = 0;
+    assert_eq!(
+        unsafe {
+            ml_pairing_credential_encode(
+                &code,
+                credential.as_mut_ptr(),
+                credential.len(),
+                &mut length,
+            )
+        },
+        0
+    );
+    let mut decoded = empty_code();
+    assert_eq!(
+        unsafe { ml_pairing_credential_decode(credential.as_ptr(), length, &mut decoded) },
+        0
+    );
+    assert_eq!(
+        (text(&decoded.name), decoded.secret),
+        (text(&code.name), psk)
+    );
+    assert_eq!(
+        unsafe { ml_pairing_code_parse(c"MLP1.invalid".as_ptr(), &mut decoded) },
+        Error::Invalid as i32
+    );
+    assert_eq!(
+        (decoded.secret, text(&decoded.name)),
+        ([0; 32], String::new()),
+        "failed parses clear outputs"
+    );
+    let mut tampered = empty_code();
+    assert_eq!(
+        unsafe { ml_pairing_code_parse(encoded.as_ptr(), &mut tampered) },
+        0
+    );
+    tampered.name[0] = 0x0a;
+    assert_eq!(
+        unsafe { ml_pairing_code_encode(&tampered, encoded.as_mut_ptr(), encoded.len()) },
+        Error::Invalid as i32
+    );
+    let mut normalized = vec![0 as c_char; ML_TEXT_CAPACITY];
+    assert_eq!(
+        unsafe {
+            ml_address_normalize(c"[::1]".as_ptr(), normalized.as_mut_ptr(), normalized.len())
+        },
+        0
+    );
+    assert_eq!(
+        text(&<[c_char; ML_TEXT_CAPACITY]>::try_from(normalized.as_slice()).unwrap()),
+        "::1"
+    );
+    assert_eq!(
+        unsafe {
+            ml_address_normalize(
+                c"host:5900".as_ptr(),
+                normalized.as_mut_ptr(),
+                normalized.len(),
+            )
+        },
+        Error::Invalid as i32
+    );
+}
+
+#[test]
+fn peers_abi_loads_remembers_and_imports() {
+    let directory = std::env::temp_dir().join(format!("maclink-peers-abi-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let path = CString::new(directory.to_str().unwrap()).unwrap();
+    let mut peers: Vec<MLPeer> = (0..32)
+        .map(|_| MLPeer {
+            id: [0; 65],
+            name: [0; 256],
+            address: [0; 256],
+        })
+        .collect();
+    let mut count = 99;
+    let legacy = br#"[{"id":"0000000000000000000000000000000000000000000000000000000000000001","name":"Old Mac","address":"old.local"}]"#;
+    let mut imported = 99;
+    unsafe {
+        assert_eq!(
+            ml_peers_load(path.as_ptr(), peers.as_mut_ptr(), 31, &mut count),
+            Error::Invalid as i32
+        );
+        assert_eq!(
+            ml_peers_load(path.as_ptr(), peers.as_mut_ptr(), 32, &mut count),
+            0
+        );
+        assert_eq!(count, 0);
+        assert_eq!(
+            ml_peers_import_legacy(path.as_ptr(), legacy.as_ptr(), legacy.len(), &mut imported),
+            0
+        );
+        assert_eq!(imported, 1);
+        let (_, public, psk) = identity();
+        let mut code = empty_code();
+        assert_eq!(
+            ml_pairing_code_for_host(
+                c"studio.local".as_ptr(),
+                c"Studio".as_ptr(),
+                public.as_ptr(),
+                psk.as_ptr(),
+                &mut code
+            ),
+            0
+        );
+        let mut saved = MLPeer {
+            id: [0; 65],
+            name: [0; 256],
+            address: [0; 256],
+        };
+        assert_eq!(
+            ml_peers_remember(path.as_ptr(), &code, c"10.0.0.2".as_ptr(), &mut saved),
+            0
+        );
+        assert_eq!(text(&saved.id), text(&code.peer_id));
+        assert_eq!(
+            ml_peers_remember(
+                path.as_ptr(),
+                &code,
+                c"http://x".as_ptr(),
+                std::ptr::null_mut()
+            ),
+            Error::Invalid as i32
+        );
+        assert_eq!(
+            ml_peers_load(path.as_ptr(), peers.as_mut_ptr(), 32, &mut count),
+            0
+        );
+        assert_eq!(count, 2);
+        assert_eq!(
+            (text(&peers[0].name), text(&peers[0].address)),
+            ("Studio".into(), "10.0.0.2".into())
+        );
+        assert_eq!(text(&peers[1].name), "Old Mac");
+        let empty = CString::new("").unwrap();
+        assert_eq!(
+            ml_peers_load(empty.as_ptr(), peers.as_mut_ptr(), 32, &mut count),
+            Error::Invalid as i32
+        );
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn accepted_connections_get_a_bounded_handshake_grace() {
+    // A viewer whose connection lands at the end of the host's accept window
+    // must still finish authenticating instead of being dropped mid-handshake.
+    let (private, public, psk) = identity();
+    let listener = bind(&private, &psk);
+    let id = listener.0;
+    let raw = TcpStream::connect(("127.0.0.1", ml_session_listener_port(id))).unwrap();
+    let accepting = std::thread::spawn(move || {
+        let mut handle = 0;
+        let status = unsafe { ml_session_accept(id, 50, &mut handle) };
+        (status, Owned(handle))
+    });
+    std::thread::sleep(Duration::from_millis(120)); // past the accept deadline
+    let mut noise = builder()
+        .unwrap()
+        .remote_public_key(&public)
+        .unwrap()
+        .psk(0, &psk)
+        .unwrap()
+        .prologue(PROLOGUE)
+        .unwrap()
+        .build_initiator()
+        .unwrap();
+    let end = deadline(2000).unwrap();
+    let (mut record, mut payload) = ([0; 1024], [0; 1024]);
+    let count = noise.write_message(HANDSHAKE_PAYLOAD, &mut record).unwrap();
+    write_record(&raw, &record[..count], end).unwrap();
+    let size = read_record(&raw, &mut record, end, &mut 0).unwrap();
+    noise.read_message(&record[..size], &mut payload).unwrap();
+    let crypto = noise.into_stateless_transport_mode().unwrap();
+    let count = crypto
+        .write_message(0, b"client-ready/1", &mut record)
+        .unwrap();
+    write_record(&raw, &record[..count], end).unwrap();
+    let size = read_record(&raw, &mut record, end, &mut 0).unwrap();
+    let count = crypto
+        .read_message(0, &record[..size], &mut payload)
+        .unwrap();
+    assert_eq!(&payload[..count], b"server-ready/1");
+    let (status, host) = accepting.join().unwrap();
+    assert_eq!(status, 0);
+    assert_ne!(host.0, 0);
+}

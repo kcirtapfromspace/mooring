@@ -37,14 +37,7 @@ impl Store {
     }
 
     pub fn default_path() -> Result<PathBuf, String> {
-        if let Some(path) = std::env::var_os("MACLINK_HOME") {
-            if path.is_empty() {
-                return Err("MACLINK_HOME must not be empty".into());
-            }
-            return Ok(PathBuf::from(path));
-        }
-        let home = std::env::var_os("HOME").ok_or("HOME is unavailable; set MACLINK_HOME")?;
-        Ok(PathBuf::from(home).join("Library/Application Support/MacLink"))
+        maclink_platform::support_directory()
     }
 
     pub fn list(&self) -> Result<Vec<Connection>, String> {

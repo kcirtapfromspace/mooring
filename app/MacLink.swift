@@ -303,6 +303,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     private var window: NSWindow!
     private let cli = CLIClient()
     private lazy var automation: MacLinkAutomationService = AutomationCoordinator(cli: cli)
+    private lazy var native = NativeSessionCoordinator()
     private var automationState = AutomationMenuState()
     private var automationStarted = false
     private var initialLoad = true
@@ -340,6 +341,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             self.updateControls()
         }
         automationState = automation.state
+        native.onChange = { [weak self] in self?.refreshStatusMenu() }
         reloadConnections()
     }
 
@@ -350,7 +352,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         return true
     }
 
-    func applicationWillTerminate(_ notification: Notification) { automation.stop() }
+    func applicationWillTerminate(_ notification: Notification) { automation.stop(); native.stop() }
 
     private func buildStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -376,11 +378,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         let heading = NSMenuItem(title: "MacLink", action: nil, keyEquivalent: "")
         heading.isEnabled = false
         statusMenu.addItem(heading)
-        let status = NSMenuItem(title: automationState.title, action: nil, keyEquivalent: "")
+        let status = NSMenuItem(title: native.status ?? automationState.title, action: nil, keyEquivalent: "")
         status.isEnabled = false
         status.toolTip = automationState.detail
         statusMenu.addItem(status)
-        statusItem.button?.toolTip = "MacLink — \(automationState.title)"
+        statusItem.button?.toolTip = "MacLink — \(native.status ?? automationState.title)"
         if let lastMenuAction {
             let recent = NSMenuItem(title: lastMenuAction, action: nil, keyEquivalent: "")
             recent.isEnabled = false
@@ -388,7 +390,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         }
         statusMenu.addItem(.separator())
         let available = !busy && !automationState.isBusy && addController == nil && window?.attachedSheet == nil
-        let connectMenuItem = NSMenuItem(title: "Connect to Mac", action: nil, keyEquivalent: "")
+        let nativeConnect = NSMenuItem(title: "Connect with MacLink…", action: #selector(connectNative), keyEquivalent: "")
+        nativeConnect.target = self; nativeConnect.isEnabled = available; statusMenu.addItem(nativeConnect)
+        for peer in native.peers {
+            let item = NSMenuItem(title: String(peer.name.prefix(50)), action: #selector(connectNativePeer(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = peer.id; item.isEnabled = available
+            statusMenu.addItem(item)
+        }
+        let share = NSMenuItem(title: native.isSharing ? "Sharing This Mac…" : "Share This Mac…", action: #selector(shareNative), keyEquivalent: "")
+        share.target = self; statusMenu.addItem(share)
+        if native.isSharing {
+            let stop = NSMenuItem(title: "Stop Sharing This Mac", action: #selector(stopNativeSharing), keyEquivalent: "")
+            stop.target = self; statusMenu.addItem(stop)
+        }
+        statusMenu.addItem(.separator())
+        let connectMenuItem = NSMenuItem(title: "Apple Screen Sharing", action: nil, keyEquivalent: "")
         let connectMenu = NSMenu()
         connectMenu.autoenablesItems = false
         if connections.isEmpty {
@@ -438,6 +454,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         statusMenu.addItem(quit)
     }
 
+    @objc private func connectNative() { native.showConnect() }
+    @objc private func shareNative() { native.showShare() }
+    @objc private func stopNativeSharing() { native.stopSharing() }
+    @objc private func connectNativePeer(_ sender: NSMenuItem) {
+        if let id = sender.representedObject as? String { native.connect(peerID: id) }
+    }
+
     @objc private func showConnections() {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -472,6 +495,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         menu.addItem(appItem)
         let file = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
         file.submenu = NSMenu(title: "File")
+        file.submenu!.addItem(withTitle: "Connect with MacLink…", action: #selector(connectNative), keyEquivalent: "k")
+        file.submenu!.addItem(withTitle: "Share This Mac…", action: #selector(shareNative), keyEquivalent: "")
+        file.submenu!.addItem(.separator())
         file.submenu!.addItem(withTitle: "Open Connections…", action: #selector(showConnections), keyEquivalent: "o")
         file.submenu!.addItem(withTitle: "Add Mac…", action: #selector(addMac), keyEquivalent: "n")
         file.submenu!.addItem(withTitle: "Connect", action: #selector(connect), keyEquivalent: "\r")
@@ -499,6 +525,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             for item in submenu.items where item.action == #selector(showAbout) || item.action == #selector(showSettings)
                 || item.action == #selector(addMac) || item.action == #selector(connect)
                 || item.action == #selector(checkConnection) || item.action == #selector(removeMac)
+                || item.action == #selector(connectNative) || item.action == #selector(shareNative)
                 || item.action == #selector(showConnections) || item.action == #selector(showConnectionHelp) {
                 item.target = self
             }

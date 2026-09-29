@@ -5,7 +5,7 @@ Validated locally on an Apple M1 Ultra running macOS 26.6.2. Rust 1.98.1 and the
 ## Automated checks
 
 - Workspace formatting and Clippy with warnings denied.
-- 67 Rust tests: eight CLI/storage tests, 41 network/quality/mailbox/reconnect tests, and 18 platform tests.
+- 127 Rust tests: eight CLI/storage tests, 41 network/quality/mailbox/reconnect tests, 18 platform tests, and 60 native-session tests.
 - 73 Swift connection-document parser and bounded-reader checks, including IPv6, ambiguous modes, invalid ports, oversized files, symlinks and FIFOs. These perform no Accessibility actions.
 - Packaged CLI integration against a live loopback RFB fixture verifies zero application bytes sent, real timing/route JSON, policy-state round-trip, and connection-refused output.
 - Storage tests exercise concurrent saves, corrupted/future schemas, private file permissions, oversized IDs, and malformed input.
@@ -48,10 +48,20 @@ Review corrected permission-completion duplicate-launch races, paused-session cl
 
 Apple accepted the automatic-defaults build as submission `bb184472-bbf6-4730-bdbb-5d3bc1ab01ef`. The final extracted arm64 ZIP passed strict signature, stapled-ticket and Gatekeeper validation as Notarized Developer ID.
 
+## Native session preview
+
+For `v0.3.0-preview.1`, the complete local validation script passed with 127 Rust tests and every native Swift suite. The 60 session tests cover Noise authentication with a pinned key and pairing secret, key confirmation before a handle is published, tamper and replay rejection, bounded chunked framing, deadlines and cancellation, per-role message direction, rate limits, ping and keyframe spacing, geometry before video, the idle limit, every typed wire format and its malformed variants, the host's staged held-input state, pairing codes and legacy Keychain credentials, the saved-peer store, and the C ABI. Struct layouts are asserted at compile time in both Rust and the C header.
+
+Swift suites cover the input boundary and Command key-up dispatch through an off-screen in-process window, privacy-state classification, the session wrappers, and real hardware H.264: 120 paced 1080p frames plus a 4K smoke check, keyframe-flag and in-band-configuration rejection by the Rust validator, gap/overflow recovery and bounded keyframe retry. An encrypted loopback integration streams 120 hardware-encoded 1080p frames at 60 fps with a return input event per frame. These use synthetic pixels and loopback only: no screen capture, remote Mac, Keychain, permission request or injected input.
+
+Review corrected Command-held key releases that AppKit never delivers, keyframe requests dropped by the host's spacing, a handshake cut off at the end of the host's accept window, and connections blocked by an unwritable peer list.
+
+Apple accepted the native session build as submission `cfa02dc6-48de-466f-8fca-bcb1843e5030` with no issues. Both arm64 executables use Developer ID, hardened runtime and secure timestamps. The final extracted ZIP passed strict signature, stapled-ticket and Gatekeeper validation as Notarized Developer ID. The built app was not launched on this host, and no permission was granted or changed.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.
 
 ## Not yet validated
 
-Second-Mac installation, downloaded-app first launch, end-to-end remote login, Apple's actual response to both mode URLs (including opposite remembered modes), real Accessibility session matching/full screen/reconnect, login registration, travel/VPN transitions, live capture/network/decode, click-to-photon latency, sustained 4K60, audio/clipboard integration, and headless virtual displays. Apple provides remote authentication, negotiated display mode, and rendering.
+Second-Mac installation, downloaded-app first launch, end-to-end remote login, Apple's actual response to both mode URLs (including opposite remembered modes), real Accessibility session matching/full screen/reconnect, login registration, travel/VPN transitions, live capture/network/decode, a native session between two Macs (pairing, permissions, input, lock/sleep handling and legibility), click-to-photon latency, sustained 4K60, audio/clipboard integration, and headless virtual displays. Apple provides remote authentication, negotiated display mode, and rendering.

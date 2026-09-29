@@ -8,13 +8,13 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>MacLink</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.2.0</string>
-    <key>CFBundleVersion</key><string>5</string>
+    <key>CFBundleShortVersionString</key><string>0.3.0</string>
+    <key>CFBundleVersion</key><string>6</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
-    <key>MacLinkReleaseVersion</key><string>0.2.0</string>
+    <key>MacLinkReleaseVersion</key><string>0.3.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>MacLink checks the Macs you select for connection checks or enable for automation.</string>
+    <string>MacLink checks the Macs you add, connects to Macs you pair with, and shares this display only when you start sharing.</string>
 </dict>
 </plist>

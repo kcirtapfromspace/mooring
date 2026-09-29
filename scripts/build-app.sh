@@ -16,7 +16,7 @@ for build_tool in cargo rustup swiftc xcrun lipo codesign plutil; do
     }
 done
 
-release_version="${MACLINK_RELEASE_VERSION:-0.2.0}"
+release_version="${MACLINK_RELEASE_VERSION:-0.3.0}"
 if [[ ! "$release_version" =~ ^([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
     printf 'Invalid release version: %s\n' "$release_version" >&2
     exit 1
@@ -43,13 +43,19 @@ if ! printf '%s\n' "$installed_targets" | /usr/bin/grep -Fqx "$rust_target"; the
 fi
 
 # MacLink currently targets Apple Silicon only, with the same macOS floor in both binaries.
-MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release --package maclink-cli \
+MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release --package maclink-cli --package maclink-session \
     --target "$rust_target" --target-dir "$project_root/target"
 swiftc -O -swift-version 5 -parse-as-library -sdk "$sdk_path" -target arm64-apple-macosx14.0 \
     -framework AppKit -framework Foundation -framework Network -framework ServiceManagement \
+    -framework Security -framework SystemConfiguration -framework ScreenCaptureKit -framework VideoToolbox \
+    -framework CoreMedia -framework CoreVideo -framework Metal -framework MetalKit -framework CoreImage \
+    -import-objc-header "$project_root/crates/maclink-session/include/maclink_session.h" \
+    -L "$project_root/target/$rust_target/release" -lmaclink_session \
     "$project_root"/app/*.swift -o "$staged_bundle/Contents/MacOS/MacLink"
 cp "$project_root/target/$rust_target/release/maclink" "$staged_bundle/Contents/Resources/maclink"
 
+python3 "$project_root/scripts/collect-licenses.py" --check
+cp "$project_root/docs/THIRD-PARTY-NOTICES.txt" "$staged_bundle/Contents/Resources/THIRD-PARTY-NOTICES.txt"
 cp "$project_root/app/Info.plist" "$staged_bundle/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $short_version" "$staged_bundle/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :MacLinkReleaseVersion $release_version" "$staged_bundle/Contents/Info.plist"
