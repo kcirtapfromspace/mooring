@@ -1,0 +1,15 @@
+[package]
+name = "maclink-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "maclink"
+path = "src/main.rs"
+
+[dependencies]
+maclink-core = { path = "../maclink-core" }
+maclink-platform = { path = "../maclink-platform" }
+serde.workspace = true
+serde_json.workspace = true

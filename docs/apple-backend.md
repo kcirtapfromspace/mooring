@@ -1,0 +1,78 @@
+# Apple backend decision
+
+Research and local inspection: 2026-09-28. Local system: macOS 26.6.2 (25G83), Screen Sharing 6.1 (764.2).
+
+## Decision
+
+Use Apple's viewer as the initial **working connection backend** while developing and measuring a separate Rust session engine. The current backend launches Screen Sharing and performs an optional credential-free RFB reachability check. It does **not** change Apple's High Performance setting, authenticate to a host, create a virtual display, adapt an Apple session, or implement video streaming.
+
+This is a usable connection-launching foundation, not completion of the requested automatic-quality remote desktop client. The product must say so. A quality policy in Rust only becomes adaptive streaming when a real backend consumes that policy and supplies live measurements.
+
+## What is verified
+
+Apple documents High Performance as a distinct screen-sharing mode with stereo audio, HDR reference support, 4:4:4 color, and 30/60 fps. Its requirements include Apple silicon Macs running macOS 14 or later, low consistent latency, and approximately 75 Mbps for one 4K display. Apple lists UDP 5900–5902, a single active High Performance session per Mac, and a maximum virtual display of 3840×2160 pixels / 1920×1080 HiDPI. Authenticating as the current user blanks that Mac's hardware displays. See [Apple's High Performance guide](https://support.apple.com/en-gw/guide/remote-desktop/apdf8e09f5a9/mac).
+
+These are baseline compatibility requirements, not evidence that any particular RFB server supports the mode. A TCP connection time or `003.889` greeting does not measure bandwidth or establish any of those capabilities.
+
+On the inspected local installation:
+
+- `/System/Applications/Utilities/Screen Sharing.app/Contents/Info.plist` registers the `vnc` URL scheme and `.vncloc` documents under `com.apple.ScreenSharing`.
+- The app's `Contents/Resources/ScreenSharing.sdef` defines a single command, `GetURL`, whose parameter is a VNC URL. It exposes no mode-selection property or command.
+- Reading these bundled files did not inspect credentials or saved connection databases, run a remote session, or change sharing/security settings.
+
+Apple also describes VNC addresses as the network address for Screen Sharing in [its hostname/network-address guide](https://support.apple.com/en-ge/guide/mac-help/mchlp1177/mac). The backend passes a validated URL to `/usr/bin/open -b com.apple.ScreenSharing` as separate process arguments. It does not invoke a shell.
+
+## Can a public launch flag select High Performance?
+
+**No supported per-launch mode selector was found** in the Apple documentation reviewed or in the locally installed scripting dictionary. This is a scoped finding, not proof that an undocumented mechanism cannot exist. Do not invent a `?highPerformance=true` URL, command-line flag, defaults key, or private framework integration.
+
+The documented consumer workflow selects the mode in Apple's GUI. Apple Remote Desktop exposes later edits through Get Info → Control & Observe → Screen Sharing Type. Screen Sharing and Apple Remote Desktop have related functionality but are different applications; the current backend launches the system Screen Sharing app.
+
+There is a supported **device-management** surface. Apple's [ScreenSharingConnection declaration](https://developer.apple.com/documentation/devicemanagement/screensharingconnection) configures a named host/port connection with a required display configuration; the [display object](https://developer.apple.com/documentation/devicemanagement/screensharingconnectiondisplayconfigurationobject) accepts one or two virtual displays. The [deployment guide](https://support.apple.com/en-ie/guide/deployment/dep26ac077b3/1/web/1.0) puts these declarations in the managed-device screen-sharing workflow. This is not an ordinary app's documented per-launch mode-switch API. Introducing enrollment solely to avoid a menu choice would undermine the intended simplicity. Reconsider this route only for an already managed fleet, with a real deployment test.
+
+No saved connection database editing, UI scripting, private API use, or MDM installation is implemented. Native Screen Sharing retains control over its connection dialog, remembered choices, authentication, and active-session behavior.
+
+## Apple protocol compatibility research
+
+[iShareScreen](https://github.com/renegadelink/iShareScreen) is an independent Python implementation under AGPL-3.0-or-later. It is evidence that interoperability is plausible, not an Apple-supported SDK or proof of production reliability. No implementation code from it was copied into this project.
+
+Its [protocol document](https://github.com/renegadelink/iShareScreen/blob/main/docs/apple_vnc_rfc.md) describes authenticated control framing, virtual-display negotiation, and HEVC Range Extensions 4:4:4 over SRTP/UDP. The observed video pipeline combines four tile streams through a shared decoder. It also records unresolved details around geometry, key handling, and loss-recovery feedback. Dynamic-resolution support requires additional protocol negotiation; resizing a viewer window alone is insufficient. Treat these as the project's reverse-engineering findings, not Apple's compatibility contract.
+
+Before implementing this route, pin a reviewed upstream revision, decide the project's licensing boundaries, build independent protocol tests, and measure real sessions on each supported macOS release. The current MIT prototype contains only generic RFB greeting parsing, not an implementation of those extensions.
+
+## Backend tradeoffs
+
+| Route | What it gives us | What remains to prove |
+| --- | --- | --- |
+| Launch Apple's viewer | Working native authentication and display pipeline without a new host install | Cannot promise automatic mode selection or observe/control media internals through the verified launch interface |
+| Implement Apple interoperability in Rust | Potential access to Apple's host and virtual-display sessions | Authentication, trust, crypto/framing, codecs, loss recovery, clipboard/input, OS compatibility, and ongoing protocol maintenance |
+| Install our own host helper | Control over quality policy, instrumentation, pairing, transport, and session UX | Capture permission, input permission, high-fidelity encoding, display/session semantics, installer/update reliability, and end-to-end performance |
+
+For an owned host, [ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit) is the public capture foundation and [VideoToolbox](https://developer.apple.com/documentation/videotoolbox) is the codec foundation. Neither API alone supplies a remote desktop product. Capture of an existing desktop is a smaller first milestone than virtual Retina displays, headless/login-screen control, or Apple's private-session behavior. Do not promise those features until their API and permission paths work on real hardware.
+
+The proposed owned pipeline is ScreenCaptureKit → VideoToolbox encoder → authenticated encrypted transport → VideoToolbox decoder → Metal. Rust owns session state, policy, networking, and telemetry; thin native adapters own Apple framework lifetimes. Keep frame queues bounded, measure capture-to-present delay, and make quality decisions from actual loss, delay, queue age, decode load, and bandwidth estimates. A QUIC datagram transport still requires packetization, loss recovery, and congestion-aware pacing.
+
+## Implemented API and limitations
+
+```rust
+pub fn inspect_host(host: &str, port: u16, timeout: Duration)
+    -> Result<HostInspection, String>;
+pub fn launch_apple(host: &str, port: u16) -> Result<(), String>;
+pub fn validate_host(host: &str) -> Result<String, String>;
+pub fn apple_vnc_url(host: &str, port: u16) -> Result<String, String>;
+```
+
+`HostInspection` contains `host`, `port`, `tcp_connect_ms`, `rfb_version`, and `note`, and supports serde serialization. Inspection reads exactly the 12-byte greeting, sends no application bytes, then disconnects. It does not read authentication methods or attempt a login. Tests verify the zero-write behavior using a local mock server.
+
+The timeout is a shared deadline for all TCP connection attempts and greeting reads, beginning **after system DNS resolution**. Standard-library DNS is synchronous and not cancellable; callers must keep inspection off the UI thread. Use a literal IP address for an overall socket-operation bound. There are at most 32 resolved connection candidates, each receiving a share of the remaining connection budget. This is a small diagnostic, not a Happy Eyeballs implementation or a background network scanner.
+
+Hosts accept ASCII DNS names, IPv4, and bracketed/unbracketed IPv6. Schemes, userinfo, paths, query parameters, fragments, whitespace, options, percent escapes, and ambiguous IPv4 spellings are rejected. Scoped IPv6 addresses and Unicode names are not yet accepted; use a DNS name or ASCII/punycode form. Ports must be 1–65535. The launch URL contains no username/password and no quality parameters. Launch success means macOS accepted the open request, not that authentication or streaming succeeded. The `open` helper has a five-second deadline; timeout terminates only that helper and cannot retract an already delivered URL event. Native launching is unavailable on non-macOS builds.
+
+## Staged path and release evidence
+
+1. **Foundation (this prototype):** saved connection UX, explicit native launch, strict input handling, credential-free diagnostics, and independently testable quality-policy logic. Display backend limitations in the UI.
+2. **Streaming feasibility gate:** build a one-display capture/encode/decode/present loop with an owned helper. Separately evaluate Apple interoperability on test Macs. Choose the primary streaming route using measured latency, text fidelity, reconnection behavior, implementation maintenance, and permission friction.
+3. **Fast interaction:** add approved-device pairing, cursor handling, keyboard/modifier recovery, Retina scale negotiation, clipboard, and audio. Feed real telemetry into the adaptation controller, then verify degradation and recovery under loss and constrained bandwidth.
+4. **Reliability gate:** exercise reconnect, sleep/wake, IP changes, host restart, unavailable permissions, session conflicts, malformed packets, long sessions, and macOS updates. Release only after native-versus-custom comparisons and repeatable failure recovery tests.
+
+Suggested initial targets, not achieved results: LAN 60 fps at 1920×1080 HiDPI, no growth in decoded-frame queue during extended runs, median input-to-photon latency no worse than Apple's viewer, and no modifier/key remaining held after disconnect. Measure both median and tail latency, cold-connect time, reconnect time, dropped/stale frames, CPU/GPU load, and colored-text fidelity. Keep the same Macs, displays, workload, and network for comparison; the current greeting check cannot produce these numbers.
