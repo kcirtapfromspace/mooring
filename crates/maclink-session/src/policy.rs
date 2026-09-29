@@ -13,6 +13,7 @@ pub(crate) const INPUT: u8 = 2;
 pub(crate) const CONTROL: u8 = 3;
 pub(crate) const TELEMETRY: u8 = 4;
 pub(crate) const CLIPBOARD: u8 = 5;
+pub(crate) const CURSOR: u8 = 6;
 
 /// Protocol versions this build speaks. 4 is the preview 4-8 protocol; 5 adds
 /// a capability exchange, so later features switch on only when both sides
@@ -23,6 +24,10 @@ pub(crate) const PROTOCOL_MAX: u32 = 5;
 pub(crate) const CAPABILITY_HEVC_444: u64 = 1;
 /// The host can share a virtual display sized to the viewer's request.
 pub(crate) const CAPABILITY_VIRTUAL_DISPLAY: u64 = 1 << 1;
+/// The viewer draws the host's pointer shape over the video.
+pub(crate) const CAPABILITY_CURSOR: u64 = 1 << 2;
+/// Hosts send a cursor only when it changes; this stops a flood.
+const CURSORS_PER_WINDOW: u32 = 20;
 
 /// No complete authenticated message for this long ends the session. Viewers
 /// ping every second and hosts answer, so a healthy idle desktop stays open.
@@ -67,7 +72,7 @@ impl Role {
     pub(crate) fn may_send(self, kind: u8) -> bool {
         matches!(
             (self, kind),
-            (Self::Host, VIDEO | CONTROL | TELEMETRY | CLIPBOARD)
+            (Self::Host, VIDEO | CONTROL | TELEMETRY | CLIPBOARD | CURSOR)
                 | (Self::Viewer, INPUT | CONTROL | TELEMETRY | CLIPBOARD)
         )
     }
@@ -120,6 +125,7 @@ pub(crate) struct ReceivePolicy {
     window_start: Instant,
     window_count: u32,
     clipboard_count: u32,
+    cursor_count: u32,
     last_ping: Option<Instant>,
     last_keyframe: Option<Instant>,
     has_geometry: bool,
@@ -146,6 +152,7 @@ impl ReceivePolicy {
             window_start: now,
             window_count: 0,
             clipboard_count: 0,
+            cursor_count: 0,
             last_ping: None,
             last_keyframe: None,
             has_geometry: false,
@@ -164,6 +171,7 @@ impl ReceivePolicy {
             Incoming::Control(control) => (CONTROL, peer.may_send_control(control.kind())),
             Incoming::Telemetry(telemetry) => (TELEMETRY, peer.may_send_telemetry(telemetry)),
             Incoming::Clipboard(_) => (CLIPBOARD, true),
+            Incoming::Cursor(_) => (CURSOR, self.local_capabilities & CAPABILITY_CURSOR != 0),
         };
         if !allowed || !self.role.may_receive(kind) {
             return Err(Error::Protocol);
@@ -194,6 +202,13 @@ impl ReceivePolicy {
             self.window_start = now;
             self.window_count = 0;
             self.clipboard_count = 0;
+            self.cursor_count = 0;
+        }
+        if kind == CURSOR {
+            self.cursor_count += 1;
+            if self.cursor_count > CURSORS_PER_WINDOW {
+                return Err(Error::RateLimited);
+            }
         }
         if kind == CLIPBOARD {
             self.clipboard_count += 1;

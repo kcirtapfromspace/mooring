@@ -121,6 +121,10 @@ request releases it. Rust refuses to send a request to a host that didn't
 announce the capability, and a host that didn't announce it treats one as a
 protocol violation.
 
+`ML_CAPABILITY_CURSOR` means "this viewer draws the host's pointer shape".
+Hosts send `ML_SESSION_CURSOR` messages to such viewers, at most 20 per second:
+size and hotspot in points (at most 256), then a PNG (64 KiB at most).
+
 ## Shared clipboard
 
 Either side may send a clipboard message: one to three representations of one

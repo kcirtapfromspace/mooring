@@ -1553,7 +1553,8 @@ fn a_malformed_clipboard_closes_the_receiver_and_clears_it() {
     assert!(is_closed(host.0));
 }
 
-const TEST_CAPABILITIES: u64 = ML_CAPABILITY_HEVC_444 | ML_CAPABILITY_VIRTUAL_DISPLAY | 1 << 40; // plus a bit no build knows
+const TEST_CAPABILITIES: u64 =
+    ML_CAPABILITY_HEVC_444 | ML_CAPABILITY_VIRTUAL_DISPLAY | ML_CAPABILITY_CURSOR | 1 << 40; // plus a bit no build knows // plus a bit no build knows
 fn hello(id: u64) -> u64 {
     let mut buffer = vec![0; 4096];
     let (status, message) = typed(id, &mut buffer, 2000);
@@ -1784,4 +1785,56 @@ fn viewers_ask_capable_hosts_for_a_display_their_size() {
         Error::Invalid as i32
     );
     assert!(!is_closed(old_viewer.0));
+}
+
+#[test]
+fn hosts_send_pointer_shapes_to_viewers_that_draw_them() {
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\ncursor";
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let (viewer, host) = pair_version(5);
+    assert_eq!(
+        (hello(host.0), hello(viewer.0)),
+        (TEST_CAPABILITIES, TEST_CAPABILITIES)
+    );
+    let send = |id: u64, png: &[u8]| unsafe {
+        ml_session_send_cursor(id, 9, 18, 4, 9, png.as_ptr(), png.len(), 1000)
+    };
+    assert_eq!(send(host.0, PNG), 0);
+    assert_eq!(
+        send(viewer.0, PNG),
+        Error::Invalid as i32,
+        "viewers never send cursors"
+    );
+    assert_eq!(send(host.0, b"GIF89a"), Error::Invalid as i32);
+    let mut buffer = vec![0; ML_SESSION_MAX_MESSAGE];
+    let (status, message) = typed(viewer.0, &mut buffer, 2000);
+    assert_eq!((status, message.kind), (0, crate::policy::CURSOR));
+    let cursor = message.cursor;
+    assert_eq!(
+        (
+            cursor.width,
+            cursor.height,
+            cursor.hotspot_x,
+            cursor.hotspot_y
+        ),
+        (9, 18, 4, 9)
+    );
+    assert_eq!(&buffer[cursor.png_offset..][..cursor.png_length], PNG);
+    // Twenty per second at most; the twenty-first ends the session.
+    for _ in 0..20 {
+        assert_eq!(send(host.0, PNG), 0);
+    }
+    assert_eq!(send(host.0, PNG), 0);
+    let mut status = 0;
+    for _ in 0..21 {
+        status = typed(viewer.0, &mut buffer, 2000).0;
+        if status != 0 {
+            break;
+        }
+    }
+    assert_eq!(status, Error::RateLimited as i32);
+    // Protocol 4 viewers announce nothing, so cursors are refused before sending.
+    let (_old_viewer, old_host) = pair_version(4);
+    assert_eq!(send(old_host.0, PNG), Error::Invalid as i32);
+    assert!(!is_closed(old_host.0));
 }

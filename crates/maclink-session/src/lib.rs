@@ -13,6 +13,7 @@
 
 mod clipboard;
 mod control;
+mod cursor;
 pub mod ffi;
 mod input;
 mod pairing;

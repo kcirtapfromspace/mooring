@@ -102,6 +102,8 @@ final class NativeSessionCoordinator {
     private var systemKeys: NativeSystemKeyCapture?
     /// Found at launch by encoding and decoding one HEVC 4:4:4 frame in hardware.
     private var hevc444Available = false
+    /// Host: follows this Mac's pointer shape for viewers that draw it.
+    private let cursorWatcher = NativeCursorWatcher()
     /// Host: the display being shared, virtual when a viewer asked for its size.
     private let sharedDisplay = NativeSharedDisplay()
     private var pendingDisplayRequest: (width: Int, height: Int, scale: Int)?
@@ -192,12 +194,19 @@ final class NativeSessionCoordinator {
             DispatchQueue.main.async {
                 self?.hevc444Available = hevc
                 let virtualDisplay = NativeSharedDisplay.isAvailable
-                ml_capabilities_set((hevc ? UInt64(ML_CAPABILITY_HEVC_444) : 0) | (virtualDisplay ? UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) : 0))
+                // Every build with this code draws the host's pointer shape.
+                ml_capabilities_set((hevc ? UInt64(ML_CAPABILITY_HEVC_444) : 0) | (virtualDisplay ? UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) : 0)
+                                    | UInt64(ML_CAPABILITY_CURSOR))
                 NativeLog.session.notice("virtual display for viewers: \(virtualDisplay ? "available" : "unavailable", privacy: .public)")
                 NativeLog.session.notice("HEVC 4:4:4 hardware encode and decode: \(hevc ? "available" : "unavailable", privacy: .public)")
             }
         }
         clipboard.onSend = { [weak self] content in self?.sendClipboard(content) }
+        cursorWatcher.onChange = { [weak self] image in
+            guard let channel = self?.hostChannel, channel.token.isActive,
+                  channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_CURSOR) != 0 else { return }
+            channel.send(.cursor(image))
+        }
         let poll = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.pollClipboard() }
         RunLoop.main.add(poll, forMode: .common); clipboardTimer = poll
         DispatchQueue.main.async { [weak self] in self?.resumeSharingIfAutomatic() }
@@ -537,11 +546,12 @@ final class NativeSessionCoordinator {
                             guard let self, let channel, self.hostChannel === channel else { return }
                             self.requestDisplay(width: width, height: height, scale: scale, channel: channel)
                         }
-                    case .control(.hello):
+                    case .control(.hello(let capabilities)):
                         // Rust has recorded the viewer's capabilities; start with the best shared codec.
                         channel.deliverControl { [weak self, weak channel] in
-                            guard let self, let channel, self.hostChannel === channel, self.capture == nil else { return }
-                            self.startCapture(for: channel)
+                            guard let self, let channel, self.hostChannel === channel else { return }
+                            if capabilities & UInt64(ML_CAPABILITY_CURSOR) != 0 { self.cursorWatcher.start(); self.cursorWatcher.resend() }
+                            if self.capture == nil { self.startCapture(for: channel) }
                         }
                     case .telemetry(.stats(let stats)):
                         channel.storePeerStats(stats)
@@ -555,7 +565,7 @@ final class NativeSessionCoordinator {
                             guard let self, let channel, self.hostChannel === channel else { return }
                             self.applyClipboard(content, from: channel)
                         }
-                    case .control, .video:
+                    case .control, .video, .cursor:
                         throw NativeSessionError(message: "The viewer sent an unexpected session message.")
                     }
                 } catch { if channel.token.isActive { channel.fail(error.localizedDescription) }; return }
@@ -566,6 +576,7 @@ final class NativeSessionCoordinator {
     private func endHost(reason: String) {
         recordEnd("host", reason)
         hostChannel?.close(); hostChannel = nil
+        cursorWatcher.stop()
         sharedDisplay.release(); pendingDisplayRequest = nil; displayRestarts = []
         endHostActivity()
         retireCapture(); hostInjector?.stop(); hostInjector = nil
@@ -589,6 +600,7 @@ final class NativeSessionCoordinator {
         sharingToken?.cancel(); sharingToken = nil
         listener?.close(); listener = nil
         hostChannel?.close(); hostChannel = nil
+        cursorWatcher.stop()
         sharedDisplay.release(); pendingDisplayRequest = nil; displayRestarts = []
         endHostActivity()
         retireCapture(); hostInjector?.stop(); hostInjector = nil
@@ -939,6 +951,11 @@ final class NativeSessionCoordinator {
                             guard let self, let channel, self.viewerChannel === channel else { return }
                             self.applyClipboard(content, from: channel)
                         }
+                    case .cursor(let image):
+                        channel.deliverControl { [weak self, weak channel] in
+                            guard let self, let channel, self.viewerChannel === channel else { return }
+                            self.viewerWindow?.video.remoteCursor = image.cursor
+                        }
                     case .input, .telemetry(.tuning):
                         throw NativeSessionError(message: "The sharing Mac sent an unexpected message.")
                     }
@@ -1066,6 +1083,7 @@ final class NativeSessionCoordinator {
         viewerWindow?.video.clearFrame()
         viewerWindow?.video.hidesLocalCursor = false
         viewerWindow?.video.forwardsCommandKeys = false
+        viewerWindow?.video.remoteCursor = nil
         if reconnect, let window = viewerWindow, !window.isClosed {
             // A session that stayed up starts a fresh budget, so rare drops never exhaust it.
             if lasted >= Double(ML_RECONNECT_STABLE_SECONDS) { reconnectAttempts = 0 }

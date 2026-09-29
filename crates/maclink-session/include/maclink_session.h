@@ -24,7 +24,7 @@ enum {
     ML_SESSION_INTERNAL = -9, ML_SESSION_RATE_LIMITED = -10,
     ML_SESSION_STALLED = -11, ML_SESSION_STORAGE = -12
 };
-enum { ML_SESSION_VIDEO = 1, ML_SESSION_INPUT = 2, ML_SESSION_CONTROL = 3, ML_SESSION_TELEMETRY = 4, ML_SESSION_CLIPBOARD = 5 };
+enum { ML_SESSION_VIDEO = 1, ML_SESSION_INPUT = 2, ML_SESSION_CONTROL = 3, ML_SESSION_TELEMETRY = 4, ML_SESSION_CLIPBOARD = 5, ML_SESSION_CURSOR = 6 };
 /* Clipboard representations: UTF-8 plain text, Rich Text Format, PNG. */
 enum { ML_CLIPBOARD_TEXT = 1, ML_CLIPBOARD_RTF = 2, ML_CLIPBOARD_PNG = 3 };
 enum { ML_TELEMETRY_STATS = 1, ML_TELEMETRY_TUNING = 2 };
@@ -95,6 +95,7 @@ enum { ML_CODEC_H264 = 1, ML_CODEC_HEVC = 2 };
 /* Capability bits announced in protocol 5 sessions. */
 #define ML_CAPABILITY_HEVC_444 1ull
 #define ML_CAPABILITY_VIRTUAL_DISPLAY 2ull
+#define ML_CAPABILITY_CURSOR 4ull /* the viewer draws the host's pointer shape */
 #define ML_RECONNECT_STABLE_SECONDS 20u
 
 /* Logical CoreGraphics display bounds plus encoded pixel dimensions. */
@@ -207,6 +208,13 @@ typedef struct {
     MLClipboardRange items[ML_CLIPBOARD_MAX_ITEMS];
 } MLClipboardMessage;
 
+/* A received pointer image: size and hotspot in points (at most 256), the
+ * PNG at png_offset in the caller's buffer. */
+typedef struct {
+    uint16_t width, height, hotspot_x, hotspot_y;
+    size_t png_offset, png_length;
+} MLCursorMessage;
+
 /* kind selects the one populated member. */
 typedef struct {
     uint8_t kind;
@@ -216,6 +224,7 @@ typedef struct {
     MLControlMessage control;
     MLTelemetryMessage telemetry;
     MLClipboardMessage clipboard;
+    MLCursorMessage cursor;
 } MLSessionMessage;
 
 /* One local snapshot. peer_age_seconds is negative before peer stats arrive.
@@ -278,7 +287,9 @@ _Static_assert(offsetof(MLVideoFrame, avcc_length) == 72, "MLVideoFrame.avcc_len
 _Static_assert(sizeof(MLVideoPacket) == 96 && offsetof(MLVideoPacket, vps_offset) == 80, "MLVideoPacket layout");
 _Static_assert(offsetof(MLVideoPacket, sps_offset) == 32, "MLVideoPacket.sps_offset layout");
 _Static_assert(offsetof(MLVideoPacket, avcc_length) == 72, "MLVideoPacket.avcc_length layout");
-_Static_assert(sizeof(MLSessionMessage) == 824, "MLSessionMessage layout");
+_Static_assert(sizeof(MLSessionMessage) == 848, "MLSessionMessage layout");
+_Static_assert(offsetof(MLSessionMessage, cursor) == 824, "MLSessionMessage.cursor layout");
+_Static_assert(sizeof(MLCursorMessage) == 24 && offsetof(MLCursorMessage, png_offset) == 8, "MLCursorMessage layout");
 _Static_assert(offsetof(MLSessionMessage, clipboard) == 744, "MLSessionMessage.clipboard layout");
 _Static_assert(sizeof(MLClipboardItem) == 24 && offsetof(MLClipboardItem, kind) == 16, "MLClipboardItem layout");
 _Static_assert(sizeof(MLClipboardRange) == 24 && offsetof(MLClipboardRange, kind) == 16, "MLClipboardRange layout");
@@ -334,6 +345,10 @@ int32_t ml_session_send_control(uint64_t session, const MLControlMessage *messag
 int32_t ml_session_send_telemetry(uint64_t session, const MLTelemetryMessage *message, uint32_t timeout_ms);
 /* Either side may send a clipboard; at most four arrive per second. */
 int32_t ml_session_send_clipboard(uint64_t session, const MLClipboardItem *items, size_t count, uint32_t timeout_ms);
+/* Hosts only, to viewers that announced ML_CAPABILITY_CURSOR, at most 20 per
+ * second: the pointer as a PNG (64 KiB at most), size and hotspot in points. */
+int32_t ml_session_send_cursor(uint64_t session, uint16_t width, uint16_t height, uint16_t hotspot_x,
+                               uint16_t hotspot_y, const uint8_t *png, size_t png_length, uint32_t timeout_ms);
 /* Pass an ML_SESSION_MAX_VIDEO buffer: video (to viewers) and clipboard (to
  * either side) arrive in it. TIMEOUT is retryable when no message bytes were
  * read; the deadline bounds only the wait for a new message, and a message

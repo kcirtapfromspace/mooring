@@ -15,6 +15,17 @@ enum NativeSessionMessage {
     case control(NativeControlMessage)
     case telemetry(NativeTelemetry)
     case clipboard(NativeClipboardContent)
+    case cursor(NativeCursorImage)
+}
+
+/// The sharing Mac's pointer: size and hotspot in points, and a PNG that may
+/// carry Retina pixels. Rust validates both on send and receive.
+struct NativeCursorImage: Equatable {
+    let width: Int
+    let height: Int
+    let hotspotX: Int
+    let hotspotY: Int
+    let png: Data
 }
 
 /// Blocking Rust I/O is called only from dedicated network queues. Registry IDs
@@ -83,6 +94,12 @@ final class NativeTransport: @unchecked Sendable {
         case .telemetry(let telemetry): var raw = telemetry.raw; status = ml_session_send_telemetry(session, &raw, timeout)
         case .clipboard(let content):
             status = content.withItems { ml_session_send_clipboard(session, $0.baseAddress, $0.count, timeout) }
+        case .cursor(let cursor):
+            status = cursor.png.withUnsafeBytes {
+                ml_session_send_cursor(session, UInt16(clamping: cursor.width), UInt16(clamping: cursor.height),
+                                       UInt16(clamping: cursor.hotspotX), UInt16(clamping: cursor.hotspotY),
+                                       $0.bindMemory(to: UInt8.self).baseAddress, $0.count, timeout)
+            }
         }
         try Self.check(status)
     }
@@ -112,6 +129,11 @@ final class NativeTransport: @unchecked Sendable {
         case ML_SESSION_INPUT: return .input(try NativeInputEvent(message.input))
         case ML_SESSION_CONTROL: return .control(try NativeControlMessage(validated: message.control))
         case ML_SESSION_TELEMETRY: return .telemetry(try NativeTelemetry(validated: message.telemetry))
+        case ML_SESSION_CURSOR:
+            let cursor = message.cursor
+            let png = Data(videoBuffer[cursor.png_offset..<(cursor.png_offset + cursor.png_length)])
+            return .cursor(NativeCursorImage(width: Int(cursor.width), height: Int(cursor.height),
+                                             hotspotX: Int(cursor.hotspot_x), hotspotY: Int(cursor.hotspot_y), png: png))
         case ML_SESSION_CLIPBOARD:
             let clipboard = message.clipboard
             let ranges = withUnsafeBytes(of: clipboard.items) { Array($0.bindMemory(to: MLClipboardRange.self).prefix(Int(clipboard.count))) }

@@ -124,6 +124,18 @@ pub struct MLClipboardMessage {
     pub reserved: [u8; 7],
     pub items: [MLClipboardRange; MAX_ITEMS],
 }
+/// A received pointer image: its size and hotspot in points, and the PNG at
+/// `png_offset` in the caller's buffer.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MLCursorMessage {
+    pub width: u16,
+    pub height: u16,
+    pub hotspot_x: u16,
+    pub hotspot_y: u16,
+    pub png_offset: usize,
+    pub png_length: usize,
+}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MLSessionMessage {
@@ -134,6 +146,7 @@ pub struct MLSessionMessage {
     pub control: MLControlMessage,
     pub telemetry: MLTelemetryMessage,
     pub clipboard: MLClipboardMessage,
+    pub cursor: MLCursorMessage,
 }
 pub const ML_CLIPBOARD_MAX_ITEMS: usize = 3;
 pub const ML_CLIPBOARD_MAX_BYTES: usize = 4_194_304;
@@ -267,7 +280,10 @@ const _: () = {
     assert!(offset_of!(MLVideoPacket, sps_offset) == 32);
     assert!(offset_of!(MLVideoPacket, avcc_length) == 72);
     assert!(offset_of!(MLVideoPacket, vps_offset) == 80);
-    assert!(size_of::<MLSessionMessage>() == 824);
+    assert!(size_of::<MLSessionMessage>() == 848);
+    assert!(offset_of!(MLSessionMessage, cursor) == 824);
+    assert!(size_of::<MLCursorMessage>() == 24);
+    assert!(offset_of!(MLCursorMessage, png_offset) == 8);
     assert!(offset_of!(MLSessionMessage, clipboard) == 744);
     assert!(size_of::<MLClipboardItem>() == 24);
     assert!(offset_of!(MLClipboardItem, kind) == 16);
@@ -832,6 +848,37 @@ pub unsafe extern "C" fn ml_session_send_clipboard(
         transport::session(id)?.send_message(&Outgoing::Clipboard(&values), deadline(timeout_ms)?)
     })
 }
+/// Hosts only, to a viewer that announced ML_CAPABILITY_CURSOR: the pointer
+/// image as a PNG, with its size and hotspot in points.
+/// # Safety
+/// `png` must be readable for `png_length` bytes.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ml_session_send_cursor(
+    id: u64,
+    width: u16,
+    height: u16,
+    hotspot_x: u16,
+    hotspot_y: u16,
+    png: *const u8,
+    png_length: usize,
+    timeout_ms: u32,
+) -> i32 {
+    ffi(|| {
+        if png.is_null() || png_length == 0 || png_length > crate::cursor::MAX_CURSOR {
+            return Err(Error::Invalid);
+        }
+        // SAFETY: caller promises `png_length` readable bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(png, png_length) };
+        let shape = crate::cursor::CursorShape {
+            width,
+            height,
+            hotspot_x,
+            hotspot_y,
+        };
+        transport::session(id)?.send_message(&Outgoing::Cursor(shape, bytes), deadline(timeout_ms)?)
+    })
+}
 /// # Safety
 /// As for `clipboard_items`.
 #[unsafe(no_mangle)]
@@ -893,6 +940,17 @@ pub unsafe extern "C" fn ml_session_receive(
             Incoming::Telemetry(message) => {
                 out.kind = crate::policy::TELEMETRY;
                 out.telemetry = telemetry_out(&message);
+            }
+            Incoming::Cursor(packet) => {
+                out.kind = crate::policy::CURSOR;
+                out.cursor = MLCursorMessage {
+                    width: packet.shape.width,
+                    height: packet.shape.height,
+                    hotspot_x: packet.shape.hotspot_x,
+                    hotspot_y: packet.shape.hotspot_y,
+                    png_offset: packet.png.start,
+                    png_length: packet.png.len(),
+                };
             }
             Incoming::Clipboard(packet) => {
                 out.kind = crate::policy::CLIPBOARD;
@@ -957,6 +1015,7 @@ pub extern "C" fn ml_input_keeps_local(key_code: u16, modifiers: u32) -> i32 {
 
 pub const ML_CAPABILITY_HEVC_444: u64 = crate::policy::CAPABILITY_HEVC_444;
 pub const ML_CAPABILITY_VIRTUAL_DISPLAY: u64 = crate::policy::CAPABILITY_VIRTUAL_DISPLAY;
+pub const ML_CAPABILITY_CURSOR: u64 = crate::policy::CAPABILITY_CURSOR;
 pub const ML_CODEC_H264: u8 = 1;
 pub const ML_CODEC_HEVC: u8 = 2;
 

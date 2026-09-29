@@ -103,6 +103,8 @@ final class NativeRemoteView: NativeVideoView {
     var onReleaseInput: (() -> Void)?
     /// Hides this Mac's pointer over the video when the remote pointer is in it.
     var hidesLocalCursor = false { didSet { if hidesLocalCursor != oldValue { window?.invalidateCursorRects(for: self) } } }
+    /// While controlling, the sharing Mac's own pointer shape, such as an I-beam over text.
+    var remoteCursor: NSCursor? { didSet { window?.invalidateCursorRects(for: self) } }
     /// Command chords go to the remote Mac only while it accepts control; in a
     /// view-only session ⌘W and the menu shortcuts act on this Mac.
     var forwardsCommandKeys = false
@@ -113,6 +115,7 @@ final class NativeRemoteView: NativeVideoView {
     override var acceptsFirstResponder: Bool { true }
     override func resetCursorRects() {
         if hidesLocalCursor { addCursorRect(bounds, cursor: Self.invisibleCursor) }
+        else if let remoteCursor { addCursorRect(bounds, cursor: remoteCursor) }
     }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()

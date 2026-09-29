@@ -9,10 +9,11 @@
 
 use crate::clipboard::{self, ClipboardKind, ClipboardPacket, MAX_CLIPBOARD};
 use crate::control::ControlMessage;
+use crate::cursor::{self, CursorPacket, CursorShape, MAX_CURSOR};
 use crate::input::InputEvent;
 use crate::policy::{
-    Admission, CAPABILITY_HEVC_444, CAPABILITY_VIRTUAL_DISPLAY, CLIPBOARD, CONTROL, INPUT,
-    PROTOCOL_MAX, PROTOCOL_MIN, ReceivePolicy, Role, TELEMETRY, VIDEO,
+    Admission, CAPABILITY_CURSOR, CAPABILITY_HEVC_444, CAPABILITY_VIRTUAL_DISPLAY, CLIPBOARD,
+    CONTROL, CURSOR, INPUT, PROTOCOL_MAX, PROTOCOL_MIN, ReceivePolicy, Role, TELEMETRY, VIDEO,
 };
 use crate::telemetry::{MAX_TELEMETRY, TelemetryMessage};
 use crate::video::Codec;
@@ -106,6 +107,7 @@ fn limit(kind: u8) -> Result<usize> {
         CONTROL => Ok(MAX_CONTROL),
         TELEMETRY => Ok(MAX_TELEMETRY),
         CLIPBOARD => Ok(MAX_CLIPBOARD),
+        CURSOR => Ok(MAX_CURSOR),
         _ => Err(Error::Invalid),
     }
 }
@@ -277,6 +279,7 @@ pub(crate) enum Outgoing<'a> {
     Control(ControlMessage),
     Telemetry(TelemetryMessage),
     Clipboard(&'a [(ClipboardKind, &'a [u8])]),
+    Cursor(CursorShape, &'a [u8]),
 }
 #[derive(Debug, PartialEq)]
 pub(crate) enum Incoming {
@@ -287,10 +290,12 @@ pub(crate) enum Incoming {
     Telemetry(TelemetryMessage),
     /// Representation ranges index the caller's large-message buffer.
     Clipboard(ClipboardPacket),
+    /// The PNG range indexes the caller's large-message buffer.
+    Cursor(CursorPacket),
 }
 /// Video and clipboard arrive in the caller's buffer; the rest on the stack.
 fn is_large(kind: u8) -> bool {
-    matches!(kind, VIDEO | CLIPBOARD)
+    matches!(kind, VIDEO | CLIPBOARD | CURSOR)
 }
 
 pub(crate) struct Counter {
@@ -408,6 +413,15 @@ impl Session {
             Outgoing::Clipboard(items) => {
                 self.send_bytes(CLIPBOARD, &clipboard::encode(items)?, end)
             }
+            // Only to a viewer that announced it draws remote cursors.
+            Outgoing::Cursor(_, _)
+                if self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_CURSOR == 0 =>
+            {
+                Err(Error::Invalid)
+            }
+            Outgoing::Cursor(shape, png) => {
+                self.send_bytes(CURSOR, &cursor::encode(shape, png)?, end)
+            }
         }
     }
     pub(crate) fn send_bytes(&self, kind: u8, data: &[u8], end: Instant) -> Result<()> {
@@ -475,6 +489,7 @@ impl Session {
                 let message = match kind {
                     VIDEO => Incoming::Video(VideoPacket::parse(&video[..length])?),
                     CLIPBOARD => Incoming::Clipboard(ClipboardPacket::parse(&video[..length])?),
+                    CURSOR => Incoming::Cursor(CursorPacket::parse(&video[..length])?),
                     INPUT => Incoming::Input(InputEvent::decode(&small[..length])?),
                     CONTROL => Incoming::Control(ControlMessage::decode(&small[..length])?),
                     _ => Incoming::Telemetry(TelemetryMessage::decode(&small[..length])?),

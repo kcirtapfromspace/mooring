@@ -1,5 +1,6 @@
 // Real hardware codec -> encrypted loopback transport -> hardware decoder.
 // Synthetic pixels only. No Keychain, ScreenCaptureKit, permission or input APIs.
+import AppKit
 import Foundation
 import CoreGraphics
 import CoreVideo
@@ -34,7 +35,7 @@ struct NativeStreamIntegration {
     /// viewer's Hello and streams HEVC, and the viewer decodes 4:4:4 frames.
     static func hevcStream() throws -> Int {
         try require(NativeCodecSupport.probeHEVC444(), "HEVC 4:4:4 self-test")
-        ml_capabilities_set(UInt64(ML_CAPABILITY_HEVC_444))
+        ml_capabilities_set(UInt64(ML_CAPABILITY_HEVC_444) | UInt64(ML_CAPABILITY_CURSOR))
         defer { ml_capabilities_set(0) }
         let identity = try NativeHostIdentity.create()
         let code = try NativePairingCode.forHost(address: "127.0.0.1", computerName: "Synthetic HEVC test", identity: identity)
@@ -57,6 +58,16 @@ struct NativeStreamIntegration {
         guard case .control(.hello)? = try client.receive() else { throw NativeSessionError(message: "Viewer expected the host's Hello") }
         try require(viewerCapabilities & UInt64(ML_CAPABILITY_HEVC_444) != 0 && host.peerCapabilities == viewerCapabilities,
                     "The host learns the viewer decodes HEVC 4:4:4")
+        // The pointer shape crosses too: a 2x PNG with its size and hotspot in points.
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 18, pixelsHigh: 36, bitsPerSample: 8, samplesPerPixel: 4,
+                                         hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+              let png = rep.representation(using: .png, properties: [:]) else { throw NativeSessionError(message: "Cursor PNG") }
+        let pointer = NativeCursorImage(width: 9, height: 18, hotspotX: 4, hotspotY: 9, png: png)
+        try host.send(.cursor(pointer))
+        guard case .cursor(let received)? = try client.receive(), received == pointer, let shape = received.cursor,
+              shape.image.size == NSSize(width: 9, height: 18), shape.hotSpot == NSPoint(x: 4, y: 9) else {
+            throw NativeSessionError(message: "The viewer did not receive the host's pointer shape")
+        }
         let encoder = try NativeVideoEncoder(width: 1920, height: 1080, framesPerSecond: 60, bitrate: 25_000_000, codec: .hevc)
         let decoder = NativeVideoDecoder()
         defer { encoder.stop(); decoder.stop() }
@@ -240,7 +251,7 @@ struct NativeStreamIntegration {
         try data.write(to: URL(fileURLWithPath: path), options: .atomic)
         let hevc = try hevcStream()
         print("Native encrypted stream: \(total)/\(total) 1080p frames, return controls, live telemetry and clipboards both ways; " +
-              "then \(hevc) HEVC 4:4:4 frames after a protocol 5 capability exchange; hardware decode verified. Report: \(path)")
+              "then a pointer shape and \(hevc) HEVC 4:4:4 frames after a protocol 5 capability exchange; hardware decode verified. Report: \(path)")
         token.cancel(); client.close(); server.close()
     }
 }
