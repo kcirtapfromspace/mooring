@@ -148,18 +148,65 @@ struct NativeMediaTests {
         encoder.stop { stopped.signal() }
         try require(stopped.wait(timeout: .now() + 3) == .success, "Encoder stop completion")
         let fourK = try testFourK()
+        let hevc444 = try testHEVC444()
         let stats: [String: Any] = ["scope": "Synthetic paced encode/decode only; no screen capture, network or presentation test.",
             "frames": frames, "decoded": decoded, "pixel_width": width, "pixel_height": height,
             "hardware_encoder": encoder.snapshot.hardware_encoder, "hardware_decoder": decoder.hardwareDecoder,
             "hardware_encoder_evidence": encoder.snapshot.hardware_encoder_evidence,
             "paced_seconds": elapsed, "measured_roundtrip_fps": Double(frames - 1) / elapsed,
             "average_encode_ms": encoded.map { $0.metrics.encode_ms }.reduce(0, +) / Double(frames),
-            "maximum_encode_send_inflight": NativeVideoEncoder.maxInFlight, "maximum_decoder_pending": 1,
+            "maximum_encode_send_inflight": NativeVideoEncoder.maxInFlight, "maximum_decoder_pending": NativeVideoDecoder.maxPending,
+            "hevc_444": hevc444,
             "decoder_failure_budget": "passed",
             "backpressure_capture_skips": encoder.snapshot.skipped_capture_frames, "ffprobe": inspected,
             "four_k_smoke": fourK, "gap_and_overflow_recovery": "passed"]
         let json = try JSONSerialization.data(withJSONObject: stats, options: [.prettyPrinted, .sortedKeys])
         print(String(decoding: json, as: UTF8.self))
+    }
+    /// Sharper text: 120 paced 1080p frames through the HEVC 4:4:4 hardware
+    /// encoder and decoder, one at a time, as the host streams them.
+    static func testHEVC444() throws -> [String: Any] {
+        try require(NativeCodecSupport.probeHEVC444(), "This Mac encodes and decodes HEVC 4:4:4 in hardware")
+        let width = 1920, height = 1080, frames = 120
+        let encoder = try NativeVideoEncoder(width: width, height: height, framesPerSecond: 60, bitrate: 25_000_000, codec: .hevc)
+        let decoder = NativeVideoDecoder()
+        defer { encoder.stop(); decoder.stop() }
+        let lock = NSLock(), encodedSignal = DispatchSemaphore(value: 0), decodedSignal = DispatchSemaphore(value: 0)
+        var packets: [NativeVideoPacket] = [], encodeMS: [Double] = [], decodeMS: [Double] = [], errors: [String] = []
+        encoder.onEncodedFrame = { frame, release in
+            lock.lock(); packets.append(frame.packet); encodeMS.append(frame.metrics.encode_ms); lock.unlock()
+            _ = decoder.decode(frame.packet); release(); encodedSignal.signal()
+        }
+        encoder.onError = { message in lock.lock(); errors.append(message); lock.unlock(); encodedSignal.signal() }
+        decoder.onError = { message in lock.lock(); errors.append(message); lock.unlock(); decodedSignal.signal() }
+        decoder.onDecoded = { milliseconds in lock.lock(); decodeMS.append(milliseconds); lock.unlock() }
+        decoder.onFrame = { _ in decodedSignal.signal() }
+        let began = ProcessInfo.processInfo.systemUptime
+        for index in 0..<frames {
+            let delay = began + Double(index) / 60 - ProcessInfo.processInfo.systemUptime
+            if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+            let pixels = try image(index: index, width: width, height: height)
+            try require(encoder.encode(pixels, presentationTime: CMTime(value: Int64(index), timescale: 60)), "HEVC frame admission \(index)")
+            try require(encodedSignal.wait(timeout: .now() + 3) == .success, "HEVC encode timed out")
+            try require(decodedSignal.wait(timeout: .now() + 3) == .success, "HEVC decode timed out")
+        }
+        let elapsed = ProcessInfo.processInfo.systemUptime - began
+        lock.lock(); let output = packets, encodes = encodeMS.sorted(), decodes = decodeMS.sorted(), failures = errors; lock.unlock()
+        try require(failures.isEmpty, failures.first ?? "HEVC error")
+        try require(output.count == frames && decodes.count == frames, "Complete HEVC round trip")
+        try require(output.allSatisfy { $0.codec == .hevc && $0.chromaFormat == 3 }, "Every HEVC frame is 4:4:4")
+        for packet in output {
+            try packet.validate()
+            let format = try packet.formatDescription()
+            try require(CMFormatDescriptionGetMediaSubType(format) == kCMVideoCodecType_HEVC, "Actual HEVC output")
+        }
+        try require(output[0].keyframe && encoder.snapshot.hardware_encoder && decoder.hardwareDecoder, "HEVC hardware codec use")
+        let percentile = { (values: [Double], p: Double) in values[Int(Double(values.count - 1) * p)] }
+        return ["frames": frames, "pixel_width": width, "pixel_height": height, "chroma_format": 3,
+                "encode_mean_ms": encodes.reduce(0, +) / Double(frames), "encode_p95_ms": percentile(encodes, 0.95),
+                "decode_mean_ms": decodes.reduce(0, +) / Double(frames), "decode_p95_ms": percentile(decodes, 0.95),
+                "completed_fps": Double(frames) / elapsed, "bytes_per_frame": output.map(\.wireSize).reduce(0, +) / frames,
+                "ffprobe": try inspectBitstream(output)]
     }
     static func testRecovery(_ frames: [NativeEncodedFrame]) throws {
         let decoder = NativeVideoDecoder(keyframeRetryInterval: 0.5), output = DispatchSemaphore(value: 0), keyframe = DispatchSemaphore(value: 0)
@@ -294,10 +341,13 @@ struct NativeMediaTests {
     static func inspectBitstream(_ packets: [NativeVideoPacket]) throws -> [String: Any] {
         let executable = "/opt/homebrew/bin/ffprobe"
         guard FileManager.default.isExecutableFile(atPath: executable) else { return ["available": false] }
+        let hevc = packets.first?.codec == .hevc
         var annex = Data()
         let start = Data([0, 0, 0, 1])
         for packet in packets {
-            if packet.keyframe { annex.append(start); annex.append(packet.sps); annex.append(start); annex.append(packet.pps) }
+            if packet.keyframe {
+                for set in (hevc ? [packet.vps] : []) + [packet.sps, packet.pps] { annex.append(start); annex.append(set) }
+            }
             let bytes = [UInt8](packet.avcc)
             var offset = 0
             while offset < bytes.count {
@@ -305,7 +355,7 @@ struct NativeMediaTests {
                 annex.append(start); annex.append(contentsOf: bytes[offset..<(offset + count)]); offset += count
             }
         }
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("maclink-synthetic-" + UUID().uuidString + ".h264")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("maclink-synthetic-" + UUID().uuidString + (hevc ? ".hevc" : ".h264"))
         try annex.write(to: url); defer { try? FileManager.default.removeItem(at: url) }
         let process = Process(), output = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -319,8 +369,9 @@ struct NativeMediaTests {
         let data = output.fileHandleForReading.readDataToEndOfFile()
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let stream = (object?["streams"] as? [[String: Any]])?.first else { throw Failure("Missing ffprobe video stream") }
-        try require(stream["codec_name"] as? String == "h264" && stream["has_b_frames"] as? Int == 0,
-                    "Independent bitstream verification must show H.264 without B frames")
+        try require(stream["codec_name"] as? String == (hevc ? "hevc" : "h264") && stream["has_b_frames"] as? Int == 0,
+                    "Independent bitstream verification must show the expected codec without B frames")
+        if hevc { try require(stream["pix_fmt"] as? String == "yuv444p", "Independent verification of 4:4:4 chroma") }
         try require(stream["nb_read_frames"] as? String == String(packets.count), "Independent decoded frame count")
         return stream
     }

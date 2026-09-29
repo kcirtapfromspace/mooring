@@ -64,8 +64,13 @@ fn connect(port: u16, public: &[u8; 32], psk: &[u8; 32], timeout: u32, out: &mut
         )
     }
 }
-/// Returns (viewer, host).
+/// Returns (viewer, host) on protocol 4: the framing tests below inject raw
+/// records whose counters start at zero, which a protocol 5 Hello would take.
 fn pair() -> (Owned, Owned) {
+    pair_version(4)
+}
+fn pair_version(offer: u32) -> (Owned, Owned) {
+    crate::transport::TEST_OFFER.with(|value| value.set(offer));
     let (private, public, psk) = identity();
     let listener = bind(&private, &psk);
     let id = listener.0;
@@ -182,7 +187,8 @@ fn frame(avcc: &[u8], keyframe: bool, sequence: u64) -> MLVideoFrame {
             width: 1920,
             height: 1080,
             keyframe: keyframe.into(),
-            reserved: [0; 7],
+            codec: 0,
+            reserved: [0; 6],
         },
         sps: SPS.as_ptr(),
         sps_length: SPS.len(),
@@ -190,6 +196,8 @@ fn frame(avcc: &[u8], keyframe: bool, sequence: u64) -> MLVideoFrame {
         pps_length: PPS.len(),
         avcc: avcc.as_ptr(),
         avcc_length: avcc.len(),
+        vps: std::ptr::null(),
+        vps_length: 0,
     }
 }
 fn key_event(kind: u8, code: u16) -> MLInputEvent {
@@ -1543,4 +1551,184 @@ fn a_malformed_clipboard_closes_the_receiver_and_clears_it() {
         "rejected plaintext is cleared"
     );
     assert!(is_closed(host.0));
+}
+
+const TEST_CAPABILITIES: u64 = ML_CAPABILITY_HEVC_444 | 1 << 40; // plus a bit no build knows
+fn hello(id: u64) -> u64 {
+    let mut buffer = vec![0; 4096];
+    let (status, message) = typed(id, &mut buffer, 2000);
+    assert_eq!(
+        (status, message.kind, message.control.kind),
+        (0, CONTROL, 6)
+    );
+    message.control.ping_id
+}
+
+#[test]
+fn handshake_versions_are_strictly_formatted() {
+    use crate::transport::handshake_version;
+    assert_eq!(handshake_version(b"maclink-session/4"), Some(4));
+    assert_eq!(handshake_version(b"maclink-session/12"), Some(12));
+    for bad in [
+        &b"maclink-session/"[..],
+        b"maclink-session/05",
+        b"maclink-session/5a",
+        b"maclink-session/-5",
+        b"maclink-session/99999",
+        b"other-session/5",
+        b"maclink-session/5\0",
+    ] {
+        assert_eq!(handshake_version(bad), None, "{bad:?}");
+    }
+}
+
+#[test]
+fn protocol_5_sessions_start_with_each_sides_capabilities() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let (viewer, host) = pair_version(5);
+    assert_eq!(
+        (
+            ml_session_protocol_version(viewer.0),
+            ml_session_protocol_version(host.0)
+        ),
+        (5, 5)
+    );
+    assert_eq!(hello(host.0), TEST_CAPABILITIES);
+    assert_eq!(hello(viewer.0), TEST_CAPABILITIES);
+    let mut peer = 0;
+    assert_eq!(
+        unsafe { ml_session_peer_capabilities(host.0, &mut peer) },
+        0
+    );
+    assert_eq!(
+        peer, TEST_CAPABILITIES,
+        "unknown bits are kept, not rejected"
+    );
+    // A second Hello is a protocol violation.
+    assert_eq!(send_control(viewer.0, &control(6, 1)), 0);
+    let mut buffer = vec![0; 4096];
+    assert_eq!(typed(host.0, &mut buffer, 2000).0, Error::Protocol as i32);
+}
+
+#[test]
+fn older_viewers_get_protocol_4_from_newer_hosts() {
+    let (viewer, host) = pair_version(4);
+    assert_eq!(
+        (
+            ml_session_protocol_version(viewer.0),
+            ml_session_protocol_version(host.0)
+        ),
+        (4, 4)
+    );
+    let mut peer = 7;
+    assert_eq!(
+        unsafe { ml_session_peer_capabilities(host.0, &mut peer) },
+        0
+    );
+    assert_eq!(peer, 0);
+    assert_eq!(
+        send_control(viewer.0, &control(6, 1)),
+        Error::Invalid as i32,
+        "no Hello in protocol 4"
+    );
+    assert_eq!(send_input(viewer.0, &key_event(1, 0)), 0);
+    let mut buffer = vec![0; 4096];
+    assert_eq!(
+        typed(host.0, &mut buffer, 2000).1.kind,
+        INPUT,
+        "the first message is ordinary input"
+    );
+}
+
+#[test]
+fn newer_viewers_fall_back_for_hosts_before_protocol_5() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    crate::transport::TEST_OFFER.with(|value| value.set(5));
+    let (private, public, psk) = identity();
+    let listener = bind(&private, &psk);
+    let id = listener.0;
+    // Imitate a preview 4-8 host: exactly protocol 4, anything else refused.
+    crate::transport::listener(id)
+        .unwrap()
+        .exact_version
+        .store(4, Ordering::Release);
+    let accept = std::thread::spawn(move || {
+        let mut host = 0;
+        let first = unsafe { ml_session_accept(id, 5000, &mut host) };
+        assert_eq!(first, Error::Protocol as i32, "the newer offer is refused");
+        assert_eq!(unsafe { ml_session_accept(id, 5000, &mut host) }, 0);
+        Owned(host)
+    });
+    let mut viewer = 0;
+    assert_eq!(
+        connect(
+            ml_session_listener_port(id),
+            &public,
+            &psk,
+            5000,
+            &mut viewer
+        ),
+        0
+    );
+    let (viewer, host) = (Owned(viewer), accept.join().unwrap());
+    assert_eq!(
+        (
+            ml_session_protocol_version(viewer.0),
+            ml_session_protocol_version(host.0)
+        ),
+        (4, 4)
+    );
+    assert_eq!(send_input(viewer.0, &key_event(1, 0)), 0);
+    let mut buffer = vec![0; 4096];
+    assert_eq!(typed(host.0, &mut buffer, 2000).1.kind, INPUT);
+}
+
+fn hevc(data: &[u8], keyframe: bool, sequence: u64) -> MLVideoFrame {
+    use crate::video::tests::{HEVC_PPS, HEVC_SPS, VPS};
+    let mut value = frame(data, keyframe, sequence);
+    value.header.codec = ML_CODEC_HEVC;
+    (value.vps, value.vps_length) = (VPS.as_ptr(), VPS.len());
+    (value.sps, value.sps_length) = (HEVC_SPS.as_ptr(), HEVC_SPS.len());
+    (value.pps, value.pps_length) = (HEVC_PPS.as_ptr(), HEVC_PPS.len());
+    value
+}
+
+#[test]
+fn hevc_reaches_only_viewers_that_announced_it() {
+    use crate::video::tests::{HEVC_IDR, HEVC_SPS, VPS};
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let (viewer, host) = pair_version(5);
+    assert_eq!(
+        (hello(host.0), hello(viewer.0)),
+        (TEST_CAPABILITIES, TEST_CAPABILITIES)
+    );
+    assert_eq!(send_control(host.0, &geometry(1)), 0);
+    assert_eq!(send_video(host.0, &hevc(HEVC_IDR, true, 0)), 0);
+    let mut buffer = vec![0; ML_SESSION_MAX_MESSAGE];
+    assert_eq!(typed(viewer.0, &mut buffer, 2000).1.kind, CONTROL);
+    let (status, message) = typed(viewer.0, &mut buffer, 2000);
+    assert_eq!(
+        (status, message.kind, message.video.header.codec),
+        (0, VIDEO, ML_CODEC_HEVC)
+    );
+    let packet = message.video;
+    assert_eq!(&buffer[packet.vps_offset..][..packet.vps_length], VPS);
+    assert_eq!(&buffer[packet.sps_offset..][..packet.sps_length], HEVC_SPS);
+    assert_eq!(
+        unsafe { ml_video_hevc_chroma_format(HEVC_SPS.as_ptr(), HEVC_SPS.len()) },
+        3
+    );
+
+    // Protocol 4 has no capabilities, so HEVC is refused before sending.
+    let (_viewer, old_host) = pair_version(4);
+    assert_eq!(
+        send_video(old_host.0, &hevc(HEVC_IDR, true, 0)),
+        Error::Invalid as i32
+    );
+    assert!(!is_closed(old_host.0));
+    assert_eq!(
+        send_video(old_host.0, &frame(IDR, true, 0)),
+        0,
+        "H.264 still flows"
+    );
 }

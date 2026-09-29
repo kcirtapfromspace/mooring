@@ -60,7 +60,8 @@ enum {
 };
 enum {
     ML_CONTROL_GEOMETRY = 1, ML_CONTROL_INPUT_STATE = 2, ML_CONTROL_PING = 3,
-    ML_CONTROL_PONG = 4, ML_CONTROL_KEYFRAME = 5
+    ML_CONTROL_PONG = 4, ML_CONTROL_KEYFRAME = 5,
+    ML_CONTROL_HELLO = 6 /* protocol 5: capabilities in ping_id, sent automatically */
 };
 enum {
     ML_INPUT_KEY_DOWN = 1, ML_INPUT_KEY_UP = 2, ML_INPUT_POINTER_MOVE = 3,
@@ -86,6 +87,9 @@ enum {
 #define ML_CLIPBOARD_MAX_BYTES 4194304u /* 4 MiB of representation bytes per message */
 #define ML_CLIPBOARD_MAX_MESSAGE 4194332u /* the smallest receive buffer for a host */
 #define ML_RECONNECT_ATTEMPTS 5u
+enum { ML_CODEC_H264 = 1, ML_CODEC_HEVC = 2 };
+/* Capability bits announced in protocol 5 sessions. */
+#define ML_CAPABILITY_HEVC_444 1ull
 #define ML_RECONNECT_STABLE_SECONDS 20u
 
 /* Logical CoreGraphics display bounds plus encoded pixel dimensions. */
@@ -124,16 +128,19 @@ typedef struct {
     uint64_t timestamp_us;
     uint32_t width, height;
     uint8_t keyframe;
-    uint8_t reserved[7];
+    uint8_t codec; /* ML_CODEC_H264 (or 0) or ML_CODEC_HEVC */
+    uint8_t reserved[6];
 } MLVideoHeader;
 
-/* One H.264 access unit to send: SPS and PPS parameter sets and an AVCC
- * bitstream with four-byte NAL lengths and no in-band configuration. */
+/* One access unit to send: parameter sets (VPS only for HEVC) and a bitstream
+ * with four-byte NAL lengths and no in-band configuration. HEVC is refused
+ * unless the viewer announced ML_CAPABILITY_HEVC_444. */
 typedef struct {
     MLVideoHeader header;
     const uint8_t *sps; size_t sps_length;
     const uint8_t *pps; size_t pps_length;
     const uint8_t *avcc; size_t avcc_length;
+    const uint8_t *vps; size_t vps_length;
 } MLVideoFrame;
 
 /* A validated received packet; components are ranges in the caller's buffer. */
@@ -142,6 +149,7 @@ typedef struct {
     size_t sps_offset, sps_length;
     size_t pps_offset, pps_length;
     size_t avcc_offset, avcc_length;
+    size_t vps_offset, vps_length;
 } MLVideoPacket;
 
 /* One measurement: finite and 0 to 1e9. */
@@ -257,21 +265,22 @@ _Static_assert(offsetof(MLInputEvent, is_repeat) == 41, "MLInputEvent.is_repeat 
 _Static_assert(sizeof(MLVideoHeader) == 32, "MLVideoHeader layout");
 _Static_assert(offsetof(MLVideoHeader, width) == 16, "MLVideoHeader.width layout");
 _Static_assert(offsetof(MLVideoHeader, keyframe) == 24, "MLVideoHeader.keyframe layout");
-_Static_assert(sizeof(MLVideoFrame) == 80, "MLVideoFrame layout");
+_Static_assert(offsetof(MLVideoHeader, codec) == 25, "MLVideoHeader.codec layout");
+_Static_assert(sizeof(MLVideoFrame) == 96 && offsetof(MLVideoFrame, vps) == 80, "MLVideoFrame layout");
 _Static_assert(offsetof(MLVideoFrame, sps) == 32, "MLVideoFrame.sps layout");
 _Static_assert(offsetof(MLVideoFrame, pps) == 48, "MLVideoFrame.pps layout");
 _Static_assert(offsetof(MLVideoFrame, avcc_length) == 72, "MLVideoFrame.avcc_length layout");
-_Static_assert(sizeof(MLVideoPacket) == 80, "MLVideoPacket layout");
+_Static_assert(sizeof(MLVideoPacket) == 96 && offsetof(MLVideoPacket, vps_offset) == 80, "MLVideoPacket layout");
 _Static_assert(offsetof(MLVideoPacket, sps_offset) == 32, "MLVideoPacket.sps_offset layout");
 _Static_assert(offsetof(MLVideoPacket, avcc_length) == 72, "MLVideoPacket.avcc_length layout");
-_Static_assert(sizeof(MLSessionMessage) == 808, "MLSessionMessage layout");
-_Static_assert(offsetof(MLSessionMessage, clipboard) == 728, "MLSessionMessage.clipboard layout");
+_Static_assert(sizeof(MLSessionMessage) == 824, "MLSessionMessage layout");
+_Static_assert(offsetof(MLSessionMessage, clipboard) == 744, "MLSessionMessage.clipboard layout");
 _Static_assert(sizeof(MLClipboardItem) == 24 && offsetof(MLClipboardItem, kind) == 16, "MLClipboardItem layout");
 _Static_assert(sizeof(MLClipboardRange) == 24 && offsetof(MLClipboardRange, kind) == 16, "MLClipboardRange layout");
 _Static_assert(sizeof(MLClipboardMessage) == 80 && offsetof(MLClipboardMessage, items) == 8, "MLClipboardMessage layout");
 _Static_assert(offsetof(MLSessionMessage, video) == 8, "MLSessionMessage.video layout");
-_Static_assert(offsetof(MLSessionMessage, input) == 88, "MLSessionMessage.input layout");
-_Static_assert(offsetof(MLSessionMessage, control) == 136, "MLSessionMessage.control layout");
+_Static_assert(offsetof(MLSessionMessage, input) == 104, "MLSessionMessage.input layout");
+_Static_assert(offsetof(MLSessionMessage, control) == 152, "MLSessionMessage.control layout");
 _Static_assert(sizeof(MLPairingCode) == 641, "MLPairingCode layout");
 _Static_assert(offsetof(MLPairingCode, name) == 256, "MLPairingCode.name layout");
 _Static_assert(offsetof(MLPairingCode, peer_id) == 512, "MLPairingCode.peer_id layout");
@@ -291,7 +300,7 @@ _Static_assert(offsetof(MLTelemetrySnapshot, last_end) == 1072, "MLTelemetrySnap
 _Static_assert(offsetof(MLTelemetrySnapshot, tuning) == 24, "MLTelemetrySnapshot.tuning layout");
 _Static_assert(offsetof(MLTelemetrySnapshot, local) == 40, "MLTelemetrySnapshot.local layout");
 _Static_assert(offsetof(MLTelemetrySnapshot, peer) == 552, "MLTelemetrySnapshot.peer layout");
-_Static_assert(offsetof(MLSessionMessage, telemetry) == 192, "MLSessionMessage.telemetry layout");
+_Static_assert(offsetof(MLSessionMessage, telemetry) == 208, "MLSessionMessage.telemetry layout");
 _Static_assert(offsetof(MLPeer, name) == 65, "MLPeer.name layout");
 _Static_assert(offsetof(MLPeer, address) == 321, "MLPeer.address layout");
 
@@ -344,6 +353,15 @@ int32_t ml_input_keeps_local(uint16_t key_code, uint32_t modifiers);
  * before attempt 1...ML_RECONNECT_ATTEMPTS, then ML_SESSION_INVALID. A session
  * that stayed connected ML_RECONNECT_STABLE_SECONDS starts a new budget. */
 int32_t ml_reconnect_delay_ms(uint32_t attempt);
+
+/* Protocol negotiation: builds speak versions 4-5 and agree on the highest
+ * both support; version 5 sessions start with each side's Hello. Set this
+ * process's capabilities once at launch; sessions started later announce them. */
+void ml_capabilities_set(uint64_t capabilities);
+int32_t ml_session_protocol_version(uint64_t session);
+int32_t ml_session_peer_capabilities(uint64_t session, uint64_t *out);
+/* chroma_format_idc of an HEVC SPS: 1 is 4:2:0, 3 is 4:4:4. */
+int32_t ml_video_hevc_chroma_format(const uint8_t *sps, size_t length);
 
 /* Host held-input state; calls are serialized internally. accept stages one
  * event and returns what to post; call commit after posting, and any other

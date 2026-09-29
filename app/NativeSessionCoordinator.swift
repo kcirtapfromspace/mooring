@@ -99,6 +99,8 @@ final class NativeSessionCoordinator {
     private var lastViewerEnd = ""
     /// Sends ⌘-Tab and other system shortcuts to the remote Mac while it has focus.
     private var systemKeys: NativeSystemKeyCapture?
+    /// Found at launch by encoding and decoding one HEVC 4:4:4 frame in hardware.
+    private var hevc444Available = false
     /// Exchanges this Mac's clipboard with a connected Mac, polled twice a second.
     private let clipboard = NativeClipboardSync()
     private var clipboardTimer: Timer?
@@ -166,6 +168,16 @@ final class NativeSessionCoordinator {
             guard let self else { return }
             self.stopSharing(reason: self.pausedReason("Sharing stopped because this Mac locked or its display went to sleep."))
             self.disconnectViewer(reason: "This Mac locked or its display went to sleep. Reconnect when ready.")
+        }
+        // Announce HEVC 4:4:4 only after this Mac has proven it can encode and
+        // decode it; sessions that start before the test finishes use H.264.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let hevc = NativeCodecSupport.probeHEVC444()
+            DispatchQueue.main.async {
+                self?.hevc444Available = hevc
+                ml_capabilities_set(hevc ? UInt64(ML_CAPABILITY_HEVC_444) : 0)
+                NativeLog.session.notice("HEVC 4:4:4 hardware encode and decode: \(hevc ? "available" : "unavailable", privacy: .public)")
+            }
         }
         clipboard.onSend = { [weak self] content in self?.sendClipboard(content) }
         let poll = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.pollClipboard() }
@@ -282,7 +294,8 @@ final class NativeSessionCoordinator {
         let channel = NativeSessionChannel(transport)
         hostChannel = channel; lastHostMeasurements = channel.measurements
         retiredEncoderCounters = NativeEncoderCounters(); hostInputGate.invalidate()
-        NativeLog.session.notice("host session started")
+        let version = channel.transport.protocolVersion
+        NativeLog.session.notice("host session started, protocol \(version)")
         if !isConnected { clipboard.start(includeCurrent: false) }
         let injector = NativeInputInjector(); hostInjector = injector
         hostActivity = hostActivity ?? ProcessInfo.processInfo.beginActivity(
@@ -292,7 +305,16 @@ final class NativeSessionCoordinator {
             guard let self, let channel, self.hostChannel === channel else { return }
             self.endHost(reason: reason)
         }
-        startCapture(for: channel)
+        if version >= 5 {
+            // The viewer's Hello says whether it decodes HEVC 4:4:4; it arrives
+            // within a round trip. Without one, start with H.264.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak channel] in
+                guard let self, let channel, self.hostChannel === channel, self.capture == nil else { return }
+                self.startCapture(for: channel)
+            }
+        } else {
+            startCapture(for: channel)
+        }
         readHost(channel, injector: injector)
         refreshShare()
     }
@@ -302,9 +324,12 @@ final class NativeSessionCoordinator {
         // While the viewer controls this Mac its own pointer is the cursor; drawing
         // this Mac's pointer into the video as well would show two.
         let tuning = hostTuning
+        let codec: NativeVideoCodec = hevc444Available
+            && channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_HEVC_444) != 0 ? .hevc : .h264
         let capture = NativeCapture(maxPixelWidth: tuning.maxWidth, framesPerSecond: tuning.fps,
                                     showsCursor: !NativeInputInjector.isTrusted, bitrate: tuning.bitrate,
-                                    keyframeSeconds: tuning.keyframeSeconds, inFlightLimit: tuning.inFlight)
+                                    keyframeSeconds: tuning.keyframeSeconds, inFlightLimit: tuning.inFlight, codec: codec)
+        let firstKeyframe = NativeRunToken()
         let live = NativeRunToken()
         captureToken?.cancel(); captureToken = live
         self.capture = capture; captureMaxWidth = tuning.maxWidth
@@ -325,6 +350,10 @@ final class NativeSessionCoordinator {
             measurements.add("encoded_frames"); measurements.add("encode_ms_total", frame.metrics.encode_ms)
             measurements.recordMax("encode_ms", frame.metrics.encode_ms)
             if frame.keyframe { measurements.add("encoded_keyframes") }
+            if frame.keyframe && firstKeyframe.cancel() {
+                let chroma = frame.packet.chromaFormat.map { $0 == 3 ? ", 4:4:4 chroma confirmed" : ", chroma format \($0)" } ?? ""
+                NativeLog.session.notice("streaming \(frame.packet.codec.name, privacy: .public) at \(frame.packet.width)×\(frame.packet.height)\(chroma, privacy: .public)")
+            }
             measurements.set("target_bitrate", Double(frame.metrics.target_bitrate))
             measurements.set("hardware_encoder_required", frame.metrics.hardware_encoder ? 1 : 0)
             channel.send(.video(frame.packet), completion: release)
@@ -432,6 +461,12 @@ final class NativeSessionCoordinator {
                         channel.deliverControl { [weak self, weak channel] in
                             guard let self, let channel, self.hostChannel === channel else { return }
                             self.capture?.requestKeyframe()
+                        }
+                    case .control(.hello):
+                        // Rust has recorded the viewer's capabilities; start with the best shared codec.
+                        channel.deliverControl { [weak self, weak channel] in
+                            guard let self, let channel, self.hostChannel === channel, self.capture == nil else { return }
+                            self.startCapture(for: channel)
                         }
                     case .telemetry(.stats(let stats)):
                         channel.storePeerStats(stats)
@@ -847,7 +882,7 @@ final class NativeSessionCoordinator {
                 channel.measurements.set("network_round_trip_ms", (uptime - outstanding.1) * 1000)
                 pendingPing = nil
             }
-        case .ping, .keyframe:
+        case .ping, .keyframe, .hello:
             break
         }
     }

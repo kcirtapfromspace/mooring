@@ -91,6 +91,28 @@ each second. At most four clients are served; a slow client or a command line ov
 first, and a non-socket file at that path is never replaced. No network port is
 opened. See `docs/TELEMETRY.md` and the CLI's `telemetry` and `tune` commands.
 
+## Protocol versions and capabilities
+
+Builds speak protocol versions 4–5, and each connection negotiates the highest
+version both sides support. The initiator offers `maclink-session/5`. The
+responder answers with the lower of that and its own highest version. A host
+from before version 5 closes the connection when offered 5, so the initiator
+retries once, offering 4, within the same deadline.
+
+Version 5 sessions start with each side's `Hello` control message: capability
+bits in the `ping_id` field, sent automatically by Rust, received at most once.
+Unknown bits are kept, so later builds can add capabilities without breaking
+earlier ones. `ml_capabilities_set` fixes this process's bits for sessions
+started afterwards.
+
+`ML_CAPABILITY_HEVC_444` means "this side decodes HEVC 4:4:4 in hardware".
+Rust refuses to send HEVC video unless the peer announced it, and treats HEVC
+arriving without the local capability as a protocol violation. H.264 packets
+keep the `MLV1` format. HEVC uses `MLV2`, which adds a VPS. Both are checked for
+parameter sets, NAL types and a keyframe flag that matches the picture type.
+`ml_video_hevc_chroma_format` reads `chroma_format_idc` from an SPS, so
+MacLink can confirm the encoder really produced 4:4:4.
+
 ## Shared clipboard
 
 Either side may send a clipboard message: one to three representations of one

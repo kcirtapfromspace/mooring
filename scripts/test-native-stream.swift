@@ -30,6 +30,60 @@ struct NativeStreamIntegration {
         let writer = DispatchQueue(label: "native-test-writer")
         func fail(_ message: String) { lock.lock(); if error == nil { error = message }; lock.unlock(); decoded.signal(); returnedControl.signal(); accepted.signal() }
     }
+    /// Protocol 5 end to end: both sides announce HEVC 4:4:4, the host sees the
+    /// viewer's Hello and streams HEVC, and the viewer decodes 4:4:4 frames.
+    static func hevcStream() throws -> Int {
+        try require(NativeCodecSupport.probeHEVC444(), "HEVC 4:4:4 self-test")
+        ml_capabilities_set(UInt64(ML_CAPABILITY_HEVC_444))
+        defer { ml_capabilities_set(0) }
+        let identity = try NativeHostIdentity.create()
+        let code = try NativePairingCode.forHost(address: "127.0.0.1", computerName: "Synthetic HEVC test", identity: identity)
+        let listener = try NativeTransport.listen(identity: identity, bindAddress: "127.0.0.1", port: 0)
+        defer { listener.close() }
+        let accepted = DispatchSemaphore(value: 0), lock = NSLock()
+        var server: NativeTransport?
+        DispatchQueue.global().async {
+            let transport = try? listener.accept()
+            lock.lock(); server = transport; lock.unlock(); accepted.signal()
+        }
+        let client = try NativeTransport.connect(address: "127.0.0.1", code: code, port: listener.listeningPort)
+        defer { client.close() }
+        try require(accepted.wait(timeout: .now() + 5) == .success, "HEVC session accept")
+        lock.lock(); let host = server; lock.unlock()
+        guard let host else { throw NativeSessionError(message: "HEVC session did not authenticate") }
+        defer { host.close() }
+        try require(client.protocolVersion == 5 && host.protocolVersion == 5, "Both sides negotiate protocol 5")
+        guard case .control(.hello(let viewerCapabilities))? = try host.receive() else { throw NativeSessionError(message: "Host expected the viewer's Hello") }
+        guard case .control(.hello)? = try client.receive() else { throw NativeSessionError(message: "Viewer expected the host's Hello") }
+        try require(viewerCapabilities & UInt64(ML_CAPABILITY_HEVC_444) != 0 && host.peerCapabilities == viewerCapabilities,
+                    "The host learns the viewer decodes HEVC 4:4:4")
+        let encoder = try NativeVideoEncoder(width: 1920, height: 1080, framesPerSecond: 60, bitrate: 25_000_000, codec: .hevc)
+        let decoder = NativeVideoDecoder()
+        defer { encoder.stop(); decoder.stop() }
+        let decoded = DispatchSemaphore(value: 0), sendQueue = DispatchQueue(label: "hevc-writer")
+        var failure: String?
+        decoder.onFrame = { _ in decoded.signal() }
+        decoder.onError = { message in lock.lock(); failure = message; lock.unlock(); decoded.signal() }
+        encoder.onEncodedFrame = { frame, release in
+            sendQueue.async { defer { release() }; do { try host.send(.video(frame.packet)) } catch { lock.lock(); failure = error.localizedDescription; lock.unlock() } }
+        }
+        try host.send(.control(.geometry(NativeDisplayGeometry(x: 0, y: 0, width: 1920, height: 1080, pixelWidth: 1920, pixelHeight: 1080),
+                                         inputEnabled: false)))
+        guard case .control(.geometry)? = try client.receive() else { throw NativeSessionError(message: "Viewer expected geometry") }
+        let total = 30
+        for index in 0..<total {
+            let pixels = try frame(index, width: 1920, height: 1080)
+            try require(encoder.encode(pixels, presentationTime: CMTime(value: Int64(index), timescale: 60)), "HEVC admission")
+            var packet: NativeVideoPacket?
+            while packet == nil { if case .video(let received)? = try client.receive() { packet = received } }
+            try require(packet?.codec == .hevc && packet?.chromaFormat == 3, "The viewer receives HEVC 4:4:4")
+            _ = decoder.decode(packet!)
+            try require(decoded.wait(timeout: .now() + 3) == .success, "HEVC decode over the session")
+            lock.lock(); let error = failure; lock.unlock()
+            if let error { throw NativeSessionError(message: error) }
+        }
+        return total
+    }
     static func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw NativeSessionError(message: message) }
     }
@@ -77,6 +131,7 @@ struct NativeStreamIntegration {
                 state.server = server; state.accepted.signal()
                 while token.isActive {
                     switch try server.receive() {
+                    case .control(.hello)?: continue // protocol 5 opens with the viewer's capabilities
                     case .input(let event)? where event.kind == .releaseAll: state.returnedControl.signal()
                     case .telemetry(.tuning(let tuning))? where tuning.fps == 30: state.receivedTuning.signal()
                     case .clipboard(let content)? where content == viewerCopy: state.hostClipboard.signal()
@@ -120,7 +175,7 @@ struct NativeStreamIntegration {
                 while token.isActive {
                     guard let message = try client.receive() else { continue }
                     switch message {
-                    case .control(.geometry): continue
+                    case .control(.geometry), .control(.hello): continue
                     case .telemetry(.stats(let stats)) where stats[.captureFps] == 60: state.receivedStats.signal()
                     case .clipboard(let content) where content == hostCopy: state.viewerClipboard.signal()
                     case .video(let packet):
@@ -183,7 +238,9 @@ struct NativeStreamIntegration {
         let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
         let path = CommandLine.arguments.dropFirst().first ?? "target/native-stream-loopback.json"
         try data.write(to: URL(fileURLWithPath: path), options: .atomic)
-        print("Native encrypted stream: \(total)/\(total) 1080p frames, return controls, live telemetry and clipboards both ways; hardware decode verified. Report: \(path)")
+        let hevc = try hevcStream()
+        print("Native encrypted stream: \(total)/\(total) 1080p frames, return controls, live telemetry and clipboards both ways; " +
+              "then \(hevc) HEVC 4:4:4 frames after a protocol 5 capability exchange; hardware decode verified. Report: \(path)")
         token.cancel(); client.close(); server.close()
     }
 }

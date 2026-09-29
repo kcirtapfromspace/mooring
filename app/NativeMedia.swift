@@ -47,6 +47,8 @@ struct NativeMediaMetrics: Codable {
     var failed_frames: UInt64 = 0
     var keyframes: UInt64 = 0
     var encode_ms_total: Double = 0
+    /// HEVC only: chroma_format_idc read back from the encoder's SPS (3 is 4:4:4).
+    var chroma_format: Int = 0
 }
 
 struct NativeEncodedFrame {
@@ -62,75 +64,143 @@ struct NativeMediaError: LocalizedError {
     init(_ message: String) { self.message = message }
 }
 
-/// One H.264 access unit: SPS/PPS parameter sets and an AVCC bitstream with
-/// four-byte NAL lengths. Rust owns the MLV1 wire format and its validation:
-/// dimensions, sizes, allowed NAL types, and a keyframe flag matching the IDR.
+enum NativeVideoCodec: Equatable {
+    /// H.264 with 4:2:0 colour: every build decodes it.
+    case h264
+    /// HEVC with full 4:4:4 colour for sharp text, to viewers that announce it.
+    case hevc
+    var raw: UInt8 { self == .hevc ? UInt8(ML_CODEC_HEVC) : UInt8(ML_CODEC_H264) }
+    var name: String { self == .hevc ? "HEVC 4:4:4" : "H.264" }
+}
+
+/// One access unit: parameter sets (a VPS only for HEVC) and a bitstream with
+/// four-byte NAL lengths. Rust owns the MLV1/MLV2 wire formats and their
+/// validation: dimensions, sizes, allowed NAL types, and a keyframe flag
+/// matching the picture type.
 struct NativeVideoPacket {
-    static let headerBytes = Int(ML_VIDEO_HEADER_BYTES)
     static let maximumBytes = Int(ML_SESSION_MAX_VIDEO)
+    let codec: NativeVideoCodec
     let width: Int
     let height: Int
     let sequence: UInt64
     let timestamp: UInt64
     let keyframe: Bool
+    let vps: Data
     let sps: Data
     let pps: Data
     let avcc: Data
 
-    init(width: Int, height: Int, sequence: UInt64, timestamp: UInt64, keyframe: Bool, sps: Data, pps: Data, avcc: Data) {
-        self.width = width; self.height = height; self.sequence = sequence; self.timestamp = timestamp
-        self.keyframe = keyframe; self.sps = sps; self.pps = pps; self.avcc = avcc
+    init(codec: NativeVideoCodec = .h264, width: Int, height: Int, sequence: UInt64, timestamp: UInt64, keyframe: Bool,
+         vps: Data = Data(), sps: Data, pps: Data, avcc: Data) {
+        self.codec = codec; self.width = width; self.height = height; self.sequence = sequence; self.timestamp = timestamp
+        self.keyframe = keyframe; self.vps = vps; self.sps = sps; self.pps = pps; self.avcc = avcc
     }
-    init(header: MLVideoHeader, sps: Data, pps: Data, avcc: Data) {
-        self.init(width: Int(header.width), height: Int(header.height), sequence: header.sequence,
-                  timestamp: header.timestamp_us, keyframe: header.keyframe == 1, sps: sps, pps: pps, avcc: avcc)
+    init(header: MLVideoHeader, vps: Data, sps: Data, pps: Data, avcc: Data) {
+        self.init(codec: header.codec == UInt8(ML_CODEC_HEVC) ? .hevc : .h264, width: Int(header.width), height: Int(header.height),
+                  sequence: header.sequence, timestamp: header.timestamp_us, keyframe: header.keyframe == 1,
+                  vps: vps, sps: sps, pps: pps, avcc: avcc)
     }
     static func validDimensions(_ width: Int, _ height: Int) -> Bool {
         guard let width = UInt32(exactly: width), let height = UInt32(exactly: height) else { return false }
         return ml_video_dimensions_validate(width, height) == ML_SESSION_OK
     }
-    var wireSize: Int { Self.headerBytes + sps.count + pps.count + avcc.count }
+    var wireSize: Int { (codec == .hevc ? 48 : Int(ML_VIDEO_HEADER_BYTES)) + vps.count + sps.count + pps.count + avcc.count }
+    /// chroma_format_idc from the SPS for HEVC (3 is 4:4:4); nil for H.264.
+    var chromaFormat: Int? {
+        guard codec == .hevc else { return nil }
+        let value = sps.withUnsafeBytes { ml_video_hevc_chroma_format($0.bindMemory(to: UInt8.self).baseAddress, $0.count) }
+        return value >= 0 ? Int(value) : nil
+    }
     func validate() throws {
         guard withFrame({ ml_video_frame_validate($0) }) == ML_SESSION_OK else {
-            throw NativeMediaError("Encoded frame exceeds the native stream limits or contains unsupported H.264.")
+            throw NativeMediaError("Encoded frame exceeds the native stream limits or contains an unsupported bitstream.")
         }
     }
     /// Borrows the components as an MLVideoFrame for one Rust call.
     func withFrame<Result>(_ body: (UnsafePointer<MLVideoFrame>) -> Result) -> Result {
         var header = MLVideoHeader()
         header.sequence = sequence; header.timestamp_us = timestamp; header.keyframe = keyframe ? 1 : 0
-        header.width = UInt32(clamping: width); header.height = UInt32(clamping: height)
-        return sps.withUnsafeBytes { sps in
-            pps.withUnsafeBytes { pps in
-                avcc.withUnsafeBytes { avcc in
-                    var frame = MLVideoFrame(header: header,
-                        sps: sps.bindMemory(to: UInt8.self).baseAddress, sps_length: sps.count,
-                        pps: pps.bindMemory(to: UInt8.self).baseAddress, pps_length: pps.count,
-                        avcc: avcc.bindMemory(to: UInt8.self).baseAddress, avcc_length: avcc.count)
-                    return body(&frame)
+        header.width = UInt32(clamping: width); header.height = UInt32(clamping: height); header.codec = codec.raw
+        return vps.withUnsafeBytes { vps in
+            sps.withUnsafeBytes { sps in
+                pps.withUnsafeBytes { pps in
+                    avcc.withUnsafeBytes { avcc in
+                        var frame = MLVideoFrame(header: header,
+                            sps: sps.bindMemory(to: UInt8.self).baseAddress, sps_length: sps.count,
+                            pps: pps.bindMemory(to: UInt8.self).baseAddress, pps_length: pps.count,
+                            avcc: avcc.bindMemory(to: UInt8.self).baseAddress, avcc_length: avcc.count,
+                            vps: vps.bindMemory(to: UInt8.self).baseAddress, vps_length: vps.count)
+                        return body(&frame)
+                    }
                 }
             }
         }
     }
     func formatDescription() throws -> CMVideoFormatDescription {
         var format: CMFormatDescription?
-        let status = sps.withUnsafeBytes { spsBytes in
-            pps.withUnsafeBytes { ppsBytes in
-                let pointers = [spsBytes.bindMemory(to: UInt8.self).baseAddress!, ppsBytes.bindMemory(to: UInt8.self).baseAddress!]
-                let sizes = [sps.count, pps.count]
-                return pointers.withUnsafeBufferPointer { pointers in
-                    sizes.withUnsafeBufferPointer { sizes in
-                        CMVideoFormatDescriptionCreateFromH264ParameterSets(allocator: kCFAllocatorDefault,
-                            parameterSetCount: 2, parameterSetPointers: pointers.baseAddress!, parameterSetSizes: sizes.baseAddress!,
-                            nalUnitHeaderLength: 4, formatDescriptionOut: &format)
-                    }
-                }
+        let sets = codec == .hevc ? [vps, sps, pps] : [sps, pps]
+        guard sets.allSatisfy({ !$0.isEmpty }) else { throw NativeMediaError("Missing video parameter sets.") }
+        // Copies with stable addresses for the duration of the call.
+        let buffers = sets.map { set -> UnsafeMutableBufferPointer<UInt8> in
+            let buffer = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: set.count)
+            _ = buffer.initialize(from: set)
+            return buffer
+        }
+        defer { buffers.forEach { $0.deallocate() } }
+        let pointers = buffers.map { UnsafePointer($0.baseAddress!) }, sizes = buffers.map(\.count)
+        let status = pointers.withUnsafeBufferPointer { pointers in
+            sizes.withUnsafeBufferPointer { sizes in
+                codec == .hevc
+                    ? CMVideoFormatDescriptionCreateFromHEVCParameterSets(allocator: kCFAllocatorDefault, parameterSetCount: 3,
+                          parameterSetPointers: pointers.baseAddress!, parameterSetSizes: sizes.baseAddress!, nalUnitHeaderLength: 4,
+                          extensions: nil, formatDescriptionOut: &format)
+                    : CMVideoFormatDescriptionCreateFromH264ParameterSets(allocator: kCFAllocatorDefault, parameterSetCount: 2,
+                          parameterSetPointers: pointers.baseAddress!, parameterSetSizes: sizes.baseAddress!,
+                          nalUnitHeaderLength: 4, formatDescriptionOut: &format)
             }
         }
-        guard status == noErr, let format else { throw NativeMediaError("Invalid H.264 configuration (\(status)).") }
+        guard status == noErr, let format else { throw NativeMediaError("Invalid \(codec.name) configuration (\(status)).") }
         let dimensions = CMVideoFormatDescriptionGetDimensions(format)
-        guard dimensions.width == width, dimensions.height == height else { throw NativeMediaError("H.264 dimensions disagree with the packet header.") }
+        guard dimensions.width == width, dimensions.height == height else { throw NativeMediaError("Video dimensions disagree with the packet header.") }
         return format
+    }
+}
+
+/// What this Mac's media hardware really does, found at launch by encoding
+/// and decoding one small frame rather than trusting advertised profiles.
+enum NativeCodecSupport {
+    /// True when the hardware encoder produced HEVC with 4:4:4 chroma (read
+    /// back from its SPS) and the hardware decoder then decoded that frame.
+    static func probeHEVC444() -> Bool {
+        let width = 256, height = 144
+        var created: CVPixelBuffer?
+        guard CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA,
+                                  [kCVPixelBufferIOSurfacePropertiesKey as String: [:]] as CFDictionary, &created) == kCVReturnSuccess,
+              let image = created else { return false }
+        CVPixelBufferLockBaseAddress(image, [])
+        if let base = CVPixelBufferGetBaseAddress(image)?.assumingMemoryBound(to: UInt8.self) {
+            let row = CVPixelBufferGetBytesPerRow(image)
+            for y in 0..<height { for x in 0..<width * 4 { base[y * row + x] = UInt8(truncatingIfNeeded: x ^ (y * 7)) } }
+        }
+        CVPixelBufferUnlockBaseAddress(image, [])
+        guard let encoder = try? NativeVideoEncoder(width: width, height: height, framesPerSecond: 30, bitrate: 2_000_000,
+                                                    keyframeSeconds: 1, codec: .hevc) else { return false }
+        defer { encoder.stop() }
+        let lock = NSLock(), encoded = DispatchSemaphore(value: 0), decoded = DispatchSemaphore(value: 0)
+        var packet: NativeVideoPacket?, decodedWidth = 0
+        encoder.onEncodedFrame = { frame, release in lock.lock(); packet = frame.packet; lock.unlock(); release(); encoded.signal() }
+        encoder.onError = { _ in encoded.signal() }
+        guard encoder.encode(image, presentationTime: CMTime(value: 0, timescale: 30)),
+              encoded.wait(timeout: .now() + 3) == .success else { return false }
+        lock.lock(); let result = packet; lock.unlock()
+        guard let result, result.keyframe, result.chromaFormat == 3 else { return false }
+        let decoder = NativeVideoDecoder()
+        defer { decoder.stop() }
+        decoder.onFrame = { frame in lock.lock(); decodedWidth = CVPixelBufferGetWidth(frame); lock.unlock(); decoded.signal() }
+        decoder.onError = { _ in decoded.signal() }
+        guard decoder.decode(result), decoded.wait(timeout: .now() + 3) == .success else { return false }
+        lock.lock(); defer { lock.unlock() }
+        return decodedWidth == width && decoder.hardwareDecoder
     }
 }
 
@@ -167,30 +237,46 @@ final class NativeVideoEncoder {
     private var appliedKeyframeSeconds: Int
     let width: Int
     let height: Int
+    let codec: NativeVideoCodec
+    /// VideoToolbox's name for HEVC with 4:4:4 chroma, as the encoder advertises it.
+    static let hevc444Profile = "HEVC_Main444_AutoLevel"
 
-    init(width: Int, height: Int, framesPerSecond: Int = 60, bitrate: Int = 25_000_000, keyframeSeconds: Int = 2) throws {
+    /// H.264 uses Apple's low-latency encoder. HEVC 4:4:4 needs a normal
+    /// session: the low-latency one silently falls back to 4:2:0, so frame
+    /// reordering is disabled and real-time mode requested instead.
+    init(width: Int, height: Int, framesPerSecond: Int = 60, bitrate: Int = 25_000_000, keyframeSeconds: Int = 2,
+         codec: NativeVideoCodec = .h264) throws {
         guard NativeVideoPacket.validDimensions(width, height), (1...60).contains(framesPerSecond),
               (1_000_000...80_000_000).contains(bitrate) else { throw NativeMediaError("Unsupported video encoder configuration.") }
         guard (1...10).contains(keyframeSeconds) else { throw NativeMediaError("Unsupported keyframe interval.") }
-        self.width = width; self.height = height
+        self.width = width; self.height = height; self.codec = codec
         targetBitrate = bitrate; appliedBitrate = bitrate
         targetFrameRate = framesPerSecond; appliedFrameRate = framesPerSecond
         targetKeyframeSeconds = keyframeSeconds; appliedKeyframeSeconds = keyframeSeconds
-        let specification: [String: Any] = [
-            kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String: true,
-            kVTVideoEncoderSpecification_EnableLowLatencyRateControl as String: true
-        ]
+        var specification: [String: Any] = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String: true]
+        if codec == .h264 { specification[kVTVideoEncoderSpecification_EnableLowLatencyRateControl as String] = true }
         var created: VTCompressionSession?
         let status = VTCompressionSessionCreate(allocator: kCFAllocatorDefault, width: Int32(width), height: Int32(height),
-            codecType: kCMVideoCodecType_H264, encoderSpecification: specification as CFDictionary,
+            codecType: codec == .hevc ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264, encoderSpecification: specification as CFDictionary,
             imageBufferAttributes: nil, compressedDataAllocator: nil, outputCallback: nil, refcon: nil, compressionSessionOut: &created)
-        guard status == noErr, let created else { throw NativeMediaError("Hardware H.264 encoder is unavailable (\(status)).") }
+        guard status == noErr, let created else { throw NativeMediaError("Hardware \(codec.name) encoder is unavailable (\(status)).") }
         session = created
         do {
-            for (key, value) in [
+            if codec == .hevc {
+                // Only a profile this session advertises is ever requested.
+                var supported: CFDictionary?
+                _ = VTSessionCopySupportedPropertyDictionary(created, supportedPropertyDictionaryOut: &supported)
+                let profiles = ((supported as? [String: Any])?[kVTCompressionPropertyKey_ProfileLevel as String] as? [String: Any])?[
+                    kVTPropertySupportedValueListKey as String] as? [String] ?? []
+                guard profiles.contains(Self.hevc444Profile),
+                      VTSessionSetProperty(created, key: kVTCompressionPropertyKey_ProfileLevel, value: Self.hevc444Profile as CFString) == noErr
+                else { throw NativeMediaError("This Mac's HEVC encoder does not offer 4:4:4.") }
+            }
+            let profile: [(CFString, CFTypeRef)] = codec == .h264
+                ? [(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel as CFTypeRef)] : []
+            for (key, value) in profile + [
                 (kVTCompressionPropertyKey_RealTime, kCFBooleanTrue as CFTypeRef),
                 (kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse as CFTypeRef),
-                (kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel as CFTypeRef),
                 (kVTCompressionPropertyKey_AverageBitRate, bitrate as CFNumber),
                 (kVTCompressionPropertyKey_ExpectedFrameRate, framesPerSecond as CFNumber),
                 (kVTCompressionPropertyKey_MaxKeyFrameInterval, (framesPerSecond * keyframeSeconds) as CFNumber),
@@ -311,21 +397,30 @@ final class NativeVideoEncoder {
             fail(token, "Hardware encoder did not produce a complete frame (\(status))."); return
         }
         do {
+            let subtype = codec == .hevc ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264
             guard let format = CMSampleBufferGetFormatDescription(sample),
-                  CMFormatDescriptionGetMediaSubType(format) == kCMVideoCodecType_H264,
-                  let block = CMSampleBufferGetDataBuffer(sample) else { throw NativeMediaError("Encoder output is not H.264.") }
+                  CMFormatDescriptionGetMediaSubType(format) == subtype,
+                  let block = CMSampleBufferGetDataBuffer(sample) else { throw NativeMediaError("Encoder output is not \(codec.name).") }
+            // H.264: SPS, PPS. HEVC: VPS, SPS, PPS.
+            let expected = codec == .hevc ? 3 : 2
             var parameterSets: [Data] = []
-            for index in 0..<2 {
+            for index in 0..<expected {
                 var pointer: UnsafePointer<UInt8>?, size = 0, count = 0
                 var headerLength: Int32 = 0
-                let result = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format, parameterSetIndex: index,
-                    parameterSetPointerOut: &pointer, parameterSetSizeOut: &size, parameterSetCountOut: &count,
-                    nalUnitHeaderLengthOut: &headerLength)
-                guard result == noErr, let pointer, (1...4096).contains(size), count == 2, headerLength == 4 else {
-                    throw NativeMediaError("Unsupported H.264 parameter sets.")
+                let result = codec == .hevc
+                    ? CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(format, parameterSetIndex: index,
+                        parameterSetPointerOut: &pointer, parameterSetSizeOut: &size, parameterSetCountOut: &count,
+                        nalUnitHeaderLengthOut: &headerLength)
+                    : CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format, parameterSetIndex: index,
+                        parameterSetPointerOut: &pointer, parameterSetSizeOut: &size, parameterSetCountOut: &count,
+                        nalUnitHeaderLengthOut: &headerLength)
+                guard result == noErr, let pointer, (1...4096).contains(size), count == expected, headerLength == 4 else {
+                    throw NativeMediaError("Unsupported \(codec.name) parameter sets.")
                 }
                 parameterSets.append(Data(bytes: pointer, count: size))
             }
+            let (vps, sps, pps) = codec == .hevc
+                ? (parameterSets[0], parameterSets[1], parameterSets[2]) : (Data(), parameterSets[0], parameterSets[1])
             let size = CMBlockBufferGetDataLength(block)
             guard size > 0, size <= NativeVideoPacket.maximumBytes else { throw NativeMediaError("Encoded video frame is too large.") }
             var bytes = Data(count: size)
@@ -335,13 +430,13 @@ final class NativeVideoEncoder {
             let keyframe = attachments?.first?[kCMSampleAttachmentKey_NotSync] as? Bool != true
             let timestamp = CMSampleBufferGetPresentationTimeStamp(sample).seconds
             guard timestamp.isFinite, timestamp >= 0, timestamp < Double(UInt64.max) / 1_000_000 else { throw NativeMediaError("Invalid capture timestamp.") }
-            try NativeVideoPacket(width: width, height: height, sequence: 0, timestamp: UInt64(timestamp * 1_000_000),
-                keyframe: keyframe, sps: parameterSets[0], pps: parameterSets[1], avcc: bytes).validate()
+            try NativeVideoPacket(codec: codec, width: width, height: height, sequence: 0, timestamp: UInt64(timestamp * 1_000_000),
+                keyframe: keyframe, vps: vps, sps: sps, pps: pps, avcc: bytes).validate()
             lock.lock()
             sequence &+= 1; consecutiveFailures = 0
-            let packet = NativeVideoPacket(width: width, height: height, sequence: sequence,
-                timestamp: UInt64(timestamp * 1_000_000), keyframe: keyframe,
-                sps: parameterSets[0], pps: parameterSets[1], avcc: bytes)
+            let packet = NativeVideoPacket(codec: codec, width: width, height: height, sequence: sequence,
+                timestamp: UInt64(timestamp * 1_000_000), keyframe: keyframe, vps: vps, sps: sps, pps: pps, avcc: bytes)
+            if let chroma = packet.chromaFormat { metrics.chroma_format = chroma }
             metrics.encode_ms = max(0, (ProcessInfo.processInfo.systemUptime - began) * 1000)
             let milliseconds = max(0, (ProcessInfo.processInfo.systemUptime - began) * 1000)
             metrics.encoded_frames &+= 1; metrics.encoded_bytes &+= UInt64(packet.wireSize); metrics.target_bitrate = appliedBitrate
@@ -385,11 +480,17 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var bitrate: Int
     private var keyframeSeconds: Int
     private var inFlightLimit: Int
+    /// Requested codec; HEVC falls back to H.264 if its encoder cannot start.
+    private let requestedCodec: NativeVideoCodec
+    /// The codec actually in use once capture has started.
+    private(set) var codec: NativeVideoCodec = .h264
     /// Called on the capture queue for each complete captured frame.
     var onCapturedFrame: (() -> Void)?
 
     init(maxPixelWidth: Int = 3840, maxPixelHeight: Int = 2160, framesPerSecond: Int = 60, showsCursor: Bool = true,
-         bitrate: Int = 25_000_000, keyframeSeconds: Int = 2, inFlightLimit: Int = NativeVideoEncoder.maxInFlight) {
+         bitrate: Int = 25_000_000, keyframeSeconds: Int = 2, inFlightLimit: Int = NativeVideoEncoder.maxInFlight,
+         codec: NativeVideoCodec = .h264) {
+        requestedCodec = codec
         self.bitrate = min(80_000_000, max(1_000_000, bitrate))
         self.keyframeSeconds = min(10, max(1, keyframeSeconds))
         self.inFlightLimit = min(NativeVideoEncoder.maxInFlight, max(1, inFlightLimit))
@@ -420,8 +521,12 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 let height = max(16, Int(Double(displayMode.pixelHeight) * scale) / 2 * 2)
                 let geometry = NativeDisplayGeometry(x: logical.minX, y: logical.minY, width: logical.width, height: logical.height, pixelWidth: width, pixelHeight: height)
                 guard geometry.isValid else { throw NativeMediaError("Unsupported main-display geometry.") }
-                let encoder = try NativeVideoEncoder(width: width, height: height, framesPerSecond: self.framesPerSecond,
-                                                     bitrate: self.bitrate, keyframeSeconds: self.keyframeSeconds)
+                let make = { (codec: NativeVideoCodec) in
+                    try NativeVideoEncoder(width: width, height: height, framesPerSecond: self.framesPerSecond,
+                                           bitrate: self.bitrate, keyframeSeconds: self.keyframeSeconds, codec: codec)
+                }
+                let encoder = self.requestedCodec == .hevc ? try ((try? make(.hevc)) ?? make(.h264)) : try make(.h264)
+                self.codec = encoder.codec
                 encoder.setInFlightLimit(self.inFlightLimit)
                 encoder.onEncodedFrame = { [weak self] frame, release in
                     guard let callback = self?.onEncodedFrame else { release(); return }
@@ -570,7 +675,8 @@ final class NativeVideoDecoder {
     private let keyframeRetryInterval: TimeInterval
     private var session: VTDecompressionSession?
     private var format: CMFormatDescription?
-    private var sps = Data(), pps = Data()
+    private var vps = Data(), sps = Data(), pps = Data()
+    private var codec: NativeVideoCodec = .h264
     private var lastSequence: UInt64?
     private var usingHardwareDecoder = false
     var hardwareDecoder: Bool { lock.lock(); defer { lock.unlock() }; return usingHardwareDecoder }
@@ -631,7 +737,7 @@ final class NativeVideoDecoder {
         guard active else { return }
         do {
             let sequenceGap = lastSequence.map { $0 == UInt64.max || packet.sequence != $0 + 1 } ?? true
-            let newFormat = packet.sps != sps || packet.pps != pps
+            let newFormat = packet.codec != codec || packet.vps != vps || packet.sps != sps || packet.pps != pps
             if broken || sequenceGap || newFormat {
                 guard packet.keyframe else { notifyRecovery("Waiting for a keyframe after a video discontinuity.", reportError: false); return }
                 try createSession(packet)
@@ -683,14 +789,14 @@ final class NativeVideoDecoder {
         let result = VTDecompressionSessionCreate(allocator: kCFAllocatorDefault, formatDescription: format,
             decoderSpecification: specification, imageBufferAttributes: attributes as CFDictionary,
             outputCallback: nil, decompressionSessionOut: &created)
-        guard result == noErr, let created else { throw NativeMediaError("Hardware H.264 decoder is unavailable (\(result)).") }
+        guard result == noErr, let created else { throw NativeMediaError("Hardware \(packet.codec.name) decoder is unavailable (\(result)).") }
         _ = VTSessionSetProperty(created, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         var hardware: Unmanaged<CFTypeRef>?
         guard VTSessionCopyProperty(created, key: kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
             allocator: kCFAllocatorDefault, valueOut: &hardware) == noErr, (hardware?.takeRetainedValue() as? Bool) == true else {
             VTDecompressionSessionInvalidate(created); throw NativeMediaError("Hardware decoding could not be verified.")
         }
-        session = created; self.format = format; sps = packet.sps; pps = packet.pps; lastSequence = nil
+        session = created; self.format = format; codec = packet.codec; vps = packet.vps; sps = packet.sps; pps = packet.pps; lastSequence = nil
         lock.lock(); usingHardwareDecoder = true; lock.unlock()
     }
     func stop() {

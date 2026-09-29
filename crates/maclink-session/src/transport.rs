@@ -10,15 +10,19 @@
 use crate::clipboard::{self, ClipboardKind, ClipboardPacket, MAX_CLIPBOARD};
 use crate::control::ControlMessage;
 use crate::input::InputEvent;
-use crate::policy::{Admission, CLIPBOARD, CONTROL, INPUT, ReceivePolicy, Role, TELEMETRY, VIDEO};
+use crate::policy::{
+    Admission, CAPABILITY_HEVC_444, CLIPBOARD, CONTROL, INPUT, PROTOCOL_MAX, PROTOCOL_MIN,
+    ReceivePolicy, Role, TELEMETRY, VIDEO,
+};
 use crate::telemetry::{MAX_TELEMETRY, TelemetryMessage};
+use crate::video::Codec;
 use crate::video::{VideoFrame, VideoPacket};
 use crate::{Error, Result};
 use snow::{Builder, HandshakeState, StatelessTransportState};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
@@ -26,7 +30,38 @@ use zeroize::{Zeroize, Zeroizing};
 pub(crate) const PATTERN: &str = "Noise_NKpsk0_25519_ChaChaPoly_BLAKE2s";
 pub(crate) const PROLOGUE: &[u8] = b"MacLink direct session v1";
 /// Names the application message formats; mismatched builds fail the handshake.
-pub(crate) const HANDSHAKE_PAYLOAD: &[u8] = b"maclink-session/4";
+/// What this build offers: `maclink-session/N` for the highest version.
+#[cfg(test)]
+pub(crate) const HANDSHAKE_PAYLOAD: &[u8] = b"maclink-session/5";
+const _: () = assert!(PROTOCOL_MAX == 5);
+/// This process's capabilities, announced in every protocol 5 session.
+static LOCAL_CAPABILITIES: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+thread_local! {
+    /// The version connect offers on this test thread; framing tests use 4.
+    pub(crate) static TEST_OFFER: std::cell::Cell<u32> = const { std::cell::Cell::new(PROTOCOL_MAX) };
+}
+pub(crate) fn set_local_capabilities(capabilities: u64) {
+    LOCAL_CAPABILITIES.store(capabilities, Ordering::Release);
+}
+
+fn handshake_payload(version: u32) -> Vec<u8> {
+    format!("maclink-session/{version}").into_bytes()
+}
+/// Accepts only `maclink-session/` and a decimal version without leading zeros.
+pub(crate) fn handshake_version(payload: &[u8]) -> Option<u32> {
+    let digits = std::str::from_utf8(payload)
+        .ok()?
+        .strip_prefix("maclink-session/")?;
+    if digits.is_empty()
+        || digits.len() > 4
+        || digits.starts_with('0')
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    digits.parse().ok()
+}
 pub(crate) const MAX_VIDEO: usize = crate::video::MAX_PACKET;
 pub(crate) const MAX_INPUT: usize = 256;
 pub(crate) const MAX_CONTROL: usize = 1024;
@@ -162,20 +197,27 @@ pub(crate) fn write_record(stream: &TcpStream, data: &[u8], end: Instant) -> Res
 pub(crate) fn builder<'a>() -> Result<Builder<'a>> {
     Ok(Builder::new(PATTERN.parse().map_err(|_| Error::Internal)?))
 }
+/// Returns the transport keys and the negotiated protocol version. The
+/// initiator offers `offer`; the responder answers with the lower of that and
+/// the highest it speaks, or with exactly `exact` when set (as builds before
+/// protocol 5 did, for tests).
 fn handshake(
     mut noise: HandshakeState,
     stream: &TcpStream,
     initiator: bool,
     end: Instant,
-) -> Result<StatelessTransportState> {
+    offer: u32,
+    exact: Option<u32>,
+) -> Result<(StatelessTransportState, u32)> {
     stream.set_nodelay(true).map_err(io_error)?;
     let mut incoming = [0_u8; 1024];
     let mut outgoing = [0_u8; 1024];
     let mut payload = [0_u8; 1024];
+    let mut version = offer;
     for send in [initiator, !initiator] {
         if send {
             let size = noise
-                .write_message(HANDSHAKE_PAYLOAD, &mut outgoing)
+                .write_message(&handshake_payload(version), &mut outgoing)
                 .map_err(|_| Error::Auth)?;
             write_record(stream, &outgoing[..size], end)?;
         } else {
@@ -183,9 +225,13 @@ fn handshake(
             let count = noise
                 .read_message(&incoming[..size], &mut payload)
                 .map_err(|_| Error::Auth)?;
-            if &payload[..count] != HANDSHAKE_PAYLOAD {
-                return Err(Error::Protocol);
-            }
+            let peer = handshake_version(&payload[..count]).ok_or(Error::Protocol)?;
+            version = match (initiator, exact) {
+                (true, _) if (PROTOCOL_MIN..=offer).contains(&peer) => peer,
+                (false, Some(only)) if peer == only => only,
+                (false, None) if peer >= PROTOCOL_MIN => peer.min(offer),
+                _ => return Err(Error::Protocol),
+            };
         }
     }
     if !noise.is_handshake_finished() {
@@ -222,7 +268,7 @@ fn handshake(
             }
         }
     }
-    Ok(crypto)
+    Ok((crypto, version))
 }
 
 pub(crate) enum Outgoing<'a> {
@@ -268,20 +314,38 @@ pub(crate) struct Session {
     pub(crate) socket: TcpStream,
     pub(crate) crypto: StatelessTransportState,
     pub(crate) role: Role,
+    /// The negotiated protocol version.
+    pub(crate) version: u32,
+    pub(crate) local_capabilities: u64,
+    /// What the peer announced in its Hello; zero before it and in protocol 4.
+    pub(crate) peer_capabilities: AtomicU64,
     send: Mutex<Counter>,
     pub(crate) receive: Mutex<Inbound>,
     pub(crate) closed: AtomicBool,
 }
 impl Session {
-    fn new(socket: TcpStream, crypto: StatelessTransportState, role: Role) -> Self {
+    fn new(socket: TcpStream, crypto: StatelessTransportState, role: Role, version: u32) -> Self {
+        let local_capabilities = if version >= 5 {
+            LOCAL_CAPABILITIES.load(Ordering::Acquire)
+        } else {
+            0
+        };
         Self {
             socket,
             crypto,
             role,
+            version,
+            local_capabilities,
+            peer_capabilities: AtomicU64::new(0),
             send: Mutex::new(Counter::default()),
             receive: Mutex::new(Inbound {
                 counter: Counter::default(),
-                policy: ReceivePolicy::new(role, Instant::now()),
+                policy: ReceivePolicy::for_version(
+                    role,
+                    version,
+                    local_capabilities,
+                    Instant::now(),
+                ),
                 grace: MESSAGE_GRACE,
             }),
             closed: AtomicBool::new(false),
@@ -299,10 +363,32 @@ impl Session {
         }
     }
 
+    /// Protocol 5 sessions start with each side's Hello.
+    fn established(self, end: Instant) -> Result<Arc<Self>> {
+        let session = Arc::new(self);
+        if session.version >= 5 {
+            let hello = ControlMessage::Hello(session.local_capabilities);
+            session.send_message(
+                &Outgoing::Control(hello),
+                end.max(Instant::now() + HANDSHAKE_GRACE),
+            )?;
+        }
+        Ok(session)
+    }
+
     /// Invalid or misdirected messages fail before any byte is written and do
     /// not close the session. A failed write closes it: frames cannot resume.
     pub(crate) fn send_message(&self, message: &Outgoing<'_>, end: Instant) -> Result<()> {
         match message {
+            // HEVC only to a viewer that announced it decodes HEVC 4:4:4.
+            Outgoing::Video(frame)
+                if frame.header.codec == Codec::Hevc
+                    && self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_HEVC_444
+                        == 0 =>
+            {
+                Err(Error::Invalid)
+            }
+            Outgoing::Control(ControlMessage::Hello(_)) if self.version < 5 => Err(Error::Invalid),
             Outgoing::Video(frame) => self.send_bytes(VIDEO, &frame.encode()?, end),
             Outgoing::Input(event) => self.send_bytes(INPUT, &event.encode(), end),
             Outgoing::Control(control) if self.role.may_send_control(control.kind()) => {
@@ -390,7 +476,13 @@ impl Session {
                 Ok((policy.admit(&message, Instant::now())?, message))
             })();
             match decoded {
-                Ok((Admission::Deliver, message)) => return Ok(message),
+                Ok((Admission::Deliver, message)) => {
+                    if let Incoming::Control(ControlMessage::Hello(capabilities)) = message {
+                        self.peer_capabilities
+                            .store(capabilities, Ordering::Release);
+                    }
+                    return Ok(message);
+                }
                 Ok((Admission::Skip, _)) => continue,
                 Err(error) => {
                     if is_large(kind) {
@@ -524,6 +616,8 @@ pub(crate) struct Listener {
     pub(crate) closed: AtomicBool,
     accepting: Mutex<()>,
     pending: Mutex<Option<TcpStream>>,
+    /// Nonzero: accept only this protocol version, as builds before 5 did.
+    pub(crate) exact_version: AtomicU32,
 }
 impl Listener {
     pub(crate) fn bind(
@@ -540,6 +634,7 @@ impl Listener {
             closed: AtomicBool::new(false),
             accepting: Mutex::new(()),
             pending: Mutex::new(None),
+            exact_version: AtomicU32::new(0),
         })
     }
     fn close(&self) {
@@ -581,11 +676,15 @@ impl Listener {
                 .map_err(|_| Error::Auth)?
                 .build_responder()
                 .map_err(|_| Error::Auth)?;
-            let crypto = handshake(noise, &socket, false, end)?;
+            let exact = match self.exact_version.load(Ordering::Acquire) {
+                0 => None,
+                only => Some(only),
+            };
+            let (crypto, version) = handshake(noise, &socket, false, end, PROTOCOL_MAX, exact)?;
             if self.closed.load(Ordering::Acquire) {
                 return Err(Error::Closed);
             }
-            Ok(Arc::new(Session::new(socket, crypto, Role::Host)))
+            Session::new(socket, crypto, Role::Host, version).established(end)
         })();
         lock(&self.pending)?.take();
         result
@@ -682,6 +781,9 @@ fn resolve(host: &str, port: u16, end: Instant) -> Result<Vec<SocketAddr>> {
         .map_err(|_| Error::Timeout)?
 }
 /// `host` must already be normalized by the shared host rule.
+/// Offers the newest protocol. A host from before protocol 5 closes the
+/// connection when it sees a newer version, so one more attempt offers the
+/// oldest; both happen within `end`.
 pub(crate) fn connect(
     host: &str,
     port: u16,
@@ -689,29 +791,59 @@ pub(crate) fn connect(
     psk: &[u8; 32],
     end: Instant,
 ) -> Result<Arc<Session>> {
+    #[cfg(test)]
+    let offer = TEST_OFFER.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    let offer = PROTOCOL_MAX;
+    match connect_offering(host, port, public, psk, end, offer) {
+        Err((true, Error::Closed | Error::Protocol)) if offer > PROTOCOL_MIN => {
+            connect_offering(host, port, public, psk, end, PROTOCOL_MIN).map_err(|(_, error)| error)
+        }
+        result => result.map_err(|(_, error)| error),
+    }
+}
+
+/// On failure, also says whether a TCP connection reached the handshake.
+pub(crate) fn connect_offering(
+    host: &str,
+    port: u16,
+    public: &[u8; 32],
+    psk: &[u8; 32],
+    end: Instant,
+    offer: u32,
+) -> std::result::Result<Arc<Session>, (bool, Error)> {
     if port == 0 {
-        return Err(Error::Invalid);
+        return Err((false, Error::Invalid));
     }
     let mut last = Error::Io;
-    for address in resolve(host, port, end)? {
-        let socket = match TcpStream::connect_timeout(&address, remaining(end)?) {
+    for address in resolve(host, port, end).map_err(|error| (false, error))? {
+        let socket = match TcpStream::connect_timeout(
+            &address,
+            remaining(end).map_err(|error| (false, error))?,
+        ) {
             Ok(socket) => socket,
             Err(error) => {
                 last = io_error(error);
                 continue;
             }
         };
-        let noise = builder()?
-            .remote_public_key(public)
-            .map_err(|_| Error::Auth)?
-            .psk(0, psk)
-            .map_err(|_| Error::Auth)?
-            .prologue(PROLOGUE)
-            .map_err(|_| Error::Auth)?
-            .build_initiator()
-            .map_err(|_| Error::Auth)?;
-        let crypto = handshake(noise, &socket, true, end)?;
-        return Ok(Arc::new(Session::new(socket, crypto, Role::Viewer)));
+        let noise = (|| -> Result<HandshakeState> {
+            builder()?
+                .remote_public_key(public)
+                .map_err(|_| Error::Auth)?
+                .psk(0, psk)
+                .map_err(|_| Error::Auth)?
+                .prologue(PROLOGUE)
+                .map_err(|_| Error::Auth)?
+                .build_initiator()
+                .map_err(|_| Error::Auth)
+        })()
+        .map_err(|error| (false, error))?;
+        let (crypto, version) =
+            handshake(noise, &socket, true, end, offer, None).map_err(|error| (true, error))?;
+        return Session::new(socket, crypto, Role::Viewer, version)
+            .established(end)
+            .map_err(|error| (true, error));
     }
-    Err(last)
+    Err((false, last))
 }

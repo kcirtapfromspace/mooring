@@ -14,6 +14,14 @@ pub(crate) const CONTROL: u8 = 3;
 pub(crate) const TELEMETRY: u8 = 4;
 pub(crate) const CLIPBOARD: u8 = 5;
 
+/// Protocol versions this build speaks. 4 is the preview 4-8 protocol; 5 adds
+/// a capability exchange, so later features switch on only when both sides
+/// support them and mixed versions keep connecting.
+pub(crate) const PROTOCOL_MIN: u32 = 4;
+pub(crate) const PROTOCOL_MAX: u32 = 5;
+/// The viewer decodes HEVC 4:4:4 in hardware, so the host may send it.
+pub(crate) const CAPABILITY_HEVC_444: u64 = 1;
+
 /// No complete authenticated message for this long ends the session. Viewers
 /// ping every second and hosts answer, so a healthy idle desktop stays open.
 pub(crate) const IDLE_LIMIT: Duration = Duration::from_secs(10);
@@ -68,9 +76,15 @@ impl Role {
         match self {
             Self::Host => matches!(
                 kind,
-                ControlKind::Geometry | ControlKind::InputState | ControlKind::Pong
+                ControlKind::Geometry
+                    | ControlKind::InputState
+                    | ControlKind::Pong
+                    | ControlKind::Hello
             ),
-            Self::Viewer => matches!(kind, ControlKind::Ping | ControlKind::Keyframe),
+            Self::Viewer => matches!(
+                kind,
+                ControlKind::Ping | ControlKind::Keyframe | ControlKind::Hello
+            ),
         }
     }
     /// Both sides report stats; only the viewer tunes the sharing host.
@@ -94,6 +108,10 @@ pub(crate) enum Admission {
 
 pub(crate) struct ReceivePolicy {
     role: Role,
+    version: u32,
+    /// This side's capabilities, fixed for the session.
+    local_capabilities: u64,
+    hello: bool,
     window_start: Instant,
     window_count: u32,
     clipboard_count: u32,
@@ -105,9 +123,21 @@ pub(crate) struct ReceivePolicy {
 }
 
 impl ReceivePolicy {
+    #[cfg(test)]
     pub(crate) fn new(role: Role, now: Instant) -> Self {
+        Self::for_version(role, PROTOCOL_MIN, 0, now)
+    }
+    pub(crate) fn for_version(
+        role: Role,
+        version: u32,
+        local_capabilities: u64,
+        now: Instant,
+    ) -> Self {
         Self {
             role,
+            version,
+            local_capabilities,
+            hello: false,
             window_start: now,
             window_count: 0,
             clipboard_count: 0,
@@ -132,6 +162,21 @@ impl ReceivePolicy {
         };
         if !allowed || !self.role.may_receive(kind) {
             return Err(Error::Protocol);
+        }
+        match message {
+            // A Hello needs protocol 5 and arrives at most once.
+            Incoming::Control(ControlMessage::Hello(_)) if self.version < 5 || self.hello => {
+                return Err(Error::Protocol);
+            }
+            Incoming::Control(ControlMessage::Hello(_)) => self.hello = true,
+            // HEVC only reaches a side that declared it decodes HEVC 4:4:4.
+            Incoming::Video(packet)
+                if packet.header.codec == crate::video::Codec::Hevc
+                    && self.local_capabilities & CAPABILITY_HEVC_444 == 0 =>
+            {
+                return Err(Error::Protocol);
+            }
+            _ => {}
         }
         if now.saturating_duration_since(self.window_start) >= WINDOW {
             self.window_start = now;
@@ -209,6 +254,7 @@ mod tests {
     fn video() -> Incoming {
         Incoming::Video(VideoPacket {
             header: VideoHeader::default(),
+            vps: 0..0,
             sps: 0..1,
             pps: 1..2,
             avcc: 2..3,
@@ -344,6 +390,38 @@ mod tests {
                 policy.admit(&clipboard(), now + WINDOW).is_ok(),
                 "a new window resets the budget"
             );
+        }
+    }
+
+    #[test]
+    fn hello_needs_protocol_5_and_arrives_once() {
+        let now = Instant::now();
+        let hello = || control(ControlMessage::Hello(CAPABILITY_HEVC_444));
+        let mut old = ReceivePolicy::for_version(Role::Host, 4, 0, now);
+        assert_eq!(old.admit(&hello(), now), Err(Error::Protocol));
+        let mut new = ReceivePolicy::for_version(Role::Host, 5, 0, now);
+        assert_eq!(new.admit(&hello(), now), Ok(Admission::Deliver));
+        assert_eq!(new.admit(&hello(), now), Err(Error::Protocol));
+    }
+
+    #[test]
+    fn hevc_reaches_only_a_side_that_declared_it() {
+        let now = Instant::now();
+        let hevc = || {
+            let mut packet = match video() {
+                Incoming::Video(packet) => packet,
+                _ => unreachable!(),
+            };
+            packet.header.codec = crate::video::Codec::Hevc;
+            Incoming::Video(packet)
+        };
+        for (capabilities, expected) in [
+            (0, Err(Error::Protocol)),
+            (CAPABILITY_HEVC_444, Ok(Admission::Deliver)),
+        ] {
+            let mut policy = ReceivePolicy::for_version(Role::Viewer, 5, capabilities, now);
+            policy.admit(&geometry(), now).unwrap();
+            assert_eq!(policy.admit(&hevc(), now), expected);
         }
     }
 

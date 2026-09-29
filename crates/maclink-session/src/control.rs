@@ -48,6 +48,8 @@ pub(crate) enum ControlKind {
     Ping = 3,
     Pong = 4,
     Keyframe = 5,
+    /// Protocol 5: each side's capabilities, sent once at session start.
+    Hello = 6,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -62,6 +64,8 @@ pub(crate) enum ControlMessage {
     Ping(u64),
     Pong(u64),
     Keyframe,
+    /// Capability bits in the ping_id field; unknown bits are ignored.
+    Hello(u64),
 }
 
 impl ControlMessage {
@@ -88,6 +92,7 @@ impl ControlMessage {
             3 if geometry.is_zero() && !enabled => Self::Ping(ping_id),
             4 if geometry.is_zero() && !enabled => Self::Pong(ping_id),
             5 if geometry.is_zero() && !enabled && ping_id == 0 => Self::Keyframe,
+            6 if geometry.is_zero() && !enabled => Self::Hello(ping_id),
             _ => return Err(Error::Invalid),
         };
         Ok(message)
@@ -100,6 +105,7 @@ impl ControlMessage {
             Self::Ping(_) => ControlKind::Ping,
             Self::Pong(_) => ControlKind::Pong,
             Self::Keyframe => ControlKind::Keyframe,
+            Self::Hello(_) => ControlKind::Hello,
         }
     }
 
@@ -113,7 +119,9 @@ impl ControlMessage {
             Self::InputState { input_enabled } => {
                 (input_enabled.into(), 0, DisplayGeometry::default())
             }
-            Self::Ping(id) | Self::Pong(id) => (0, id, DisplayGeometry::default()),
+            Self::Ping(id) | Self::Pong(id) | Self::Hello(id) => {
+                (0, id, DisplayGeometry::default())
+            }
             Self::Keyframe => (0, 0, DisplayGeometry::default()),
         }
     }
@@ -286,11 +294,19 @@ mod tests {
             (5, 0, 1, zero),    // keyframe carries nothing
             (5, 1, 0, zero),
             (5, 0, 0, display),
+            (6, 1, 3, zero), // hello carries only capabilities
+            (6, 0, 3, display),
             (0, 0, 0, zero), // unknown kinds
-            (6, 0, 0, zero),
+            (7, 0, 0, zero),
         ] {
             assert!(ControlMessage::from_parts(kind, enabled, id, value).is_err());
         }
+        let hello = ControlMessage::Hello(u64::MAX);
+        assert_eq!(
+            ControlMessage::decode(&hello.encode()),
+            Ok(hello),
+            "unknown capability bits survive"
+        );
     }
 
     #[test]

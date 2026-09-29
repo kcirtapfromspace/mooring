@@ -25,6 +25,8 @@ enum NativeControlMessage: Equatable {
     case ping(UInt64)
     case pong(UInt64)
     case keyframe
+    /// Protocol 5: the peer's capabilities. Rust sends ours automatically.
+    case hello(UInt64)
 
     var raw: MLControlMessage {
         var raw = MLControlMessage()
@@ -35,6 +37,7 @@ enum NativeControlMessage: Equatable {
         case .ping(let id): raw.kind = UInt8(ML_CONTROL_PING); raw.ping_id = id
         case .pong(let id): raw.kind = UInt8(ML_CONTROL_PONG); raw.ping_id = id
         case .keyframe: raw.kind = UInt8(ML_CONTROL_KEYFRAME)
+        case .hello(let capabilities): raw.kind = UInt8(ML_CONTROL_HELLO); raw.ping_id = capabilities
         }
         return raw
     }
@@ -46,6 +49,7 @@ enum NativeControlMessage: Equatable {
         case ML_CONTROL_PING: self = .ping(raw.ping_id)
         case ML_CONTROL_PONG: self = .pong(raw.ping_id)
         case ML_CONTROL_KEYFRAME: self = .keyframe
+        case ML_CONTROL_HELLO: self = .hello(raw.ping_id)
         default: throw NativeSessionError(message: "The other Mac sent an unsupported session command.")
         }
     }

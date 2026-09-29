@@ -159,6 +159,24 @@ Each frame cost about 0.2 ms on the processor and at most 0.4 ms on the GPU. On 
 
 The complete local validation script passed with 153 Rust tests and every native Swift suite.
 
+## HEVC 4:4:4 and protocol negotiation
+
+For `v0.3.0-preview.9`, the session protocol negotiates versions 4–5. The Rust suite covers:
+
+- version negotiation in both directions, and fallback to a host that accepts only version 4;
+- the Hello rules: at most once, version 5 only, unknown bits kept;
+- `MLV2` HEVC packets and their malformed variants;
+- SPS chroma parsing, including an emulation-prevention byte;
+- HEVC gated on the peer's capability on send and on the local capability on receive.
+
+On the build Mac (M1 Ultra), the native media suite ran 120 paced 1080p frames through the hardware HEVC 4:4:4 encoder and decoder, at 60 fps:
+
+- Every SPS reported 4:4:4.
+- ffprobe independently read HEVC Rext `yuv444p` with no B-frames.
+- Encode averaged about 10.4 ms and decode about 3.4 ms (`target/native-media-report.json`).
+
+The encrypted loopback added a version 5 phase in which the viewer decoded HEVC 4:4:4 from the host after the capability exchange. The viewing Mac's hardware decode support isn't known here; its launch self-test decides.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

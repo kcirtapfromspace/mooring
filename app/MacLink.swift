@@ -459,14 +459,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             let stop = NSMenuItem(title: "Stop Sharing This Mac", action: #selector(stopNativeSharing), keyEquivalent: "")
             stop.target = self; statusMenu.addItem(stop)
         }
-        if let version = updater.readyVersion {
-            let install = NSMenuItem(title: "Install Update \(version) & Relaunch", action: #selector(installUpdate), keyEquivalent: "")
-            install.target = self; install.toolTip = "Installs now. Otherwise it installs automatically when no session is connected."
-            statusMenu.addItem(install)
-        } else if updater.isAvailable {
-            let check = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
-            check.target = self; statusMenu.addItem(check)
-        }
         let clipboard = NSMenuItem(title: "Shared Clipboard", action: #selector(toggleSharedClipboard), keyEquivalent: "")
         clipboard.target = self; clipboard.state = native.sharesClipboard ? .on : .off
         clipboard.toolTip = "Copy on one Mac and paste on the other during a MacLink session."
@@ -516,6 +508,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         settings.target = self
         settings.isEnabled = available
         statusMenu.addItem(settings)
+        // Version and updates sit together, just above Quit.
+        statusMenu.addItem(.separator())
+        let release = Bundle.main.object(forInfoDictionaryKey: "MacLinkReleaseVersion") as? String ?? "development"
+        let version = NSMenuItem(title: "Version \(release)", action: nil, keyEquivalent: "")
+        version.isEnabled = false; statusMenu.addItem(version)
+        if let ready = updater.readyVersion {
+            let install = NSMenuItem(title: "Install Update \(ready) & Relaunch", action: #selector(installUpdate), keyEquivalent: "")
+            install.target = self; install.toolTip = "Installs now. Otherwise it installs automatically when no session is connected."
+            statusMenu.addItem(install)
+        } else if updater.isAvailable {
+            let check = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+            check.target = self; statusMenu.addItem(check)
+        }
         statusMenu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit MacLink", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp

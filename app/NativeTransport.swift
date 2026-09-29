@@ -60,6 +60,10 @@ final class NativeTransport: @unchecked Sendable {
         return NativeTransport(handle, receivesVideo: true)
     }
     var listeningPort: UInt16 { ml_session_listener_port(id) }
+    /// 4 or 5; capabilities are exchanged only in protocol 5.
+    var protocolVersion: Int { Int(max(0, ml_session_protocol_version(id))) }
+    /// What the peer announced; zero until its Hello arrives.
+    var peerCapabilities: UInt64 { var value: UInt64 = 0; _ = ml_session_peer_capabilities(id, &value); return value }
     func accept() throws -> NativeTransport? {
         var session: UInt64 = 0
         let result = ml_session_accept(id, 1_000, &session)
@@ -101,7 +105,8 @@ final class NativeTransport: @unchecked Sendable {
         case ML_SESSION_VIDEO:
             let packet = message.video
             func slice(_ offset: Int, _ length: Int) -> Data { Data(videoBuffer[offset..<(offset + length)]) }
-            return .video(NativeVideoPacket(header: packet.header, sps: slice(packet.sps_offset, packet.sps_length),
+            return .video(NativeVideoPacket(header: packet.header, vps: slice(packet.vps_offset, packet.vps_length),
+                                            sps: slice(packet.sps_offset, packet.sps_length),
                                             pps: slice(packet.pps_offset, packet.pps_length),
                                             avcc: slice(packet.avcc_offset, packet.avcc_length)))
         case ML_SESSION_INPUT: return .input(try NativeInputEvent(message.input))

@@ -14,7 +14,7 @@ use crate::telemetry::{
     validate_stats,
 };
 use crate::transport::{self, Handle, Incoming, Listener, Outgoing, deadline};
-use crate::video::{VideoFrame, VideoHeader, valid_dimensions};
+use crate::video::{Codec, VideoFrame, VideoHeader, hevc_chroma_format, valid_dimensions};
 use crate::{Error, Result};
 use std::ffi::{CStr, c_char};
 use std::net::{IpAddr, SocketAddr};
@@ -70,7 +70,9 @@ pub struct MLVideoHeader {
     pub width: u32,
     pub height: u32,
     pub keyframe: u8,
-    pub reserved: [u8; 7],
+    /// 0 or 1: H.264; 2: HEVC.
+    pub codec: u8,
+    pub reserved: [u8; 6],
 }
 #[repr(C)]
 pub struct MLVideoFrame {
@@ -81,6 +83,9 @@ pub struct MLVideoFrame {
     pub pps_length: usize,
     pub avcc: *const u8,
     pub avcc_length: usize,
+    /// HEVC only: the video parameter set.
+    pub vps: *const u8,
+    pub vps_length: usize,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -92,6 +97,8 @@ pub struct MLVideoPacket {
     pub pps_length: usize,
     pub avcc_offset: usize,
     pub avcc_length: usize,
+    pub vps_offset: usize,
+    pub vps_length: usize,
 }
 /// One clipboard representation to send.
 #[repr(C)]
@@ -234,7 +241,7 @@ const _: () = {
     assert!(offset_of!(MLTelemetrySnapshot, tuning) == 24);
     assert!(offset_of!(MLTelemetrySnapshot, local) == 40);
     assert!(offset_of!(MLTelemetrySnapshot, peer) == 552);
-    assert!(offset_of!(MLSessionMessage, telemetry) == 192);
+    assert!(offset_of!(MLSessionMessage, telemetry) == 208);
     assert!(offset_of!(MLDisplayGeometry, pixel_width) == 32);
     assert!(size_of::<MLControlMessage>() == 56);
     assert!(offset_of!(MLControlMessage, ping_id) == 40);
@@ -250,15 +257,18 @@ const _: () = {
     assert!(size_of::<MLVideoHeader>() == 32);
     assert!(offset_of!(MLVideoHeader, width) == 16);
     assert!(offset_of!(MLVideoHeader, keyframe) == 24);
-    assert!(size_of::<MLVideoFrame>() == 80);
+    assert!(offset_of!(MLVideoHeader, codec) == 25);
+    assert!(size_of::<MLVideoFrame>() == 96);
     assert!(offset_of!(MLVideoFrame, sps) == 32);
     assert!(offset_of!(MLVideoFrame, pps) == 48);
     assert!(offset_of!(MLVideoFrame, avcc_length) == 72);
-    assert!(size_of::<MLVideoPacket>() == 80);
+    assert!(offset_of!(MLVideoFrame, vps) == 80);
+    assert!(size_of::<MLVideoPacket>() == 96);
     assert!(offset_of!(MLVideoPacket, sps_offset) == 32);
     assert!(offset_of!(MLVideoPacket, avcc_length) == 72);
-    assert!(size_of::<MLSessionMessage>() == 808);
-    assert!(offset_of!(MLSessionMessage, clipboard) == 728);
+    assert!(offset_of!(MLVideoPacket, vps_offset) == 80);
+    assert!(size_of::<MLSessionMessage>() == 824);
+    assert!(offset_of!(MLSessionMessage, clipboard) == 744);
     assert!(size_of::<MLClipboardItem>() == 24);
     assert!(offset_of!(MLClipboardItem, kind) == 16);
     assert!(size_of::<MLClipboardRange>() == 24);
@@ -266,8 +276,8 @@ const _: () = {
     assert!(size_of::<MLClipboardMessage>() == 80);
     assert!(offset_of!(MLClipboardMessage, items) == 8);
     assert!(offset_of!(MLSessionMessage, video) == 8);
-    assert!(offset_of!(MLSessionMessage, input) == 88);
-    assert!(offset_of!(MLSessionMessage, control) == 136);
+    assert!(offset_of!(MLSessionMessage, input) == 104);
+    assert!(offset_of!(MLSessionMessage, control) == 152);
     assert!(size_of::<MLPairingCode>() == 641);
     assert!(offset_of!(MLPairingCode, name) == 256);
     assert!(offset_of!(MLPairingCode, peer_id) == 512);
@@ -437,10 +447,11 @@ fn telemetry_out(message: &TelemetryMessage) -> MLTelemetryMessage {
     out
 }
 fn header(raw: &MLVideoHeader) -> Result<VideoHeader> {
-    if raw.reserved != [0; 7] || raw.keyframe > 1 {
+    if raw.reserved != [0; 6] || raw.keyframe > 1 {
         return Err(Error::Invalid);
     }
     Ok(VideoHeader {
+        codec: Codec::from_raw(raw.codec)?,
         width: raw.width,
         height: raw.height,
         sequence: raw.sequence,
@@ -455,7 +466,8 @@ fn header_out(value: &VideoHeader) -> MLVideoHeader {
         width: value.width,
         height: value.height,
         keyframe: value.keyframe.into(),
-        reserved: [0; 7],
+        codec: value.codec.raw(),
+        reserved: [0; 6],
     }
 }
 /// # Safety
@@ -471,6 +483,7 @@ unsafe fn frame(raw: &MLVideoFrame) -> Result<VideoFrame<'_>> {
     };
     Ok(VideoFrame {
         header: header(&raw.header)?,
+        vps: part(raw.vps, raw.vps_length)?,
         sps: part(raw.sps, raw.sps_length)?,
         pps: part(raw.pps, raw.pps_length)?,
         avcc: part(raw.avcc, raw.avcc_length)?,
@@ -865,6 +878,8 @@ pub unsafe extern "C" fn ml_session_receive(
                     pps_length: packet.pps.len(),
                     avcc_offset: packet.avcc.start,
                     avcc_length: packet.avcc.len(),
+                    vps_offset: packet.vps.start,
+                    vps_length: packet.vps.len(),
                 };
             }
             Incoming::Input(event) => {
@@ -938,6 +953,47 @@ pub unsafe extern "C" fn ml_input_event_validate(event: *const MLInputEvent) -> 
 #[unsafe(no_mangle)]
 pub extern "C" fn ml_input_keeps_local(key_code: u16, modifiers: u32) -> i32 {
     i32::from(keeps_local(key_code, modifiers))
+}
+
+pub const ML_CAPABILITY_HEVC_444: u64 = crate::policy::CAPABILITY_HEVC_444;
+pub const ML_CODEC_H264: u8 = 1;
+pub const ML_CODEC_HEVC: u8 = 2;
+
+/// This process's capabilities, announced in every protocol 5 session started
+/// afterwards. Set once at launch, after local self-tests.
+#[unsafe(no_mangle)]
+pub extern "C" fn ml_capabilities_set(capabilities: u64) {
+    transport::set_local_capabilities(capabilities);
+}
+/// The session's negotiated protocol version (4 or 5), or a negative error.
+#[unsafe(no_mangle)]
+pub extern "C" fn ml_session_protocol_version(id: u64) -> i32 {
+    transport::session(id).map_or_else(|error| error as i32, |session| session.version as i32)
+}
+/// The peer's announced capabilities; zero until its Hello and in protocol 4.
+/// # Safety
+/// `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_session_peer_capabilities(id: u64, out: *mut u64) -> i32 {
+    ffi(|| {
+        let out = unsafe { output(out)? };
+        *out = transport::session(id)?
+            .peer_capabilities
+            .load(std::sync::atomic::Ordering::Acquire);
+        Ok(())
+    })
+}
+/// chroma_format_idc of an HEVC SPS (3 is 4:4:4), or a negative error.
+/// # Safety
+/// `sps` must be readable for `length` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_video_hevc_chroma_format(sps: *const u8, length: usize) -> i32 {
+    if sps.is_null() || length == 0 || length > 4096 {
+        return Error::Invalid as i32;
+    }
+    // SAFETY: caller promises `length` readable bytes.
+    let bytes = unsafe { std::slice::from_raw_parts(sps, length) };
+    hevc_chroma_format(bytes).map_or(Error::Invalid as i32, |value| value as i32)
 }
 
 pub const ML_RECONNECT_ATTEMPTS: u32 = 5;
