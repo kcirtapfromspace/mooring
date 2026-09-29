@@ -18,6 +18,8 @@ This preview opens Apple Screen Sharing. **Automatic High Performance switching 
 
 The app is signed ad hoc and is **not notarized**. macOS may require approval for a downloaded app. No Intel build is included.
 
+If macOS shows **Apple could not verify MacLink.app**, after attempting to open the downloaded app, go to **System Settings → Privacy & Security → Open Anyway**, then confirm **Open**. This creates an exception for this app. [Apple's instructions](https://support.apple.com/en-us/102445).
+
 ## Validation and downloads
 
 All build, test, signing, and packaging steps ran on the local development Mac. **GitHub Actions is disabled.** GitHub hosts the source and release files only.

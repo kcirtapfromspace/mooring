@@ -10,6 +10,8 @@ Download the release ZIP and its SHA-256 checksum file while signed in to the Gi
 
 This preview is signed ad hoc for integrity, not with a Developer ID certificate, and is not notarized. macOS may require approval for a downloaded app. It does not contain a custom video engine or automatically change Apple's sharing mode.
 
+If the first preview shows **Apple could not verify MacLink.app**, after attempting to open it go to **System Settings → Privacy & Security → Open Anyway**, then confirm **Open**. This adds an exception for that app. Future verified builds use the [Developer ID and notarization workflow](NOTARIZATION.md).
+
 ## What to report
 
 - Both Mac models, macOS versions, and connection type (Ethernet, Wi-Fi, or off-site).
