@@ -824,8 +824,9 @@ fn events(capacity: usize) -> Vec<MLInputEvent> {
 
 #[test]
 fn input_state_abi_stages_commits_releases_and_stops() {
+    const MAX_EVENTS: usize = crate::input::MAX_RELEASES;
     let state = ml_input_state_new();
-    let mut out = events(131);
+    let mut out = events(MAX_EVENTS);
     let mut count = 99;
     let down = key_event(1, 4);
     unsafe {
@@ -835,7 +836,7 @@ fn input_state_abi_stages_commits_releases_and_stops() {
                 &down,
                 1.0,
                 out.as_mut_ptr(),
-                130,
+                MAX_EVENTS - 1,
                 &mut count,
                 std::ptr::null_mut()
             ),
@@ -848,7 +849,7 @@ fn input_state_abi_stages_commits_releases_and_stops() {
                 &down,
                 1.0,
                 out.as_mut_ptr(),
-                131,
+                MAX_EVENTS,
                 &mut count,
                 std::ptr::null_mut()
             ),
@@ -856,7 +857,7 @@ fn input_state_abi_stages_commits_releases_and_stops() {
         );
         assert_eq!((count, out[0].kind, out[0].key_code), (1, 1, 4));
         assert_eq!(
-            ml_input_state_release_all(state, out.as_mut_ptr(), 131, &mut count),
+            ml_input_state_release_all(state, out.as_mut_ptr(), MAX_EVENTS, &mut count),
             0
         );
         assert_eq!(count, 0, "uncommitted presses are not held");
@@ -866,7 +867,7 @@ fn input_state_abi_stages_commits_releases_and_stops() {
                 &down,
                 1.0,
                 out.as_mut_ptr(),
-                131,
+                MAX_EVENTS,
                 &mut count,
                 std::ptr::null_mut()
             ),
@@ -888,7 +889,7 @@ fn input_state_abi_stages_commits_releases_and_stops() {
                 &click,
                 1.0,
                 out.as_mut_ptr(),
-                131,
+                MAX_EVENTS,
                 &mut count,
                 &mut held
             ),
@@ -905,7 +906,7 @@ fn input_state_abi_stages_commits_releases_and_stops() {
                 &down,
                 1.1,
                 out.as_mut_ptr(),
-                131,
+                MAX_EVENTS,
                 &mut count,
                 std::ptr::null_mut()
             ),
@@ -920,14 +921,14 @@ fn input_state_abi_stages_commits_releases_and_stops() {
                 &invalid,
                 1.0,
                 out.as_mut_ptr(),
-                131,
+                MAX_EVENTS,
                 &mut count,
                 std::ptr::null_mut()
             ),
             Error::Invalid as i32
         );
         assert_eq!(
-            ml_input_state_stop(state, out.as_mut_ptr(), 131, &mut count),
+            ml_input_state_stop(state, out.as_mut_ptr(), MAX_EVENTS, &mut count),
             0
         );
         assert_eq!((count, out[0].kind, out[0].key_code), (1, 2, 4));
@@ -937,7 +938,7 @@ fn input_state_abi_stages_commits_releases_and_stops() {
                 &down,
                 2.0,
                 out.as_mut_ptr(),
-                131,
+                MAX_EVENTS,
                 &mut count,
                 std::ptr::null_mut()
             ),
@@ -1553,8 +1554,11 @@ fn a_malformed_clipboard_closes_the_receiver_and_clears_it() {
     assert!(is_closed(host.0));
 }
 
-const TEST_CAPABILITIES: u64 =
-    ML_CAPABILITY_HEVC_444 | ML_CAPABILITY_VIRTUAL_DISPLAY | ML_CAPABILITY_CURSOR | 1 << 40; // plus a bit no build knows // plus a bit no build knows
+const TEST_CAPABILITIES: u64 = ML_CAPABILITY_HEVC_444
+    | ML_CAPABILITY_VIRTUAL_DISPLAY
+    | ML_CAPABILITY_CURSOR
+    | ML_CAPABILITY_GESTURES
+    | 1 << 40; // plus a bit no build knows // plus a bit no build knows
 fn hello(id: u64) -> u64 {
     let mut buffer = vec![0; 4096];
     let (status, message) = typed(id, &mut buffer, 2000);
@@ -1837,4 +1841,46 @@ fn hosts_send_pointer_shapes_to_viewers_that_draw_them() {
     let (_old_viewer, old_host) = pair_version(4);
     assert_eq!(send(old_host.0, PNG), Error::Invalid as i32);
     assert!(!is_closed(old_host.0));
+}
+
+fn pinch(phase: u8, value: f64) -> MLInputEvent {
+    MLInputEvent {
+        kind: ML_INPUT_MAGNIFY_KIND,
+        button: phase,
+        x: 0.5,
+        y: 0.5,
+        delta_x: value,
+        ..Default::default()
+    }
+}
+const ML_INPUT_MAGNIFY_KIND: u8 = 8;
+
+#[test]
+fn gestures_reach_only_hosts_that_inject_them() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let (viewer, host) = pair_version(5);
+    assert_eq!(
+        hello(host.0) & ML_CAPABILITY_GESTURES,
+        ML_CAPABILITY_GESTURES
+    );
+    hello(viewer.0);
+    assert_eq!(send_input(viewer.0, &pinch(1, 0.0)), 0);
+    let mut buffer = vec![0; 4096];
+    let (status, message) = typed(host.0, &mut buffer, 2000);
+    assert_eq!(
+        (
+            status,
+            message.kind,
+            message.input.kind,
+            message.input.button
+        ),
+        (0, INPUT, 8, 1)
+    );
+    // Protocol 4 hosts announce nothing: the gesture is refused before sending.
+    let (old_viewer, _old_host) = pair_version(4);
+    assert_eq!(
+        send_input(old_viewer.0, &pinch(1, 0.0)),
+        Error::Invalid as i32
+    );
+    assert!(!is_closed(old_viewer.0));
 }

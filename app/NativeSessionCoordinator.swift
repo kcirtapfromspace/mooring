@@ -194,9 +194,10 @@ final class NativeSessionCoordinator {
             DispatchQueue.main.async {
                 self?.hevc444Available = hevc
                 let virtualDisplay = NativeSharedDisplay.isAvailable
-                // Every build with this code draws the host's pointer shape.
+                // Every build with this code draws the host's pointer shape and
+                // posts trackpad gestures.
                 ml_capabilities_set((hevc ? UInt64(ML_CAPABILITY_HEVC_444) : 0) | (virtualDisplay ? UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) : 0)
-                                    | UInt64(ML_CAPABILITY_CURSOR))
+                                    | UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_GESTURES))
                 NativeLog.session.notice("virtual display for viewers: \(virtualDisplay ? "available" : "unavailable", privacy: .public)")
                 NativeLog.session.notice("HEVC 4:4:4 hardware encode and decode: \(hevc ? "available" : "unavailable", privacy: .public)")
             }
@@ -1001,6 +1002,8 @@ final class NativeSessionCoordinator {
         guard viewerHasKeyboardFocus, let channel = viewerChannel, let view = viewerWindow?.video, view.geometry != nil,
               view.displayedVideoRect.width > 0, view.displayedVideoRect.height > 0,
               let input = inputEncoder.encode(event, in: view, contentRect: view.displayedVideoRect) else { return }
+        // Rust refuses gestures to a host that did not announce it injects them.
+        if input.kind.isGesture, channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_GESTURES) == 0 { return }
         channel.send(.input(input))
     }
     private func releaseViewerInput() {

@@ -70,7 +70,14 @@ enum {
 enum {
     ML_INPUT_KEY_DOWN = 1, ML_INPUT_KEY_UP = 2, ML_INPUT_POINTER_MOVE = 3,
     ML_INPUT_POINTER_DOWN = 4, ML_INPUT_POINTER_UP = 5, ML_INPUT_SCROLL = 6,
-    ML_INPUT_RELEASE_ALL = 7
+    ML_INPUT_RELEASE_ALL = 7,
+    /* Protocol 5, to hosts announcing ML_CAPABILITY_GESTURES: phase in button
+     * (ML_GESTURE_PHASE_*), magnification or degrees in delta_x. */
+    ML_INPUT_MAGNIFY = 8, ML_INPUT_ROTATE = 9, ML_INPUT_SMART_MAGNIFY = 10
+};
+enum {
+    ML_GESTURE_PHASE_BEGAN = 1, ML_GESTURE_PHASE_CHANGED = 2,
+    ML_GESTURE_PHASE_ENDED = 4, ML_GESTURE_PHASE_CANCELLED = 8
 };
 enum {
     ML_MODIFIER_SHIFT = 1 << 0, ML_MODIFIER_CONTROL = 1 << 1, ML_MODIFIER_OPTION = 1 << 2,
@@ -79,7 +86,7 @@ enum {
 #define ML_SESSION_MAX_VIDEO 12582912u /* 12 MiB; a literal so Swift imports it */
 #define ML_SESSION_DEFAULT_PORT 45900u
 #define ML_VIDEO_HEADER_BYTES 44u
-#define ML_INPUT_MAX_EVENTS 131u
+#define ML_INPUT_MAX_EVENTS 132u
 #define ML_TEXT_CAPACITY 256u
 #define ML_PEER_ID_CAPACITY 65u
 #define ML_PAIRING_CODE_CAPACITY 2049u
@@ -96,6 +103,7 @@ enum { ML_CODEC_H264 = 1, ML_CODEC_HEVC = 2 };
 #define ML_CAPABILITY_HEVC_444 1ull
 #define ML_CAPABILITY_VIRTUAL_DISPLAY 2ull
 #define ML_CAPABILITY_CURSOR 4ull /* the viewer draws the host's pointer shape */
+#define ML_CAPABILITY_GESTURES 8ull /* the host injects trackpad gestures */
 #define ML_RECONNECT_STABLE_SECONDS 20u
 
 /* Logical CoreGraphics display bounds plus encoded pixel dimensions. */

@@ -5,14 +5,25 @@
 //! key_code:u16, modifiers:u32, x:f64, y:f64, delta_x:f64, delta_y:f64.
 //! Coordinates are normalized with a top-left origin in the displayed image,
 //! independent of Retina scaling. Fields a kind does not use must be zero.
+//!
+//! Trackpad gestures (protocol 5, to hosts that announce them): magnify and
+//! rotate carry their phase in `button` (1 began, 2 changed, 4 ended, 8
+//! cancelled) and their value in `delta_x` (magnification, or degrees); smart
+//! magnify carries only a position.
 
 use crate::{Error, Result};
 use std::collections::{BTreeSet, HashMap};
 
 pub(crate) const INPUT_BYTES: usize = 44;
 pub(crate) const MODIFIERS: u32 = 0x3f; // shift, control, option, command, caps lock, function
-/// 128 key codes plus three buttons: the most one cleanup can release.
-pub(crate) const MAX_RELEASES: usize = 131;
+/// 128 key codes, three buttons and one open gesture: the most one cleanup can release.
+pub(crate) const MAX_RELEASES: usize = 132;
+const MAGNIFY_LIMIT: f64 = 5.0;
+const ROTATE_LIMIT: f64 = 360.0;
+pub(crate) const PHASE_BEGAN: u8 = 1;
+pub(crate) const PHASE_CHANGED: u8 = 2;
+pub(crate) const PHASE_ENDED: u8 = 4;
+pub(crate) const PHASE_CANCELLED: u8 = 8;
 const MAX_KEY_CODE: u16 = 127;
 const SCROLL_LIMIT: f64 = 1200.0;
 const REPEAT_INTERVAL: f64 = 1.0 / 120.0;
@@ -27,6 +38,9 @@ pub(crate) enum InputKind {
     PointerUp = 5,
     Scroll = 6,
     ReleaseAll = 7,
+    Magnify = 8,
+    Rotate = 9,
+    SmartMagnify = 10,
 }
 
 impl InputKind {
@@ -39,8 +53,14 @@ impl InputKind {
             5 => Self::PointerUp,
             6 => Self::Scroll,
             7 => Self::ReleaseAll,
+            8 => Self::Magnify,
+            9 => Self::Rotate,
+            10 => Self::SmartMagnify,
             _ => return Err(Error::Invalid),
         })
+    }
+    pub(crate) fn is_gesture(self) -> bool {
+        matches!(self, Self::Magnify | Self::Rotate | Self::SmartMagnify)
     }
 }
 
@@ -176,6 +196,32 @@ impl InputEvent {
                         && scroll
                 }
                 InputKind::ReleaseAll => *self == Self::empty(InputKind::ReleaseAll),
+                InputKind::Magnify | InputKind::Rotate => {
+                    let limit = if self.kind == InputKind::Magnify {
+                        MAGNIFY_LIMIT
+                    } else {
+                        ROTATE_LIMIT
+                    };
+                    unit(self.x)
+                        && unit(self.y)
+                        && self.key_code == 0
+                        && !self.is_repeat
+                        && self.click_count == 0
+                        && [PHASE_BEGAN, PHASE_CHANGED, PHASE_ENDED, PHASE_CANCELLED]
+                            .contains(&self.button)
+                        && self.delta_x.is_finite()
+                        && self.delta_x.abs() <= limit
+                        && self.delta_y == 0.0
+                }
+                InputKind::SmartMagnify => {
+                    unit(self.x)
+                        && unit(self.y)
+                        && self.key_code == 0
+                        && !self.is_repeat
+                        && self.button == 0
+                        && self.click_count == 0
+                        && no_scroll
+                }
             };
         if valid { Ok(()) } else { Err(Error::Invalid) }
     }
@@ -234,6 +280,8 @@ pub(crate) struct InputState {
     held_buttons: BTreeSet<u8>,
     position: (f64, f64),
     last_key_down: HashMap<u16, f64>,
+    /// A magnify or rotate that began and has not ended.
+    open_gesture: Option<InputKind>,
 }
 
 impl Default for InputState {
@@ -244,6 +292,7 @@ impl Default for InputState {
             held_buttons: BTreeSet::new(),
             position: (0.5, 0.5),
             last_key_down: HashMap::new(),
+            open_gesture: None,
         }
     }
 }
@@ -275,6 +324,21 @@ impl InputState {
             InputKind::Scroll => event.delta_x != 0.0 || event.delta_y != 0.0,
             InputKind::PointerMove => true,
             InputKind::ReleaseAll => return Err(Error::Invalid),
+            // One gesture at a time: a begin while another is open, or a
+            // change or end for a gesture that is not open, is ignored.
+            InputKind::Magnify | InputKind::Rotate => match (event.button, self.open_gesture) {
+                (PHASE_BEGAN, None) => {
+                    self.open_gesture = Some(event.kind);
+                    true
+                }
+                (PHASE_CHANGED, Some(open)) => open == event.kind,
+                (PHASE_ENDED | PHASE_CANCELLED, Some(open)) if open == event.kind => {
+                    self.open_gesture = None;
+                    true
+                }
+                _ => false,
+            },
+            InputKind::SmartMagnify => self.open_gesture.is_none(),
         };
         if !changes {
             return Ok(None);
@@ -307,6 +371,15 @@ impl InputState {
             y: self.position.1,
             ..InputEvent::empty(InputKind::PointerUp)
         }));
+        // An open pinch or rotation ends, so no app is left mid-gesture.
+        if let Some(kind) = self.open_gesture.take() {
+            events.push(InputEvent {
+                button: PHASE_ENDED,
+                x: self.position.0,
+                y: self.position.1,
+                ..InputEvent::empty(kind)
+            });
+        }
         self.held_keys.clear();
         self.held_buttons.clear();
         self.last_key_down.clear();
@@ -597,6 +670,11 @@ mod tests {
                 4.0,
             );
         }
+        accept(
+            &mut state,
+            &gesture(InputKind::Magnify, PHASE_BEGAN, 0.0),
+            4.0,
+        );
         let clear = event(7, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0).unwrap();
         assert_eq!(state.accept(&clear, 5.0).unwrap().0.len(), MAX_RELEASES);
         assert!(state.release_all().is_empty());
@@ -664,5 +742,91 @@ mod tests {
             Err(Error::Closed)
         );
         assert!(state.stop().is_empty() && state.release_all().is_empty());
+    }
+
+    fn gesture(kind: InputKind, phase: u8, value: f64) -> InputEvent {
+        InputEvent {
+            button: phase,
+            x: 0.4,
+            y: 0.6,
+            delta_x: value,
+            ..InputEvent::empty(kind)
+        }
+    }
+
+    #[test]
+    fn gestures_carry_a_phase_value_and_position() {
+        for event in [
+            gesture(InputKind::Magnify, PHASE_BEGAN, 0.0),
+            gesture(InputKind::Magnify, PHASE_CHANGED, -0.12),
+            gesture(InputKind::Rotate, PHASE_ENDED, 359.0),
+            gesture(InputKind::SmartMagnify, 0, 0.0),
+        ] {
+            assert_eq!(InputEvent::decode(&event.encode()), Ok(event), "{event:?}");
+        }
+        for invalid in [
+            gesture(InputKind::Magnify, 3, 0.1), // not a single phase
+            gesture(InputKind::Magnify, PHASE_CHANGED, 6.0),
+            gesture(InputKind::Rotate, PHASE_CHANGED, f64::NAN),
+            gesture(InputKind::Rotate, PHASE_CHANGED, 361.0),
+            gesture(InputKind::SmartMagnify, PHASE_BEGAN, 0.0),
+            gesture(InputKind::SmartMagnify, 0, 0.5),
+            InputEvent {
+                x: 1.5,
+                ..gesture(InputKind::Magnify, PHASE_BEGAN, 0.0)
+            },
+            InputEvent {
+                delta_y: 1.0,
+                ..gesture(InputKind::Rotate, PHASE_BEGAN, 0.0)
+            },
+        ] {
+            assert!(invalid.validate().is_err(), "{invalid:?}");
+        }
+        assert!(InputKind::Magnify.is_gesture() && !InputKind::Scroll.is_gesture());
+    }
+
+    #[test]
+    fn one_gesture_at_a_time_and_cleanup_ends_it() {
+        let mut state = InputState::default();
+        let accept = |state: &mut InputState, event| state.accept(&event, 1.0).unwrap().is_some();
+        assert!(
+            !accept(&mut state, gesture(InputKind::Magnify, PHASE_CHANGED, 0.1)),
+            "no change before a begin"
+        );
+        assert!(accept(
+            &mut state,
+            gesture(InputKind::Magnify, PHASE_BEGAN, 0.0)
+        ));
+        assert!(
+            !accept(&mut state, gesture(InputKind::Rotate, PHASE_BEGAN, 0.0)),
+            "one gesture at a time"
+        );
+        assert!(!accept(
+            &mut state,
+            gesture(InputKind::SmartMagnify, 0, 0.0)
+        ));
+        assert!(accept(
+            &mut state,
+            gesture(InputKind::Magnify, PHASE_CHANGED, 0.2)
+        ));
+        assert!(
+            !accept(&mut state, gesture(InputKind::Rotate, PHASE_ENDED, 0.0)),
+            "ends only its own gesture"
+        );
+        let released = state.release_all();
+        assert_eq!(
+            released.last().map(|event| (event.kind, event.button)),
+            Some((InputKind::Magnify, PHASE_ENDED))
+        );
+        assert!(state.release_all().is_empty(), "the gesture ends once");
+        assert!(accept(
+            &mut state,
+            gesture(InputKind::Rotate, PHASE_BEGAN, 0.0)
+        ));
+        assert!(accept(
+            &mut state,
+            gesture(InputKind::Rotate, PHASE_CANCELLED, 0.0)
+        ));
+        assert!(accept(&mut state, gesture(InputKind::SmartMagnify, 0, 0.0)));
     }
 }

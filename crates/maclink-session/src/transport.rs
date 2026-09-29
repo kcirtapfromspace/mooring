@@ -12,8 +12,9 @@ use crate::control::ControlMessage;
 use crate::cursor::{self, CursorPacket, CursorShape, MAX_CURSOR};
 use crate::input::InputEvent;
 use crate::policy::{
-    Admission, CAPABILITY_CURSOR, CAPABILITY_HEVC_444, CAPABILITY_VIRTUAL_DISPLAY, CLIPBOARD,
-    CONTROL, CURSOR, INPUT, PROTOCOL_MAX, PROTOCOL_MIN, ReceivePolicy, Role, TELEMETRY, VIDEO,
+    Admission, CAPABILITY_CURSOR, CAPABILITY_GESTURES, CAPABILITY_HEVC_444,
+    CAPABILITY_VIRTUAL_DISPLAY, CLIPBOARD, CONTROL, CURSOR, INPUT, PROTOCOL_MAX, PROTOCOL_MIN,
+    ReceivePolicy, Role, TELEMETRY, VIDEO,
 };
 use crate::telemetry::{MAX_TELEMETRY, TelemetryMessage};
 use crate::video::Codec;
@@ -401,6 +402,14 @@ impl Session {
                 Err(Error::Invalid)
             }
             Outgoing::Video(frame) => self.send_bytes(VIDEO, &frame.encode()?, end),
+            // Gestures only to a host that announced it injects them.
+            Outgoing::Input(event)
+                if event.kind.is_gesture()
+                    && self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_GESTURES
+                        == 0 =>
+            {
+                Err(Error::Invalid)
+            }
             Outgoing::Input(event) => self.send_bytes(INPUT, &event.encode(), end),
             Outgoing::Control(control) if self.role.may_send_control(control.kind()) => {
                 self.send_bytes(CONTROL, &control.encode(), end)

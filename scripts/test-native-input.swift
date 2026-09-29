@@ -52,10 +52,27 @@ enum NativeInputTests {
         rejects({ _ = try NativeInputEvent(kind: .scroll, x: 0, y: 0, deltaX: .nan, deltaY: 0) }, "Reject NaN scroll")
         rejects({ _ = try NativeInputEvent(kind: .releaseAll, keyCode: 55) }, "Release-all contains no arbitrary key")
         rejects({ _ = try NativeInputEvent(kind: .releaseAll, modifiers: .command) }, "Release-all cannot leave modifiers set")
-        var unknownKind = down.raw; unknownKind.kind = 9
+        var unknownKind = down.raw; unknownKind.kind = 11
         rejects({ _ = try NativeInputEvent(unknownKind) }, "Reject unknown kinds from the C ABI")
         var reserved = down.raw; reserved.reserved.0 = 1
         rejects({ _ = try NativeInputEvent(reserved) }, "Reject nonzero reserved bytes")
+
+        // Magnify and rotate carry a phase in `button` and a change in `deltaX`.
+        let pinch = try NativeInputEvent(kind: .magnify, button: UInt8(ML_GESTURE_PHASE_CHANGED), x: 0.5, y: 0.5, deltaX: -0.12)
+        let turn = try NativeInputEvent(kind: .rotate, button: UInt8(ML_GESTURE_PHASE_BEGAN), x: 0.2, y: 0.3, deltaX: 0)
+        let smartZoom = try NativeInputEvent(kind: .smartMagnify, x: 0.4, y: 0.6)
+        for event in [pinch, turn, smartZoom] {
+            require(try NativeInputEvent(event.raw) == event && event.kind.isGesture, "Gestures round-trip the C ABI exactly")
+        }
+        require(pinch.button == UInt8(ML_GESTURE_PHASE_CHANGED) && pinch.deltaX == -0.12 && smartZoom.button == nil,
+                "Gesture phases and values survive")
+        require(NativeInputKind.magnify.rawValue == UInt8(ML_INPUT_MAGNIFY) && NativeInputKind.rotate.rawValue == UInt8(ML_INPUT_ROTATE)
+                && NativeInputKind.smartMagnify.rawValue == UInt8(ML_INPUT_SMART_MAGNIFY) && !NativeInputKind.scroll.isGesture,
+                "Swift and Rust gesture kinds agree")
+        rejects({ _ = try NativeInputEvent(kind: .magnify, button: 3, x: 0, y: 0, deltaX: 0.1) }, "A gesture has one phase")
+        rejects({ _ = try NativeInputEvent(kind: .magnify, button: 2, x: 0, y: 0, deltaX: 5.5) }, "Bound magnification")
+        rejects({ _ = try NativeInputEvent(kind: .rotate, button: 2, x: 0, y: 0, deltaX: .nan) }, "Reject NaN rotation")
+        rejects({ _ = try NativeInputEvent(kind: .smartMagnify, button: 1, x: 0, y: 0) }, "Smart zoom has no phase")
 
         let bounds = CGRect(x: -1920, y: -200, width: 1920, height: 1080)
         require(try NativeInputGeometry.point(x: 0, y: 0, displayBounds: bounds) == bounds.origin,
@@ -112,6 +129,21 @@ enum NativeInputTests {
         require(modifiers.releaseAll() == clear, "Focus loss encodes explicit releaseAll")
         require(modifiers.modifierEvent(keyCode: 55, modifiers: .command, deviceFlags: 0x08)?.kind == .keyDown,
                 "Focus loss clears encoder modifier state")
+        // AppKit reads the private gesture fields back as the real event types;
+        // nothing is posted.
+        let gestureSource = CGEventSource(stateID: .privateState)
+        require(gestureSource != nil, "A private event source exists")
+        func appKit(_ event: NativeInputEvent) throws -> NSEvent? {
+            try gestureSource.flatMap { try NativeInputInjector.gestureEvent(event, source: $0, displayBounds: bounds) }
+                .flatMap { NSEvent(cgEvent: $0) }
+        }
+        let pinchEvent = try appKit(pinch), turnEvent = try appKit(turn), smartEvent = try appKit(smartZoom)
+        require(pinchEvent?.type == .magnify && pinchEvent.map { close($0.magnification, -0.12) } == true
+                && pinchEvent?.phase == .changed, "A pinch arrives as a magnify event with its phase and value")
+        require(turnEvent?.type == .rotate && turnEvent?.phase == .began, "A rotation arrives as a rotate event")
+        require(smartEvent?.type == .smartMagnify, "A smart zoom arrives as a smart magnify event")
+        let rotated = try appKit(try NativeInputEvent(kind: .rotate, button: UInt8(ML_GESTURE_PHASE_CHANGED), x: 0, y: 1, deltaX: 12.5))
+        require(rotated.map { abs($0.rotation - 12.5) < 0.001 } == true, "Rotation degrees survive")
         require(NativeInputModifiers.from([.command, .shift, .numericPad]) == [.command, .shift], "Only canonical flags are serialized")
         require(NativeInputModifiers([.command, .shift]).cgFlags == [.maskCommand, .maskShift], "Wire flags map to explicit CG flags")
 
@@ -135,6 +167,13 @@ enum NativeInputTests {
         require(reducer.stop() == [up], "Stop releases current keys")
         rejects({ _ = try reducer.accept(down, now: 4) }, "Queued input cannot press keys after Stop")
         require(reducer.stop().isEmpty && reducer.releaseAll().isEmpty, "Stop and cleanup stay idempotent")
+        let gestures = NativeInputReducer()
+        require(try gestures.accept(pinch, now: 1).0.isEmpty, "A gesture change without a beginning is ignored")
+        _ = try gestures.accept(turn, now: 1); gestures.commit()
+        require(try gestures.accept(smartZoom, now: 1).0.isEmpty, "One gesture at a time")
+        let ended = gestures.releaseAll()
+        require(ended.count == 1 && ended[0].kind == .rotate && ended[0].button == UInt8(ML_GESTURE_PHASE_ENDED),
+                "Cleanup ends an open gesture")
         // The system-shortcut tap keeps only the escape chords local. No tap is
         // installed here; this covers the Swift boundary to Rust's rule.
         let keepsLocal = NativeSystemKeyCapture.keepsLocal

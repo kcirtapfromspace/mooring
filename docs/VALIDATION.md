@@ -203,6 +203,17 @@ That run interrupted a live session three times, because the old capture code en
 
 After those fixes, it passed on the build Mac: 1512×916 points became the main display at 3024×1832 pixels, a resize to 1280×800 applied in place, and release restored the 1920×1080 placeholder at once.
 
+## Trackpad gestures
+
+For `v0.3.0-preview.11`, the Rust suite added gesture checks:
+
+- a single phase (began, changed, ended or cancelled) and a finite value: magnification within ±5 per event, rotation within ±360°;
+- smart zoom carries only a position;
+- one open gesture at a time; a change or end for a gesture that isn't open is ignored, and cleanup ends an open gesture;
+- gestures only from viewers to hosts that announced the capability.
+
+The native input suite builds each gesture with the private event fields and reads it back through AppKit, without posting it: a pinch becomes a magnify event with its phase and value, a rotation a rotate event with its degrees, and a smart zoom a smart magnify event. Whether macOS delivers a posted gesture to apps on the sharing Mac is checked only between two Macs.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

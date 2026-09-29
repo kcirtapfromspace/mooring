@@ -51,6 +51,9 @@ struct NativeInputModifiers: OptionSet, Equatable {
 
 enum NativeInputKind: UInt8 {
     case keyDown = 1, keyUp, pointerMove, pointerDown, pointerUp, scroll, releaseAll
+    /// Protocol 5 trackpad gestures, to hosts that announce them.
+    case magnify, rotate, smartMagnify
+    var isGesture: Bool { self == .magnify || self == .rotate || self == .smartMagnify }
 }
 
 /// One remote input event. Coordinates have a top-left origin in the displayed
@@ -87,13 +90,15 @@ struct NativeInputEvent: Equatable {
         }
         let key = kind == .keyDown || kind == .keyUp, buttons = kind == .pointerDown || kind == .pointerUp
         let pointer = !key && kind != .releaseAll
+        // Magnify and rotate carry their phase in `button` and their value in `deltaX`.
+        let phased = kind == .magnify || kind == .rotate
         self.kind = kind
         keyCode = key ? raw.key_code : nil
-        button = buttons ? raw.button : nil
+        button = buttons || phased ? raw.button : nil
         clickCount = buttons ? raw.click_count : nil
         x = pointer ? raw.x : nil
         y = pointer ? raw.y : nil
-        deltaX = kind == .scroll ? raw.delta_x : nil
+        deltaX = kind == .scroll || phased ? raw.delta_x : nil
         deltaY = kind == .scroll ? raw.delta_y : nil
         modifiers = NativeInputModifiers(rawValue: raw.modifiers)
         isRepeat = raw.is_repeat == 1
@@ -224,8 +229,37 @@ final class NativeInputEncoder {
                 if kind == .pointerDown { heldButtons.insert(button) } else { heldButtons.remove(button) }
             }
             return input
+        case .magnify, .rotate, .smartMagnify:
+            return gesture(event, in: view, contentRect: contentRect, modifiers: modifiers)
         default: return nil
         }
+    }
+
+    /// A pinch, rotation or smart zoom. Each magnify or rotate event carries
+    /// the change since the previous one; a gesture that began over the image
+    /// continues if the pointer leaves it. Phases that start nothing on the
+    /// remote Mac (may-begin, stationary) are not sent.
+    private func gesture(_ event: NSEvent, in view: NSView, contentRect: CGRect, modifiers: NativeInputModifiers) -> NativeInputEvent? {
+        let kind: NativeInputKind = event.type == .magnify ? .magnify : event.type == .rotate ? .rotate : .smartMagnify
+        var phase: UInt8?
+        if kind != .smartMagnify {
+            switch event.phase {
+            case .began: phase = UInt8(ML_GESTURE_PHASE_BEGAN)
+            case .changed: phase = UInt8(ML_GESTURE_PHASE_CHANGED)
+            case .ended: phase = UInt8(ML_GESTURE_PHASE_ENDED)
+            case .cancelled: phase = UInt8(ML_GESTURE_PHASE_CANCELLED)
+            default: return nil
+            }
+        }
+        let clamp = phase != nil && phase != UInt8(ML_GESTURE_PHASE_BEGAN)
+        guard let position = NativeInputGeometry.normalized(point: view.convert(event.locationInWindow, from: nil),
+                                                             contentRect: contentRect, flipped: view.isFlipped, clamp: clamp) else { return nil }
+        let value: Double? = switch kind {
+        case .magnify: min(5, max(-5, Double(event.magnification)))
+        case .rotate: min(360, max(-360, Double(event.rotation)))
+        default: nil
+        }
+        return try? NativeInputEvent(kind: kind, button: phase, x: position.x, y: position.y, deltaX: value, modifiers: modifiers)
     }
 
     /// Send this before focus loss/disconnect; also clears local modifier tracking.
@@ -412,6 +446,36 @@ final class NativeInputInjector {
         }
     }
 
+    /// A trackpad gesture event. macOS has no public constructor, so this sets
+    /// the fields AppKit reads from a real one (approved private-event use; the
+    /// field numbers are those in WebKit's CoreGraphicsTestSPI.h): the event
+    /// type, the HID gesture type, its phase, and the magnification or rotation.
+    /// Internal so tests can read an event back through AppKit without posting it.
+    static func gestureEvent(_ event: NativeInputEvent, source: CGEventSource, displayBounds: CGRect) throws -> CGEvent? {
+        // Imported C enums accept values the SDK does not name.
+        guard let x = event.x, let y = event.y, let gesture = CGEvent(source: source),
+              let gestureType = CGEventType(rawValue: 29), // kCGSEventGesture
+              let typeField = CGEventField(rawValue: 55), let hidType = CGEventField(rawValue: 110),
+              let zoomValue = CGEventField(rawValue: 113), let rotationValue = CGEventField(rawValue: 114),
+              let phase = CGEventField(rawValue: 132) else { throw NativeInputError.eventCreationFailed }
+        gesture.type = gestureType
+        gesture.setIntegerValueField(typeField, value: Int64(gestureType.rawValue))
+        gesture.location = try NativeInputGeometry.point(x: x, y: y, displayBounds: displayBounds)
+        switch event.kind {
+        case .magnify:
+            gesture.setIntegerValueField(hidType, value: 8) // kIOHIDEventTypeZoom
+            gesture.setDoubleValueField(zoomValue, value: event.deltaX ?? 0)
+            gesture.setIntegerValueField(phase, value: Int64(event.button ?? 0))
+        case .rotate:
+            gesture.setIntegerValueField(hidType, value: 5) // kIOHIDEventTypeRotation
+            gesture.setDoubleValueField(rotationValue, value: event.deltaX ?? 0)
+            gesture.setIntegerValueField(phase, value: Int64(event.button ?? 0))
+        default:
+            gesture.setIntegerValueField(hidType, value: 22) // kIOHIDEventTypeZoomToggle: smart zoom
+        }
+        return gesture
+    }
+
     private func makeEvent(_ event: NativeInputEvent, displayBounds: CGRect, heldButtons: Set<UInt8>) throws -> CGEvent {
         guard let source else { throw NativeInputError.eventCreationFailed }
         let native: CGEvent?
@@ -443,6 +507,8 @@ final class NativeInputInjector {
             native?.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: dy)
             native?.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2, value: dx)
             native?.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        case .magnify, .rotate, .smartMagnify:
+            native = try Self.gestureEvent(event, source: source, displayBounds: displayBounds)
         case .releaseAll: throw NativeInputError.eventCreationFailed
         }
         guard let native else { throw NativeInputError.eventCreationFailed }

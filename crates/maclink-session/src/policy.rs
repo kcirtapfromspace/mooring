@@ -26,6 +26,8 @@ pub(crate) const CAPABILITY_HEVC_444: u64 = 1;
 pub(crate) const CAPABILITY_VIRTUAL_DISPLAY: u64 = 1 << 1;
 /// The viewer draws the host's pointer shape over the video.
 pub(crate) const CAPABILITY_CURSOR: u64 = 1 << 2;
+/// The host injects trackpad gestures: pinch, rotate and smart zoom.
+pub(crate) const CAPABILITY_GESTURES: u64 = 1 << 3;
 /// Hosts send a cursor only when it changes; this stops a flood.
 const CURSORS_PER_WINDOW: u32 = 20;
 
@@ -167,7 +169,10 @@ impl ReceivePolicy {
         let peer = self.role.peer();
         let (kind, allowed) = match message {
             Incoming::Video(_) => (VIDEO, true),
-            Incoming::Input(_) => (INPUT, true),
+            Incoming::Input(event) => (
+                INPUT,
+                !event.kind.is_gesture() || self.local_capabilities & CAPABILITY_GESTURES != 0,
+            ),
             Incoming::Control(control) => (CONTROL, peer.may_send_control(control.kind())),
             Incoming::Telemetry(telemetry) => (TELEMETRY, peer.may_send_telemetry(telemetry)),
             Incoming::Clipboard(_) => (CLIPBOARD, true),

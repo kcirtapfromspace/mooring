@@ -143,6 +143,9 @@ final class NativeRemoteView: NativeVideoView {
     override func otherMouseDown(with event: NSEvent) { window?.makeFirstResponder(self); onInput?(event) }
     override func otherMouseUp(with event: NSEvent) { onInput?(event) }
     override func scrollWheel(with event: NSEvent) { onInput?(event) }
+    override func magnify(with event: NSEvent) { onInput?(event) }
+    override func rotate(with event: NSEvent) { onInput?(event) }
+    override func smartMagnify(with event: NSEvent) { onInput?(event) }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         // Force Quit, Lock Screen and full-screen chords stay on this Mac; other
         // Command chords belong to the remote desktop while this view has focus.
