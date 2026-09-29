@@ -14,6 +14,7 @@ pub(crate) const CONTROL: u8 = 3;
 pub(crate) const TELEMETRY: u8 = 4;
 pub(crate) const CLIPBOARD: u8 = 5;
 pub(crate) const CURSOR: u8 = 6;
+pub(crate) const AUDIO: u8 = 7;
 
 /// Protocol versions this build speaks. 4 is the preview 4-8 protocol; 5 adds
 /// a capability exchange, so later features switch on only when both sides
@@ -28,8 +29,14 @@ pub(crate) const CAPABILITY_VIRTUAL_DISPLAY: u64 = 1 << 1;
 pub(crate) const CAPABILITY_CURSOR: u64 = 1 << 2;
 /// The host injects trackpad gestures: pinch, rotate and smart zoom.
 pub(crate) const CAPABILITY_GESTURES: u64 = 1 << 3;
+/// This Mac passed an Opus encode and decode self-test. A viewer that
+/// announces it plays the host's sound; a host sends sound only to such a viewer.
+pub(crate) const CAPABILITY_AUDIO: u64 = 1 << 4;
 /// Hosts send a cursor only when it changes; this stops a flood.
 const CURSORS_PER_WINDOW: u32 = 20;
+/// Four times the rate of 10 ms packets. Sound beyond it, as after a stall, is
+/// dropped: the player would drop it anyway to keep delay bounded.
+const AUDIO_PER_WINDOW: u32 = 400;
 
 /// No complete authenticated message for this long ends the session. Viewers
 /// ping every second and hosts answer, so a healthy idle desktop stays open.
@@ -74,8 +81,10 @@ impl Role {
     pub(crate) fn may_send(self, kind: u8) -> bool {
         matches!(
             (self, kind),
-            (Self::Host, VIDEO | CONTROL | TELEMETRY | CLIPBOARD | CURSOR)
-                | (Self::Viewer, INPUT | CONTROL | TELEMETRY | CLIPBOARD)
+            (
+                Self::Host,
+                VIDEO | CONTROL | TELEMETRY | CLIPBOARD | CURSOR | AUDIO
+            ) | (Self::Viewer, INPUT | CONTROL | TELEMETRY | CLIPBOARD)
         )
     }
     pub(crate) fn may_receive(self, kind: u8) -> bool {
@@ -128,6 +137,7 @@ pub(crate) struct ReceivePolicy {
     window_count: u32,
     clipboard_count: u32,
     cursor_count: u32,
+    audio_count: u32,
     last_ping: Option<Instant>,
     last_keyframe: Option<Instant>,
     has_geometry: bool,
@@ -155,6 +165,7 @@ impl ReceivePolicy {
             window_count: 0,
             clipboard_count: 0,
             cursor_count: 0,
+            audio_count: 0,
             last_ping: None,
             last_keyframe: None,
             has_geometry: false,
@@ -177,6 +188,11 @@ impl ReceivePolicy {
             Incoming::Telemetry(telemetry) => (TELEMETRY, peer.may_send_telemetry(telemetry)),
             Incoming::Clipboard(_) => (CLIPBOARD, true),
             Incoming::Cursor(_) => (CURSOR, self.local_capabilities & CAPABILITY_CURSOR != 0),
+            // Sound only reaches a viewer that announced it plays it, in protocol 5.
+            Incoming::Audio(_) => (
+                AUDIO,
+                self.version >= 5 && self.local_capabilities & CAPABILITY_AUDIO != 0,
+            ),
         };
         if !allowed || !self.role.may_receive(kind) {
             return Err(Error::Protocol);
@@ -208,6 +224,13 @@ impl ReceivePolicy {
             self.window_count = 0;
             self.clipboard_count = 0;
             self.cursor_count = 0;
+            self.audio_count = 0;
+        }
+        if kind == AUDIO {
+            self.audio_count += 1;
+            if self.audio_count > AUDIO_PER_WINDOW {
+                return Ok(Admission::Skip);
+            }
         }
         if kind == CURSOR {
             self.cursor_count += 1;
@@ -480,6 +503,36 @@ mod tests {
             policy.admit(&geometry(), now).unwrap();
             assert_eq!(policy.admit(&hevc(), now), expected);
         }
+    }
+
+    #[test]
+    fn sound_reaches_only_viewers_that_play_it_and_bursts_are_dropped() {
+        use crate::audio::{AudioHeader, AudioPacket, OPUS};
+        let now = Instant::now();
+        let sound = || {
+            Incoming::Audio(AudioPacket {
+                header: AudioHeader {
+                    codec: OPUS,
+                    channels: 2,
+                    sequence: 0,
+                    frames: 480,
+                },
+                payload: 12..20,
+            })
+        };
+        let mut host = ReceivePolicy::for_version(Role::Host, 5, CAPABILITY_AUDIO, now);
+        assert_eq!(host.admit(&sound(), now), Err(Error::Protocol));
+        for (version, capabilities) in [(5, CAPABILITY_CURSOR), (4, CAPABILITY_AUDIO)] {
+            let mut viewer = ReceivePolicy::for_version(Role::Viewer, version, capabilities, now);
+            assert_eq!(viewer.admit(&sound(), now), Err(Error::Protocol));
+        }
+        let mut viewer = ReceivePolicy::for_version(Role::Viewer, 5, CAPABILITY_AUDIO, now);
+        for _ in 0..AUDIO_PER_WINDOW {
+            assert_eq!(viewer.admit(&sound(), now), Ok(Admission::Deliver));
+        }
+        assert_eq!(viewer.admit(&sound(), now), Ok(Admission::Skip));
+        assert_eq!(viewer.admit(&stats(), now), Ok(Admission::Deliver));
+        assert_eq!(viewer.admit(&sound(), now + WINDOW), Ok(Admission::Deliver));
     }
 
     #[test]

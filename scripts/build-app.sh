@@ -54,6 +54,7 @@ swiftc -O -swift-version 5 -parse-as-library -sdk "$sdk_path" -target arm64-appl
     -framework AppKit -framework Foundation -framework Network -framework ServiceManagement \
     -framework Security -framework SystemConfiguration -framework ScreenCaptureKit -framework VideoToolbox \
     -framework CoreMedia -framework CoreVideo -framework Metal -framework MetalKit -framework CoreImage \
+    -framework AVFoundation -framework AudioToolbox \
     -import-objc-header "$project_root/app/MacLink-Bridging.h" "$build_root/NativeVirtualDisplay.o" \
     -L "$project_root/target/$rust_target/release" -lmaclink_session \
     -F "$sparkle_dir" -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks \

@@ -1558,7 +1558,8 @@ const TEST_CAPABILITIES: u64 = ML_CAPABILITY_HEVC_444
     | ML_CAPABILITY_VIRTUAL_DISPLAY
     | ML_CAPABILITY_CURSOR
     | ML_CAPABILITY_GESTURES
-    | 1 << 40; // plus a bit no build knows // plus a bit no build knows
+    | ML_CAPABILITY_AUDIO
+    | 1 << 40; // plus a bit no build knows
 fn hello(id: u64) -> u64 {
     let mut buffer = vec![0; 4096];
     let (status, message) = typed(id, &mut buffer, 2000);
@@ -1883,4 +1884,79 @@ fn gestures_reach_only_hosts_that_inject_them() {
         Error::Invalid as i32
     );
     assert!(!is_closed(old_viewer.0));
+}
+
+#[test]
+fn sound_reaches_only_viewers_that_play_it() {
+    const OPUS: &[u8] = &[0xfc, 0xff, 0xfe, 0x01];
+    let send = |id: u64, sequence: u32, frames: u16| unsafe {
+        ml_session_send_audio(id, sequence, frames, 2, OPUS.as_ptr(), OPUS.len(), 1000)
+    };
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let (viewer, host) = pair_version(5);
+    hello(host.0);
+    assert_eq!(hello(viewer.0) & ML_CAPABILITY_AUDIO, ML_CAPABILITY_AUDIO);
+    assert_eq!(
+        send(viewer.0, 0, 480),
+        Error::Invalid as i32,
+        "viewers never send sound"
+    );
+    assert_eq!(
+        send(host.0, 0, 441),
+        Error::Invalid as i32,
+        "not an Opus duration"
+    );
+    assert!(!is_closed(host.0));
+    for sequence in [41, 42] {
+        assert_eq!(send(host.0, sequence, 480), 0);
+    }
+    let mut buffer = vec![0; 4096];
+    for sequence in [41, 42] {
+        let (status, message) = typed(viewer.0, &mut buffer, 2000);
+        let audio = message.audio;
+        assert_eq!(
+            (
+                status,
+                message.kind,
+                audio.sequence,
+                audio.frames,
+                audio.channels,
+                audio.codec
+            ),
+            (0, ML_SESSION_AUDIO_KIND, sequence, 480, 2, 1)
+        );
+        assert_eq!(
+            &buffer[audio.payload_offset..][..audio.payload_length],
+            OPUS
+        );
+    }
+    // Protocol 4 viewers announce nothing, so sound is refused before sending.
+    let (_old_viewer, old_host) = pair_version(4);
+    assert_eq!(send(old_host.0, 0, 480), Error::Invalid as i32);
+    assert!(!is_closed(old_host.0));
+}
+const ML_SESSION_AUDIO_KIND: u8 = 7;
+
+#[test]
+fn playout_rule_crosses_the_c_abi() {
+    let (mut playing, mut drop) = (0_u8, 0_u32);
+    assert_eq!(
+        unsafe { ml_audio_playout(1920, 0, &mut playing, &mut drop) },
+        0
+    );
+    assert_eq!((playing, drop), (1, 0));
+    assert_eq!(
+        unsafe { ml_audio_playout(1919, 0, &mut playing, &mut drop) },
+        0
+    );
+    assert_eq!((playing, drop), (0, 0));
+    assert_eq!(
+        unsafe { ml_audio_playout(7201, 1, &mut playing, &mut drop) },
+        0
+    );
+    assert_eq!((playing, drop), (1, 7201 - 1920));
+    assert_eq!(
+        unsafe { ml_audio_playout(0, 0, std::ptr::null_mut(), &mut drop) },
+        Error::Invalid as i32
+    );
 }

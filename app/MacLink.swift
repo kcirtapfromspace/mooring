@@ -463,6 +463,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         match.target = self; match.state = native.matchesScreen ? .on : .off
         match.toolTip = "When viewing, the sharing Mac shows a screen exactly this Mac's size, pixel for pixel."
         statusMenu.addItem(match)
+        let sound = NSMenuItem(title: "Play Sound from Shared Mac", action: #selector(toggleSharedSound), keyEquivalent: "")
+        sound.target = self; sound.state = native.playsSound ? .on : .off
+        sound.toolTip = "When viewing, play the sharing Mac's sound on this Mac. It still plays on the sharing Mac too."
+        statusMenu.addItem(sound)
         let clipboard = NSMenuItem(title: "Shared Clipboard", action: #selector(toggleSharedClipboard), keyEquivalent: "")
         clipboard.target = self; clipboard.state = native.sharesClipboard ? .on : .off
         clipboard.toolTip = "Copy on one Mac and paste on the other during a MacLink session."
@@ -538,6 +542,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     @objc private func installUpdate() { updater.install() }
     @objc private func toggleSharedClipboard() { native.sharesClipboard.toggle() }
     @objc private func toggleMatchScreen() { native.matchesScreen.toggle() }
+    @objc private func toggleSharedSound() { native.playsSound.toggle() }
     @objc private func connectNativePeer(_ sender: NSMenuItem) {
         if let id = sender.representedObject as? String { native.connect(peerID: id) }
     }

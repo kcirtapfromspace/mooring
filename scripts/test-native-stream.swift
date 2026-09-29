@@ -35,7 +35,8 @@ struct NativeStreamIntegration {
     /// viewer's Hello and streams HEVC, and the viewer decodes 4:4:4 frames.
     static func hevcStream() throws -> Int {
         try require(NativeCodecSupport.probeHEVC444(), "HEVC 4:4:4 self-test")
-        ml_capabilities_set(UInt64(ML_CAPABILITY_HEVC_444) | UInt64(ML_CAPABILITY_CURSOR))
+        try require(NativeAudioSupport.probeOpus(), "Opus self-test")
+        ml_capabilities_set(UInt64(ML_CAPABILITY_HEVC_444) | UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_AUDIO))
         defer { ml_capabilities_set(0) }
         let identity = try NativeHostIdentity.create()
         let code = try NativePairingCode.forHost(address: "127.0.0.1", computerName: "Synthetic HEVC test", identity: identity)
@@ -68,6 +69,35 @@ struct NativeStreamIntegration {
               shape.image.size == NSSize(width: 9, height: 18), shape.hotSpot == NSPoint(x: 4, y: 9) else {
             throw NativeSessionError(message: "The viewer did not receive the host's pointer shape")
         }
+        // Sound: 100 ms of a tone, encoded to Opus on the host, decoded and
+        // buffered for playout on the viewer. Nothing is played.
+        let soundEncoder = try NativeAudioEncoder(), soundDecoder = try NativeAudioDecoder(), gate = NativeAudioSendGate()
+        var sent: [NativeAudioPacket] = []
+        soundEncoder.onPacket = { payload in
+            guard let sequence = gate.admit() else { return }
+            sent.append(NativeAudioPacket(sequence: sequence, frames: 480, channels: 2, payload: payload))
+            gate.finished()
+        }
+        for start in stride(from: 0, to: 4_800, by: 480) {
+            soundEncoder.append(interleaved: (start..<(start + 480)).flatMap { index -> [Float] in
+                let value = Float(sin(2 * Double.pi * 440 * Double(index) / 48_000)) * 0.3
+                return [value, value]
+            })
+        }
+        try require(sent.count == 10, "The host encodes 10 ms Opus packets")
+        for packet in sent { try host.send(.audio(packet)) }
+        let playout = NativeAudioBuffer()
+        var energy: Float = 0
+        for expected in sent {
+            guard case .audio(let received)? = try client.receive(), received == expected else {
+                throw NativeSessionError(message: "The viewer did not receive the host's sound in order")
+            }
+            soundDecoder.decode(received.payload) { samples in
+                energy += samples.reduce(0) { $0 + $1 * $1 }
+                playout.write(samples)
+            }
+        }
+        try require(energy > 1 && playout.snapshot().buffered >= 4_000, "The viewer decodes the host's sound for playout")
         let encoder = try NativeVideoEncoder(width: 1920, height: 1080, framesPerSecond: 60, bitrate: 25_000_000, codec: .hevc)
         let decoder = NativeVideoDecoder()
         defer { encoder.stop(); decoder.stop() }
@@ -251,7 +281,7 @@ struct NativeStreamIntegration {
         try data.write(to: URL(fileURLWithPath: path), options: .atomic)
         let hevc = try hevcStream()
         print("Native encrypted stream: \(total)/\(total) 1080p frames, return controls, live telemetry and clipboards both ways; " +
-              "then a pointer shape and \(hevc) HEVC 4:4:4 frames after a protocol 5 capability exchange; hardware decode verified. Report: \(path)")
+              "then a pointer shape, 100 ms of Opus sound and \(hevc) HEVC 4:4:4 frames after a protocol 5 capability exchange; hardware decode verified. Report: \(path)")
         token.cancel(); client.close(); server.close()
     }
 }

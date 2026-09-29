@@ -7,14 +7,15 @@
 //! offset, followed by the chunk. Nothing about a record is interpreted before
 //! it authenticates.
 
+use crate::audio::{self, AudioHeader, AudioPacket, MAX_AUDIO};
 use crate::clipboard::{self, ClipboardKind, ClipboardPacket, MAX_CLIPBOARD};
 use crate::control::ControlMessage;
 use crate::cursor::{self, CursorPacket, CursorShape, MAX_CURSOR};
 use crate::input::InputEvent;
 use crate::policy::{
-    Admission, CAPABILITY_CURSOR, CAPABILITY_GESTURES, CAPABILITY_HEVC_444,
-    CAPABILITY_VIRTUAL_DISPLAY, CLIPBOARD, CONTROL, CURSOR, INPUT, PROTOCOL_MAX, PROTOCOL_MIN,
-    ReceivePolicy, Role, TELEMETRY, VIDEO,
+    AUDIO, Admission, CAPABILITY_AUDIO, CAPABILITY_CURSOR, CAPABILITY_GESTURES,
+    CAPABILITY_HEVC_444, CAPABILITY_VIRTUAL_DISPLAY, CLIPBOARD, CONTROL, CURSOR, INPUT,
+    PROTOCOL_MAX, PROTOCOL_MIN, ReceivePolicy, Role, TELEMETRY, VIDEO,
 };
 use crate::telemetry::{MAX_TELEMETRY, TelemetryMessage};
 use crate::video::Codec;
@@ -109,6 +110,7 @@ fn limit(kind: u8) -> Result<usize> {
         TELEMETRY => Ok(MAX_TELEMETRY),
         CLIPBOARD => Ok(MAX_CLIPBOARD),
         CURSOR => Ok(MAX_CURSOR),
+        AUDIO => Ok(MAX_AUDIO),
         _ => Err(Error::Invalid),
     }
 }
@@ -281,6 +283,7 @@ pub(crate) enum Outgoing<'a> {
     Telemetry(TelemetryMessage),
     Clipboard(&'a [(ClipboardKind, &'a [u8])]),
     Cursor(CursorShape, &'a [u8]),
+    Audio(AudioHeader, &'a [u8]),
 }
 #[derive(Debug, PartialEq)]
 pub(crate) enum Incoming {
@@ -293,10 +296,13 @@ pub(crate) enum Incoming {
     Clipboard(ClipboardPacket),
     /// The PNG range indexes the caller's large-message buffer.
     Cursor(CursorPacket),
+    /// The Opus packet's range indexes the caller's large-message buffer.
+    Audio(AudioPacket),
 }
-/// Video and clipboard arrive in the caller's buffer; the rest on the stack.
+/// Video, clipboards, cursors and sound arrive in the caller's buffer; the
+/// rest on the stack.
 fn is_large(kind: u8) -> bool {
-    matches!(kind, VIDEO | CLIPBOARD | CURSOR)
+    matches!(kind, VIDEO | CLIPBOARD | CURSOR | AUDIO)
 }
 
 pub(crate) struct Counter {
@@ -431,6 +437,15 @@ impl Session {
             Outgoing::Cursor(shape, png) => {
                 self.send_bytes(CURSOR, &cursor::encode(shape, png)?, end)
             }
+            // Only to a viewer that announced it plays sound.
+            Outgoing::Audio(_, _)
+                if self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_AUDIO == 0 =>
+            {
+                Err(Error::Invalid)
+            }
+            Outgoing::Audio(header, payload) => {
+                self.send_bytes(AUDIO, &audio::encode(header, payload)?, end)
+            }
         }
     }
     pub(crate) fn send_bytes(&self, kind: u8, data: &[u8], end: Instant) -> Result<()> {
@@ -499,6 +514,7 @@ impl Session {
                     VIDEO => Incoming::Video(VideoPacket::parse(&video[..length])?),
                     CLIPBOARD => Incoming::Clipboard(ClipboardPacket::parse(&video[..length])?),
                     CURSOR => Incoming::Cursor(CursorPacket::parse(&video[..length])?),
+                    AUDIO => Incoming::Audio(AudioPacket::parse(&video[..length])?),
                     INPUT => Incoming::Input(InputEvent::decode(&small[..length])?),
                     CONTROL => Incoming::Control(ControlMessage::decode(&small[..length])?),
                     _ => Incoming::Telemetry(TelemetryMessage::decode(&small[..length])?),

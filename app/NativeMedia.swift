@@ -469,7 +469,12 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     var onGeometry: ((NativeDisplayGeometry) -> Void)?
     var onEncodedFrame: ((NativeEncodedFrame, @escaping () -> Void) -> Void)?
     var onError: ((String) -> Void)?
+    /// This Mac's sound, excluding MacLink's own, on the audio queue; only
+    /// when created with `capturesAudio`.
+    var onAudio: ((CMSampleBuffer) -> Void)?
     private let captureQueue = DispatchQueue(label: "MacLink.native.capture", qos: .userInteractive)
+    private let audioQueue = DispatchQueue(label: "MacLink.native.capture.audio", qos: .userInteractive)
+    private let capturesAudio: Bool
     private let encoderLock = NSLock()
     private var encoder: NativeVideoEncoder?
     private var captureIdentity: ObjectIdentifier?
@@ -499,8 +504,9 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     init(maxPixelWidth: Int = 3840, maxPixelHeight: Int = 2160, framesPerSecond: Int = 60, showsCursor: Bool = true,
          bitrate: Int = 25_000_000, keyframeSeconds: Int = 2, inFlightLimit: Int = NativeVideoEncoder.maxInFlight,
-         codec: NativeVideoCodec = .h264) {
+         codec: NativeVideoCodec = .h264, capturesAudio: Bool = false) {
         requestedCodec = codec
+        self.capturesAudio = capturesAudio
         self.bitrate = min(80_000_000, max(1_000_000, bitrate))
         self.keyframeSeconds = min(10, max(1, keyframeSeconds))
         self.inFlightLimit = min(NativeVideoEncoder.maxInFlight, max(1, inFlightLimit))
@@ -548,11 +554,16 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 configuration.width = width; configuration.height = height
                 configuration.minimumFrameInterval = CMTime(value: 1, timescale: Int32(self.framesPerSecond))
                 configuration.queueDepth = 3; configuration.pixelFormat = kCVPixelFormatType_32BGRA
-                configuration.showsCursor = self.showsCursor; configuration.capturesAudio = false
+                configuration.showsCursor = self.showsCursor; configuration.capturesAudio = self.capturesAudio
+                if self.capturesAudio {
+                    configuration.excludesCurrentProcessAudio = true
+                    configuration.sampleRate = Int(NativeAudioFormat.sampleRate); configuration.channelCount = 2
+                }
                 configuration.scalesToFit = true; configuration.colorSpaceName = CGColorSpace.sRGB
                 configuration.captureResolution = .best
                 let stream = SCStream(filter: SCContentFilter(display: display, excludingWindows: []), configuration: configuration, delegate: self)
                 try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.captureQueue)
+                if self.capturesAudio { try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: self.audioQueue) }
                 self.stream = stream; self.configuration = configuration
                 self.setStreamMetadata(stream, display: identifier, geometry: geometry)
                 // Enqueue control geometry before SCK can deliver the first frame.
@@ -634,6 +645,12 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         return true
     }
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
+        if outputType == .audio {
+            encoderLock.lock(); let current = captureIdentity == ObjectIdentifier(stream) && encoder != nil; encoderLock.unlock()
+            // Sound stops with the picture, including when the session locks.
+            if current, NativePrivacyGuard.mayShareNow() { onAudio?(sampleBuffer) }
+            return
+        }
         guard outputType == .screen else { return }
         encoderLock.lock()
         let current = captureIdentity == ObjectIdentifier(stream) ? encoder : nil

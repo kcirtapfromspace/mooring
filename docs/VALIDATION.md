@@ -214,6 +214,28 @@ For `v0.3.0-preview.11`, the Rust suite added gesture checks:
 
 The native input suite builds each gesture with the private event fields and reads it back through AppKit, without posting it: a pinch becomes a magnify event with its phase and value, a rotation a rotate event with its degrees, and a smart zoom a smart magnify event. Whether macOS delivers a posted gesture to apps on the sharing Mac is checked only between two Macs.
 
+## Sound
+
+For `v0.3.0-preview.12`, the Rust suite added sound checks:
+
+- the packet format: Opus only, one or two channels, 5, 10 or 20 ms, and at most 1500 bytes;
+- direction (sharing Mac to viewer only), protocol 5 only, and capability gating on send and on receive;
+- beyond 400 packets a second, sound is dropped rather than ending the session;
+- the playout rule: playback starts at 40 ms buffered, and beyond 150 ms the oldest sound is trimmed back to 40 ms.
+
+The native media suite, with no capture or playback:
+
+- runs the launch self-test (a tone through AudioToolbox's Opus encoder and decoder);
+- feeds ScreenCaptureKit-style planar stereo and interleaved mono buffers, which become 10 ms packets (about 160 bytes at 128 kbps), and skips sound at another sample rate;
+- keeps only the newest 100 ms when too much arrives at once;
+- decodes both channels;
+- checks that the playout buffer waits for 40 ms, deinterleaves, pauses when it runs dry and trims a burst;
+- checks that the sending side holds at most eight packets and numbers across drops.
+
+The encrypted loopback carries 100 ms of Opus from host to viewer in order after the capability exchange, and the viewer decodes it into the playout buffer.
+
+Capture of real system sound, playback, output device changes and lip sync are checked only between two Macs.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

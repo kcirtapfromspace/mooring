@@ -136,6 +136,18 @@ pub struct MLCursorMessage {
     pub png_offset: usize,
     pub png_length: usize,
 }
+/// A received Opus packet at `payload_offset` in the caller's buffer, with
+/// its sequence number and duration in 48 kHz frames.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MLAudioMessage {
+    pub sequence: u32,
+    pub frames: u16,
+    pub channels: u8,
+    pub codec: u8,
+    pub payload_offset: usize,
+    pub payload_length: usize,
+}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MLSessionMessage {
@@ -147,6 +159,7 @@ pub struct MLSessionMessage {
     pub telemetry: MLTelemetryMessage,
     pub clipboard: MLClipboardMessage,
     pub cursor: MLCursorMessage,
+    pub audio: MLAudioMessage,
 }
 pub const ML_CLIPBOARD_MAX_ITEMS: usize = 3;
 pub const ML_CLIPBOARD_MAX_BYTES: usize = 4_194_304;
@@ -280,7 +293,12 @@ const _: () = {
     assert!(offset_of!(MLVideoPacket, sps_offset) == 32);
     assert!(offset_of!(MLVideoPacket, avcc_length) == 72);
     assert!(offset_of!(MLVideoPacket, vps_offset) == 80);
-    assert!(size_of::<MLSessionMessage>() == 848);
+    assert!(size_of::<MLSessionMessage>() == 872);
+    assert!(offset_of!(MLSessionMessage, audio) == 848);
+    assert!(size_of::<MLAudioMessage>() == 24);
+    assert!(offset_of!(MLAudioMessage, frames) == 4);
+    assert!(offset_of!(MLAudioMessage, codec) == 7);
+    assert!(offset_of!(MLAudioMessage, payload_offset) == 8);
     assert!(offset_of!(MLSessionMessage, cursor) == 824);
     assert!(size_of::<MLCursorMessage>() == 24);
     assert!(offset_of!(MLCursorMessage, png_offset) == 8);
@@ -879,6 +897,55 @@ pub unsafe extern "C" fn ml_session_send_cursor(
         transport::session(id)?.send_message(&Outgoing::Cursor(shape, bytes), deadline(timeout_ms)?)
     })
 }
+/// Hosts only, to a viewer that announced ML_CAPABILITY_AUDIO: one Opus
+/// packet of `frames` 48 kHz frames.
+/// # Safety
+/// `payload` must be readable for `length` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_session_send_audio(
+    id: u64,
+    sequence: u32,
+    frames: u16,
+    channels: u8,
+    payload: *const u8,
+    length: usize,
+    timeout_ms: u32,
+) -> i32 {
+    ffi(|| {
+        if payload.is_null() || length == 0 || length > crate::audio::MAX_AUDIO_PAYLOAD {
+            return Err(Error::Invalid);
+        }
+        // SAFETY: caller promises `length` readable bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(payload, length) };
+        let header = crate::audio::AudioHeader {
+            codec: crate::audio::OPUS,
+            channels,
+            sequence,
+            frames,
+        };
+        transport::session(id)?.send_message(&Outgoing::Audio(header, bytes), deadline(timeout_ms)?)
+    })
+}
+/// The viewer's playout rule, called after each decoded packet is buffered:
+/// whether playback runs and how many of the oldest frames to drop.
+/// # Safety
+/// `playing_out` and `drop_out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_audio_playout(
+    buffered_frames: u32,
+    playing: u8,
+    playing_out: *mut u8,
+    drop_out: *mut u32,
+) -> i32 {
+    ffi(|| {
+        let playing_out = unsafe { output(playing_out)? };
+        let drop_out = unsafe { output(drop_out)? };
+        let (play, drop) = crate::audio::playout(buffered_frames, playing != 0);
+        *playing_out = u8::from(play);
+        *drop_out = drop;
+        Ok(())
+    })
+}
 /// # Safety
 /// As for `clipboard_items`.
 #[unsafe(no_mangle)]
@@ -952,6 +1019,17 @@ pub unsafe extern "C" fn ml_session_receive(
                     png_length: packet.png.len(),
                 };
             }
+            Incoming::Audio(packet) => {
+                out.kind = crate::policy::AUDIO;
+                out.audio = MLAudioMessage {
+                    sequence: packet.header.sequence,
+                    frames: packet.header.frames,
+                    channels: packet.header.channels,
+                    codec: packet.header.codec,
+                    payload_offset: packet.payload.start,
+                    payload_length: packet.payload.len(),
+                };
+            }
             Incoming::Clipboard(packet) => {
                 out.kind = crate::policy::CLIPBOARD;
                 out.clipboard.count = packet.items.len() as u8;
@@ -1017,6 +1095,9 @@ pub const ML_CAPABILITY_HEVC_444: u64 = crate::policy::CAPABILITY_HEVC_444;
 pub const ML_CAPABILITY_VIRTUAL_DISPLAY: u64 = crate::policy::CAPABILITY_VIRTUAL_DISPLAY;
 pub const ML_CAPABILITY_CURSOR: u64 = crate::policy::CAPABILITY_CURSOR;
 pub const ML_CAPABILITY_GESTURES: u64 = crate::policy::CAPABILITY_GESTURES;
+pub const ML_CAPABILITY_AUDIO: u64 = crate::policy::CAPABILITY_AUDIO;
+pub const ML_AUDIO_MAX_PAYLOAD: usize = crate::audio::MAX_AUDIO_PAYLOAD;
+pub const ML_AUDIO_SAMPLE_RATE: u32 = crate::audio::SAMPLE_RATE;
 pub const ML_CODEC_H264: u8 = 1;
 pub const ML_CODEC_HEVC: u8 = 2;
 

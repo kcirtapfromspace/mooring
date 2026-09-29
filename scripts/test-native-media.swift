@@ -1,5 +1,7 @@
 // Synthetic hardware codec regression. No ScreenCaptureKit capture, permission
-// prompts, remote input, or network traffic. Compile with app/NativeMedia.swift.
+// prompts, remote input, or network traffic, and no sound is played. Compile
+// with app/NativeMedia.swift and app/NativeAudio.swift.
+import AudioToolbox
 import Foundation
 import CoreVideo
 import CoreGraphics
@@ -149,6 +151,7 @@ struct NativeMediaTests {
         try require(stopped.wait(timeout: .now() + 3) == .success, "Encoder stop completion")
         let fourK = try testFourK()
         let hevc444 = try testHEVC444()
+        let sound = try testAudio()
         let stats: [String: Any] = ["scope": "Synthetic paced encode/decode only; no screen capture, network or presentation test.",
             "frames": frames, "decoded": decoded, "pixel_width": width, "pixel_height": height,
             "hardware_encoder": encoder.snapshot.hardware_encoder, "hardware_decoder": decoder.hardwareDecoder,
@@ -156,7 +159,7 @@ struct NativeMediaTests {
             "paced_seconds": elapsed, "measured_roundtrip_fps": Double(frames - 1) / elapsed,
             "average_encode_ms": encoded.map { $0.metrics.encode_ms }.reduce(0, +) / Double(frames),
             "maximum_encode_send_inflight": NativeVideoEncoder.maxInFlight, "maximum_decoder_pending": NativeVideoDecoder.maxPending,
-            "hevc_444": hevc444,
+            "hevc_444": hevc444, "opus_sound": sound,
             "decoder_failure_budget": "passed",
             "backpressure_capture_skips": encoder.snapshot.skipped_capture_frames, "ffprobe": inspected,
             "four_k_smoke": fourK, "gap_and_overflow_recovery": "passed"]
@@ -374,5 +377,111 @@ struct NativeMediaTests {
         if hevc { try require(stream["pix_fmt"] as? String == "yuv444p", "Independent verification of 4:4:4 chroma") }
         try require(stream["nb_read_frames"] as? String == String(packets.count), "Independent decoded frame count")
         return stream
+    }
+
+    /// A ScreenCaptureKit-style sound buffer of 32-bit float PCM.
+    static func audioSampleBuffer(frames: Int, start: Int = 0, sampleRate: Double = 48_000, channels: Int = 2, planar: Bool = true,
+                                  value: (Int, Int) -> Float) throws -> CMSampleBuffer {
+        let bytesPerFrame = UInt32(4 * (planar ? 1 : channels))
+        var description = AudioStreamBasicDescription(mSampleRate: sampleRate, mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | (planar ? kAudioFormatFlagIsNonInterleaved : 0),
+            mBytesPerPacket: bytesPerFrame, mFramesPerPacket: 1, mBytesPerFrame: bytesPerFrame,
+            mChannelsPerFrame: UInt32(channels), mBitsPerChannel: 32, mReserved: 0)
+        var format: CMAudioFormatDescription?
+        guard CMAudioFormatDescriptionCreate(allocator: nil, asbd: &description, layoutSize: 0, layout: nil, magicCookieSize: 0,
+                                             magicCookie: nil, extensions: nil, formatDescriptionOut: &format) == noErr, let format else {
+            throw Failure("Create sound format")
+        }
+        var sample: CMSampleBuffer?
+        guard CMAudioSampleBufferCreateWithPacketDescriptions(allocator: nil, dataBuffer: nil, dataReady: false, makeDataReadyCallback: nil,
+                                                              refcon: nil, formatDescription: format, sampleCount: frames,
+                                                              presentationTimeStamp: CMTime(value: Int64(start), timescale: 48_000),
+                                                              packetDescriptions: nil, sampleBufferOut: &sample) == noErr, let sample else {
+            throw Failure("Create sound buffer")
+        }
+        let planes = planar ? (0..<channels).map { channel in (0..<frames).map { value(start + $0, channel) } }
+            : [(0..<frames * channels).map { value(start + $0 / channels, $0 % channels) }]
+        let list = AudioBufferList.allocate(maximumBuffers: planes.count)
+        let memory = planes.map { plane -> UnsafeMutablePointer<Float> in
+            let pointer = UnsafeMutablePointer<Float>.allocate(capacity: plane.count)
+            pointer.initialize(from: plane, count: plane.count)
+            return pointer
+        }
+        defer { memory.forEach { $0.deallocate() }; free(list.unsafeMutablePointer) }
+        for (index, plane) in planes.enumerated() {
+            list[index] = AudioBuffer(mNumberChannels: planar ? 1 : UInt32(channels), mDataByteSize: UInt32(plane.count * 4),
+                                      mData: memory[index])
+        }
+        // Copies the samples into the buffer's own storage.
+        let status = CMSampleBufferSetDataBufferFromAudioBufferList(sample, blockBufferAllocator: nil, blockBufferMemoryAllocator: nil,
+                                                                    flags: 0, bufferList: list.unsafePointer)
+        try require(status == noErr, "Fill sound buffer")
+        return sample
+    }
+
+    /// Opus through AudioToolbox, the playout buffer and the send bound. No
+    /// sound is captured or played.
+    static func testAudio() throws -> [String: Any] {
+        try require(NativeAudioSupport.probeOpus(), "Opus encode and decode self-test")
+        let encoder = try NativeAudioEncoder(), decoder = try NativeAudioDecoder()
+        var packets: [Data] = []
+        encoder.onPacket = { packets.append($0) }
+        let tone = { (frame: Int, channel: Int) -> Float in
+            Float(sin(2 * Double.pi * (channel == 0 ? 440 : 660) * Double(frame) / 48_000)) * 0.3
+        }
+        var frame = 0
+        for _ in 0..<8 { encoder.append(try audioSampleBuffer(frames: 1_200, start: frame, value: tone)); frame += 1_200 }
+        try require(packets.count == 20, "Planar stereo sound becomes 10 ms packets")
+        encoder.append(try audioSampleBuffer(frames: 960, channels: 1, planar: false, value: tone))
+        try require(packets.count == 22, "Interleaved mono sound encodes as stereo")
+        encoder.append(try audioSampleBuffer(frames: 960, sampleRate: 44_100, value: tone))
+        try require(packets.count == 22 && encoder.unsupportedBuffers == 1, "Sound at another rate is skipped")
+        encoder.append(interleaved: [Float](repeating: 0.1, count: 48_000 * 2))
+        try require(packets.count == 32 && encoder.droppedFrames == 48_000 - NativeAudioEncoder.maxPendingFrames,
+                    "A second of sound at once keeps only the newest 100 ms")
+        try require(packets.allSatisfy { !$0.isEmpty && $0.count <= Int(ML_AUDIO_MAX_PAYLOAD) }, "Packets fit the protocol")
+        var left: Float = 0, right: Float = 0, decodedFrames = 0
+        for packet in packets.prefix(20) {
+            decodedFrames += decoder.decode(packet) { samples in
+                for index in stride(from: 0, to: samples.count, by: 2) { left += samples[index] * samples[index]; right += samples[index + 1] * samples[index + 1] }
+            }
+        }
+        try require(decodedFrames >= 9_000 && left > 1 && right > 1, "Opus sound decodes on both channels")
+        try require(decoder.decode(Data(count: Int(ML_AUDIO_MAX_PAYLOAD) + 1)) { _ in } == 0, "Oversized packets are refused")
+
+        // Playout waits for 40 ms, deinterleaves, runs dry, and trims a burst.
+        let buffer = NativeAudioBuffer()
+        let list = AudioBufferList.allocate(maximumBuffers: 2)
+        defer { free(list.unsafeMutablePointer) }
+        var outLeft = [Float](repeating: 1, count: 480), outRight = [Float](repeating: 1, count: 480)
+        func render() -> Bool {
+            outLeft.withUnsafeMutableBytes { leftBytes in
+                outRight.withUnsafeMutableBytes { rightBytes in
+                    list[0] = AudioBuffer(mNumberChannels: 1, mDataByteSize: UInt32(leftBytes.count), mData: leftBytes.baseAddress)
+                    list[1] = AudioBuffer(mNumberChannels: 1, mDataByteSize: UInt32(rightBytes.count), mData: rightBytes.baseAddress)
+                    return buffer.read(into: list, frames: 480)
+                }
+            }
+        }
+        let block = (0..<480).flatMap { [Float($0), -Float($0)] }
+        let write = { block.withUnsafeBufferPointer { buffer.write($0) } }
+        for _ in 0..<3 { write() }
+        try require(!render() && outLeft.allSatisfy { $0 == 0 }, "Silence until 40 ms is buffered")
+        write()
+        try require(render() && outLeft[5] == 5 && outRight[5] == -5, "Playback deinterleaves the oldest sound")
+        for _ in 0..<3 { try require(render(), "Buffered sound plays") }
+        try require(!render() && buffer.snapshot().underruns == 1, "Running dry pauses playback")
+        for _ in 0..<20 { write() }
+        let burst = buffer.snapshot()
+        try require(burst.buffered == 3_840 && burst.droppedFrames == 5_760, "A burst is trimmed back to the playout target")
+
+        let gate = NativeAudioSendGate()
+        try require((0..<8).compactMap { _ in gate.admit() } == Array(0..<8) && gate.admit() == nil,
+                    "At most eight packets wait to be written")
+        gate.finished()
+        try require(gate.admit() == 9, "A dropped packet leaves a gap in the numbering")
+        let sizes = packets.prefix(20).map(\.count)
+        return ["self_test": "passed", "packets_per_second": 100, "average_tone_packet_bytes": sizes.reduce(0, +) / sizes.count,
+                "playout": "passed", "send_bound": "passed"]
     }
 }

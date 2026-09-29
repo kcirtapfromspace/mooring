@@ -40,6 +40,7 @@ final class NativeSessionCoordinator {
     private static let automaticSharingKey = "native.shareAutomatically"
     private static let sharedClipboardKey = "native.shareClipboard"
     private static let matchScreenKey = "native.matchScreen"
+    private static let playSoundKey = "native.playSound"
     private let defaults: UserDefaults
     private let keychain = NativeKeychain()
     private let peerStore = NativePeerStore()
@@ -102,6 +103,13 @@ final class NativeSessionCoordinator {
     private var systemKeys: NativeSystemKeyCapture?
     /// Found at launch by encoding and decoding one HEVC 4:4:4 frame in hardware.
     private var hevc444Available = false
+    /// Found at launch by encoding and decoding a tone through Opus.
+    private var audioAvailable = false
+    /// Host: numbers the viewer's sound packets and bounds those waiting.
+    private var hostAudioGate: NativeAudioSendGate?
+    /// Viewer: plays the sharing Mac's sound.
+    private var audioPlayer: NativeAudioPlayer?
+    private var audioReported = NativeAudioStats()
     /// Host: follows this Mac's pointer shape for viewers that draw it.
     private let cursorWatcher = NativeCursorWatcher()
     /// Host: the display being shared, virtual when a viewer asked for its size.
@@ -156,6 +164,16 @@ final class NativeSessionCoordinator {
         get { defaults.object(forKey: Self.matchScreenKey) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Self.matchScreenKey); onChange?() }
     }
+    /// Viewer: play the sharing Mac's sound here. On by default; turning it
+    /// off silences a running session at once.
+    var playsSound: Bool {
+        get { defaults.object(forKey: Self.playSoundKey) as? Bool ?? true }
+        set {
+            defaults.set(newValue, forKey: Self.playSoundKey)
+            audioPlayer?.setMuted(!newValue)
+            onChange?()
+        }
+    }
     var status: String? {
         if isSharing { return hostChannel == nil ? "Sharing this Mac · waiting" : "Sharing this Mac · connected" }
         if isConnected { return "Native session connected" }
@@ -191,13 +209,17 @@ final class NativeSessionCoordinator {
         // decode it; sessions that start before the test finishes use H.264.
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let hevc = NativeCodecSupport.probeHEVC444()
+            let audio = NativeAudioSupport.probeOpus()
             DispatchQueue.main.async {
                 self?.hevc444Available = hevc
+                self?.audioAvailable = audio
                 let virtualDisplay = NativeSharedDisplay.isAvailable
                 // Every build with this code draws the host's pointer shape and
                 // posts trackpad gestures.
                 ml_capabilities_set((hevc ? UInt64(ML_CAPABILITY_HEVC_444) : 0) | (virtualDisplay ? UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) : 0)
-                                    | UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_GESTURES))
+                                    | UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_GESTURES)
+                                    | (audio ? UInt64(ML_CAPABILITY_AUDIO) : 0))
+                NativeLog.session.notice("Opus sound encode and decode: \(audio ? "available" : "unavailable", privacy: .public)")
                 NativeLog.session.notice("virtual display for viewers: \(virtualDisplay ? "available" : "unavailable", privacy: .public)")
                 NativeLog.session.notice("HEVC 4:4:4 hardware encode and decode: \(hevc ? "available" : "unavailable", privacy: .public)")
             }
@@ -326,6 +348,7 @@ final class NativeSessionCoordinator {
         NativeLog.session.notice("host session started, protocol \(version)")
         if !isConnected { clipboard.start(includeCurrent: false) }
         let injector = NativeInputInjector(); hostInjector = injector
+        hostAudioGate = NativeAudioSendGate()
         hostActivity = hostActivity ?? ProcessInfo.processInfo.beginActivity(
             options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled, .userInitiated],
             reason: "A paired Mac is viewing this display")
@@ -354,11 +377,29 @@ final class NativeSessionCoordinator {
         let tuning = hostTuning
         let codec: NativeVideoCodec = hevc444Available
             && channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_HEVC_444) != 0 ? .hevc : .h264
+        // Sound goes only to a viewer that announced it plays it.
+        let audioGate = hostAudioGate
+        let audioEncoder = audioAvailable && channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_AUDIO) != 0
+            ? try? NativeAudioEncoder() : nil
         let capture = NativeCapture(maxPixelWidth: tuning.maxWidth, framesPerSecond: tuning.fps,
                                     showsCursor: !NativeInputInjector.isTrusted, bitrate: tuning.bitrate,
-                                    keyframeSeconds: tuning.keyframeSeconds, inFlightLimit: tuning.inFlight, codec: codec)
+                                    keyframeSeconds: tuning.keyframeSeconds, inFlightLimit: tuning.inFlight, codec: codec,
+                                    capturesAudio: audioEncoder != nil && audioGate != nil)
         let firstKeyframe = NativeRunToken()
         let live = NativeRunToken()
+        if let audioEncoder, let audioGate {
+            let firstSound = NativeRunToken()
+            audioEncoder.onPacket = { [weak channel] payload in
+                guard live.isActive, let channel, channel.token.isActive else { return }
+                guard let sequence = audioGate.admit() else { channel.measurements.add("audio_dropped_packets"); return }
+                if firstSound.cancel() { NativeLog.session.notice("streaming sound as Opus") }
+                let packet = NativeAudioPacket(sequence: sequence, frames: UInt16(NativeAudioFormat.packetFrames), channels: 2, payload: payload)
+                channel.measurements.add("sent_audio_packets"); channel.measurements.add("sent_audio_bytes", Double(payload.count))
+                channel.send(.audio(packet), completion: audioGate.finished)
+            }
+            // The encoder is used only on the capture's audio queue.
+            capture.onAudio = { sampleBuffer in if live.isActive { audioEncoder.append(sampleBuffer) } }
+        }
         captureToken?.cancel(); captureToken = live
         self.capture = capture; captureMaxWidth = tuning.maxWidth
         capture.onGeometry = { [weak self, weak channel] geometry in
@@ -566,7 +607,7 @@ final class NativeSessionCoordinator {
                             guard let self, let channel, self.hostChannel === channel else { return }
                             self.applyClipboard(content, from: channel)
                         }
-                    case .control, .video, .cursor:
+                    case .control, .video, .cursor, .audio:
                         throw NativeSessionError(message: "The viewer sent an unexpected session message.")
                     }
                 } catch { if channel.token.isActive { channel.fail(error.localizedDescription) }; return }
@@ -576,7 +617,7 @@ final class NativeSessionCoordinator {
 
     private func endHost(reason: String) {
         recordEnd("host", reason)
-        hostChannel?.close(); hostChannel = nil
+        hostChannel?.close(); hostChannel = nil; hostAudioGate = nil
         cursorWatcher.stop()
         sharedDisplay.release(); pendingDisplayRequest = nil; displayRestarts = []
         endHostActivity()
@@ -600,7 +641,7 @@ final class NativeSessionCoordinator {
         if sharingToken != nil { NativeLog.session.notice("sharing stopped: \(reason, privacy: .public)") }
         sharingToken?.cancel(); sharingToken = nil
         listener?.close(); listener = nil
-        hostChannel?.close(); hostChannel = nil
+        hostChannel?.close(); hostChannel = nil; hostAudioGate = nil
         cursorWatcher.stop()
         sharedDisplay.release(); pendingDisplayRequest = nil; displayRestarts = []
         endHostActivity()
@@ -924,6 +965,7 @@ final class NativeSessionCoordinator {
         statusTimer?.invalidate()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.updateViewerStatus() }
         if let statusTimer { RunLoop.main.add(statusTimer, forMode: .common) }
+        audioPlayer?.stop(); audioPlayer = NativeAudioPlayer(muted: !playsSound); audioReported = NativeAudioStats()
         readViewer(channel, decoder: decoder)
         onChange?()
     }
@@ -931,6 +973,7 @@ final class NativeSessionCoordinator {
     /// Rust admits only video, geometry, input state and pong here, requires
     /// geometry before video, limits control rate, and ends an idle session.
     private func readViewer(_ channel: NativeSessionChannel, decoder: NativeVideoDecoder) {
+        let player = audioPlayer
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak channel] in
             guard let self, let channel else { return }
             while channel.token.isActive {
@@ -957,6 +1000,8 @@ final class NativeSessionCoordinator {
                             guard let self, let channel, self.viewerChannel === channel else { return }
                             self.viewerWindow?.video.remoteCursor = image.cursor
                         }
+                    case .audio(let packet):
+                        player?.receive(packet)
                     case .input, .telemetry(.tuning):
                         throw NativeSessionError(message: "The sharing Mac sent an unexpected message.")
                     }
@@ -1028,6 +1073,17 @@ final class NativeSessionCoordinator {
                 NativeLog.session.notice("viewer drawing, last 10 s: \(Int(decoded - self.drawReportDecoded)) decoded, \(draw.summary, privacy: .public)")
             }
             drawReportDecoded = decoded
+            if let player = audioPlayer {
+                let sound = player.snapshot(), previous = audioReported
+                audioReported = sound
+                let received = sound.packets - previous.packets
+                channel.measurements.set("received_audio_packets", Double(sound.packets))
+                channel.measurements.set("audio_underruns", Double(sound.underruns))
+                channel.measurements.set("audio_gap_packets", Double(sound.gaps))
+                if received > 0 {
+                    NativeLog.session.notice("viewer sound, last 10 s: \(received) packets, \(sound.gaps - previous.gaps) missing, \(sound.droppedPackets - previous.droppedPackets) dropped waiting, \(sound.underruns - previous.underruns) ran dry, \((sound.droppedFrames - previous.droppedFrames) / 48) ms trimmed, \(sound.bufferedFrames / 48) ms buffered")
+                }
+            }
         }
         let rtt = snapshot["network_round_trip_ms"].map { String(format: "%.0f ms RTT", $0) } ?? "checking connection"
         // The sharing Mac sends frames only when its screen changes, so the rate
@@ -1075,6 +1131,7 @@ final class NativeSessionCoordinator {
         let lasted = uptime - viewerStarted
         recordEnd("viewer", reason); lastViewerEnd = reason
         releaseViewerInput(); channel.close(); viewerChannel = nil
+        audioPlayer?.stop(); audioPlayer = nil
         systemKeys?.stop()
         decoder?.stop(); decoder = nil; viewerInputEnabled = false
         statusTimer?.invalidate(); statusTimer = nil

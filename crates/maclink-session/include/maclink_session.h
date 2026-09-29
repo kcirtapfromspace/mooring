@@ -24,7 +24,7 @@ enum {
     ML_SESSION_INTERNAL = -9, ML_SESSION_RATE_LIMITED = -10,
     ML_SESSION_STALLED = -11, ML_SESSION_STORAGE = -12
 };
-enum { ML_SESSION_VIDEO = 1, ML_SESSION_INPUT = 2, ML_SESSION_CONTROL = 3, ML_SESSION_TELEMETRY = 4, ML_SESSION_CLIPBOARD = 5, ML_SESSION_CURSOR = 6 };
+enum { ML_SESSION_VIDEO = 1, ML_SESSION_INPUT = 2, ML_SESSION_CONTROL = 3, ML_SESSION_TELEMETRY = 4, ML_SESSION_CLIPBOARD = 5, ML_SESSION_CURSOR = 6, ML_SESSION_AUDIO = 7 };
 /* Clipboard representations: UTF-8 plain text, Rich Text Format, PNG. */
 enum { ML_CLIPBOARD_TEXT = 1, ML_CLIPBOARD_RTF = 2, ML_CLIPBOARD_PNG = 3 };
 enum { ML_TELEMETRY_STATS = 1, ML_TELEMETRY_TUNING = 2 };
@@ -104,6 +104,9 @@ enum { ML_CODEC_H264 = 1, ML_CODEC_HEVC = 2 };
 #define ML_CAPABILITY_VIRTUAL_DISPLAY 2ull
 #define ML_CAPABILITY_CURSOR 4ull /* the viewer draws the host's pointer shape */
 #define ML_CAPABILITY_GESTURES 8ull /* the host injects trackpad gestures */
+#define ML_CAPABILITY_AUDIO 16ull /* this Mac encodes and decodes Opus; a viewer plays the host's sound */
+#define ML_AUDIO_MAX_PAYLOAD 1500u /* bytes in one Opus packet */
+#define ML_AUDIO_SAMPLE_RATE 48000u
 #define ML_RECONNECT_STABLE_SECONDS 20u
 
 /* Logical CoreGraphics display bounds plus encoded pixel dimensions. */
@@ -223,6 +226,17 @@ typedef struct {
     size_t png_offset, png_length;
 } MLCursorMessage;
 
+/* A received Opus packet (codec 1) at payload_offset in the caller's buffer:
+ * its sequence number, duration in 48 kHz frames (240, 480 or 960) and
+ * channel count (1 or 2). */
+typedef struct {
+    uint32_t sequence;
+    uint16_t frames;
+    uint8_t channels;
+    uint8_t codec;
+    size_t payload_offset, payload_length;
+} MLAudioMessage;
+
 /* kind selects the one populated member. */
 typedef struct {
     uint8_t kind;
@@ -233,6 +247,7 @@ typedef struct {
     MLTelemetryMessage telemetry;
     MLClipboardMessage clipboard;
     MLCursorMessage cursor;
+    MLAudioMessage audio;
 } MLSessionMessage;
 
 /* One local snapshot. peer_age_seconds is negative before peer stats arrive.
@@ -295,7 +310,10 @@ _Static_assert(offsetof(MLVideoFrame, avcc_length) == 72, "MLVideoFrame.avcc_len
 _Static_assert(sizeof(MLVideoPacket) == 96 && offsetof(MLVideoPacket, vps_offset) == 80, "MLVideoPacket layout");
 _Static_assert(offsetof(MLVideoPacket, sps_offset) == 32, "MLVideoPacket.sps_offset layout");
 _Static_assert(offsetof(MLVideoPacket, avcc_length) == 72, "MLVideoPacket.avcc_length layout");
-_Static_assert(sizeof(MLSessionMessage) == 848, "MLSessionMessage layout");
+_Static_assert(sizeof(MLSessionMessage) == 872, "MLSessionMessage layout");
+_Static_assert(offsetof(MLSessionMessage, audio) == 848, "MLSessionMessage.audio layout");
+_Static_assert(sizeof(MLAudioMessage) == 24 && offsetof(MLAudioMessage, frames) == 4
+               && offsetof(MLAudioMessage, codec) == 7 && offsetof(MLAudioMessage, payload_offset) == 8, "MLAudioMessage layout");
 _Static_assert(offsetof(MLSessionMessage, cursor) == 824, "MLSessionMessage.cursor layout");
 _Static_assert(sizeof(MLCursorMessage) == 24 && offsetof(MLCursorMessage, png_offset) == 8, "MLCursorMessage layout");
 _Static_assert(offsetof(MLSessionMessage, clipboard) == 744, "MLSessionMessage.clipboard layout");
@@ -357,8 +375,16 @@ int32_t ml_session_send_clipboard(uint64_t session, const MLClipboardItem *items
  * second: the pointer as a PNG (64 KiB at most), size and hotspot in points. */
 int32_t ml_session_send_cursor(uint64_t session, uint16_t width, uint16_t height, uint16_t hotspot_x,
                                uint16_t hotspot_y, const uint8_t *png, size_t png_length, uint32_t timeout_ms);
-/* Pass an ML_SESSION_MAX_VIDEO buffer: video (to viewers) and clipboard (to
- * either side) arrive in it. TIMEOUT is retryable when no message bytes were
+/* Hosts only, to viewers that announced ML_CAPABILITY_AUDIO: one Opus packet
+ * of `frames` 48 kHz frames. Viewers drop sound beyond 400 packets a second. */
+int32_t ml_session_send_audio(uint64_t session, uint32_t sequence, uint16_t frames, uint8_t channels,
+                              const uint8_t *payload, size_t length, uint32_t timeout_ms);
+/* The viewer's playout rule, after each decoded packet is buffered: playback
+ * starts at 40 ms buffered; beyond 150 ms, drop_out oldest frames bring it
+ * back to 40 ms. The player sets playing to 0 itself when it runs dry. */
+int32_t ml_audio_playout(uint32_t buffered_frames, uint8_t playing, uint8_t *playing_out, uint32_t *drop_out);
+/* Pass an ML_SESSION_MAX_VIDEO buffer: video, pointers and sound (to viewers)
+ * and clipboard (to either side) arrive in it. TIMEOUT is retryable when no message bytes were
  * read; the deadline bounds only the wait for a new message, and a message
  * that has started gets 10 s to finish (else STALLED). Rust enforces direction,
  * geometry before video, rate limits and a 10 s idle limit (STALLED); hosts

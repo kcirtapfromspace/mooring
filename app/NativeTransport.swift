@@ -16,6 +16,7 @@ enum NativeSessionMessage {
     case telemetry(NativeTelemetry)
     case clipboard(NativeClipboardContent)
     case cursor(NativeCursorImage)
+    case audio(NativeAudioPacket)
 }
 
 /// The sharing Mac's pointer: size and hotspot in points, and a PNG that may
@@ -100,6 +101,11 @@ final class NativeTransport: @unchecked Sendable {
                                        UInt16(clamping: cursor.hotspotX), UInt16(clamping: cursor.hotspotY),
                                        $0.bindMemory(to: UInt8.self).baseAddress, $0.count, timeout)
             }
+        case .audio(let packet):
+            status = packet.payload.withUnsafeBytes {
+                ml_session_send_audio(session, packet.sequence, packet.frames, packet.channels,
+                                      $0.bindMemory(to: UInt8.self).baseAddress, $0.count, timeout)
+            }
         }
         try Self.check(status)
     }
@@ -134,6 +140,10 @@ final class NativeTransport: @unchecked Sendable {
             let png = Data(videoBuffer[cursor.png_offset..<(cursor.png_offset + cursor.png_length)])
             return .cursor(NativeCursorImage(width: Int(cursor.width), height: Int(cursor.height),
                                              hotspotX: Int(cursor.hotspot_x), hotspotY: Int(cursor.hotspot_y), png: png))
+        case ML_SESSION_AUDIO:
+            let audio = message.audio
+            let payload = Data(videoBuffer[audio.payload_offset..<(audio.payload_offset + audio.payload_length)])
+            return .audio(NativeAudioPacket(sequence: audio.sequence, frames: audio.frames, channels: audio.channels, payload: payload))
         case ML_SESSION_CLIPBOARD:
             let clipboard = message.clipboard
             let ranges = withUnsafeBytes(of: clipboard.items) { Array($0.bindMemory(to: MLClipboardRange.self).prefix(Int(clipboard.count))) }

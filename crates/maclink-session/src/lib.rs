@@ -11,6 +11,7 @@
 //! metadata. Swift owns Apple media/input/pasteboard APIs, Keychain storage,
 //! caller buffers and the UI. Nothing listens automatically.
 
+mod audio;
 mod clipboard;
 mod control;
 mod cursor;
