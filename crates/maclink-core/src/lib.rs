@@ -4,10 +4,16 @@
 //! The quality scenarios contain simulated measurements, not benchmarks.
 
 mod mailbox;
+pub mod network;
 mod quality;
 mod reconnect;
 
 pub use mailbox::{LatestFrameMailbox, MailboxClosed, MailboxRead, MailboxStats};
+pub use network::{
+    NetworkAction, NetworkEvaluation, NetworkEvaluationRequest, NetworkPolicyState, NetworkReason,
+    NetworkTransport, ProbeEvidence, ProbeStatus, RemoteDesktopMode, TargetProbe, TransportContext,
+    VpnStatus, evaluate_network,
+};
 pub use quality::{
     DecisionReason, NetworkSample, QualityController, QualityDecision, QualityLevel,
     QualityPreference, QualityProfile, ScenarioResult, ScenarioStep, TelemetryStatus,

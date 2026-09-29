@@ -2,7 +2,7 @@
 
 A small native Mac connection app with a Rust core. The product goal is reliable, responsive Mac-to-Mac remote control that chooses sensible quality automatically.
 
-**Current milestone:** working native launcher, saved connections, bounded connection diagnostics, and a simulated adaptive-quality/session core. Connections open Apple Screen Sharing. MacLink does **not yet** render remote video, switch Apple's High Performance mode, or automatically reconnect an Apple session. There is no claim of performance parity with Apple.
+**Current milestone:** a menu-bar utility with saved Macs, live target-network checks, conservative mode selection, and an experimental Apple Screen Sharing session controller. It can request Standard or High Performance, enter full screen, and reconnect a uniquely identified session after a sustained policy change. Apple supplies authentication and video. Its mode URL options are undocumented; actual negotiation, full screen, and switching still need two-Mac validation. There is no claim of performance parity or measured video bandwidth.
 
 ## Run
 
@@ -13,9 +13,9 @@ Requires macOS 14 or newer, Xcode Command Line Tools, and Rust 1.89 or newer. Ap
 open dist/MacLink.app
 ```
 
-Add a Mac by hostname or IP, then click **Connect**. **Check Connection** only reads the server's initial RFB greeting; it does not authenticate or demonstrate High Performance support. Use Apple Screen Sharing to authenticate and select the display mode. MacLink never asks for or stores a remote password.
+MacLink lives behind a display icon in the macOS menu bar. Add a Mac, then open **Settings** to enable automation, check and mark the current home path, confirm High Performance support, and optionally enable login launch. Grant MacLink Accessibility access there for session tracking and full screen. **Mode Preference** and **Pause Automation** are available directly in the menu. MacLink never asks for or stores a remote password.
 
-Builds and GitHub preview releases target Apple silicon (arm64) only. [Preview 2](https://github.com/kcirtapfromspace/maclink/releases/tag/v0.1.0-preview.2) is Developer ID signed and notarized by Apple, with a stapled ticket verified in the final ZIP. The first preview was ad hoc signed; replace it with preview 2 for testing on another Mac. Local development builds remain ad hoc by default. See [testing instructions](docs/TESTING.md) and the [notarization workflow](docs/NOTARIZATION.md).
+Builds and GitHub preview releases target Apple silicon (arm64) only. Download the [menu-bar automation preview](https://github.com/kcirtapfromspace/maclink/releases/tag/v0.2.0-preview.1). Distribution uses Developer ID signing, Apple notarization, and a stapled ticket checked after extracting the final ZIP. Local development builds remain ad hoc by default. See [testing instructions](docs/TESTING.md), [automation behavior](docs/AUTOMATION.md), and the [notarization workflow](docs/NOTARIZATION.md).
 
 ## CLI
 
@@ -25,6 +25,8 @@ cargo run -p maclink-cli -- add --name 'Studio' --host studio.local
 cargo run -p maclink-cli -- list
 cargo run -p maclink-cli -- inspect SAVED_ID
 cargo run -p maclink-cli -- connect SAVED_ID
+cargo run -p maclink-cli -- connect-mode SAVED_ID standard
+cargo run -p maclink-cli -- network-probe SAVED_ID
 cargo run -p maclink-cli -- simulate
 ```
 
@@ -32,10 +34,10 @@ cargo run -p maclink-cli -- simulate
 
 ## Layout
 
-- `crates/maclink-core`: quality policy, a bounded latest-frame mailbox, and reconnect policy. Future streaming backends can consume these; the Apple launcher does not.
+- `crates/maclink-core`: live target-network mode policy plus the separate simulated streaming quality/mailbox/reconnect foundation.
 - `crates/maclink-platform`: validated Apple Screen Sharing launch URLs and read-only RFB greeting diagnostics.
 - `crates/maclink-cli`: JSON command interface and persistent saved Macs.
-- `app`: thin native Swift/AppKit shell; Rust handles connection validation, diagnostics, and storage.
+- `app`: native menu, settings, network-change notifications and bounded Accessibility session supervision; Rust handles mode policy, connection validation, diagnostics, and saved Macs.
 - `scripts/probe-codecs.swift`: public VideoToolbox capability probe; no screen capture or transmission.
 - `docs/apple-backend.md`: Apple interoperability research and limitations.
 - `docs/performance.md`: proposed performance targets and measurement method.

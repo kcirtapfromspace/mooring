@@ -16,7 +16,7 @@ for build_tool in cargo rustup swiftc xcrun lipo codesign plutil; do
     }
 done
 
-release_version="${MACLINK_RELEASE_VERSION:-0.1.0}"
+release_version="${MACLINK_RELEASE_VERSION:-0.2.0}"
 if [[ ! "$release_version" =~ ^([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
     printf 'Invalid release version: %s\n' "$release_version" >&2
     exit 1
@@ -45,9 +45,9 @@ fi
 # MacLink currently targets Apple Silicon only, with the same macOS floor in both binaries.
 MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release --package maclink-cli \
     --target "$rust_target" --target-dir "$project_root/target"
-swiftc -O -swift-version 5 -sdk "$sdk_path" -target arm64-apple-macosx14.0 \
-    -framework AppKit -framework Foundation \
-    "$project_root/app/MacLink.swift" -o "$staged_bundle/Contents/MacOS/MacLink"
+swiftc -O -swift-version 5 -parse-as-library -sdk "$sdk_path" -target arm64-apple-macosx14.0 \
+    -framework AppKit -framework Foundation -framework Network -framework ServiceManagement \
+    "$project_root"/app/*.swift -o "$staged_bundle/Contents/MacOS/MacLink"
 cp "$project_root/target/$rust_target/release/maclink" "$staged_bundle/Contents/Resources/maclink"
 
 cp "$project_root/app/Info.plist" "$staged_bundle/Contents/Info.plist"

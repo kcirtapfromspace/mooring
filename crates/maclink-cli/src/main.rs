@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::{path::PathBuf, time::Duration};
 use store::Store;
 
-const HELP: &str = "MacLink — native Mac connections, Rust foundation\n\nUsage: maclink [--config-dir PATH] COMMAND\n\n  list                         List saved Macs as JSON\n  add --name NAME --host HOST [--port PORT]\n                               Save a Mac (default port 5900)\n  remove ID                    Remove a saved Mac\n  inspect ID                   Read the server's RFB greeting; no login\n  connect ID                   Open Apple Screen Sharing\n  doctor                       Report local capabilities and limitations\n  simulate                     Run simulated adaptive-quality scenarios\n\nApple currently controls the screen-sharing mode. MacLink does not yet\nautomatically switch High Performance mode or provide its own video engine.\nNo passwords are stored. MACLINK_HOME overrides the connection directory.\n";
+const HELP: &str = "MacLink — native Mac connections, Rust foundation\n\nUsage: maclink [--config-dir PATH] COMMAND\n\n  list                         List saved Macs as JSON\n  add --name NAME --host HOST [--port PORT]\n                               Save a Mac (default port 5900)\n  remove ID                    Remove a saved Mac\n  inspect ID                   Read the server's RFB greeting; no login\n  connect ID                   Open Apple Screen Sharing\n  connect-mode ID MODE         Request standard or high_performance\n  network-probe ID             Measure target TCP/RFB timing and route\n  network-evaluate JSON        Evaluate live probe metadata with state\n  doctor                       Report local capabilities and limitations\n  simulate                     Run simulated adaptive-quality scenarios\n\nMode requests use experimental native-exported Apple URL options.\nThey do not confirm video negotiation. MacLink has no custom video engine.\nNo passwords are stored. MACLINK_HOME overrides the connection directory.\n";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -70,6 +70,45 @@ fn execute(args: &[String]) -> Result<Value, String> {
                 json!({"status":"launched", "connection":connection, "note":"Apple Screen Sharing controls authentication and display mode. Launch is not confirmation of a connected session."}),
             )
         }
+        "connect-mode" => {
+            require_count(trailing, 2)?;
+            let connection = store.get(&trailing[0])?;
+            let mode = match trailing[1].as_str() {
+                "standard" => maclink_platform::AppleMode::Standard,
+                "high_performance" => maclink_platform::AppleMode::HighPerformance,
+                _ => return Err("Mode must be standard or high_performance.".into()),
+            };
+            maclink_platform::launch_apple_with_mode(&connection.host, connection.port, mode)?;
+            Ok(
+                json!({"status":"requested", "mode":mode, "note":"Requested Apple's native exported-connection URL options. Launch does not confirm the negotiated mode."}),
+            )
+        }
+        "network-probe" => {
+            require_count(trailing, 1)?;
+            let connection = store.get(&trailing[0])?;
+            match maclink_platform::inspect_host(
+                &connection.host,
+                connection.port,
+                Duration::from_millis(1500),
+            ) {
+                Ok(inspection) => {
+                    let route =
+                        maclink_platform::network_probe::target_route(inspection.resolved_address);
+                    Ok(json!({"status":"rfb_ready", "inspection":inspection, "route":route}))
+                }
+                Err(error) => Ok(json!({"status":"connect_failed", "error":error})),
+            }
+        }
+        "network-evaluate" => {
+            require_count(trailing, 1)?;
+            if trailing[0].len() > 65_536 {
+                return Err("Network evaluation input exceeds 64 KiB.".into());
+            }
+            let request: maclink_core::network::NetworkEvaluationRequest =
+                serde_json::from_str(&trailing[0])
+                    .map_err(|error| format!("Invalid network evaluation request: {error}"))?;
+            Ok(json!(maclink_core::network::evaluate_network(request)))
+        }
         "doctor" => {
             require_count(trailing, 0)?;
             Ok(json!({
@@ -79,7 +118,7 @@ fn execute(args: &[String]) -> Result<Value, String> {
                 "apple_silicon":cfg!(all(target_os="macos",target_arch="aarch64")),
                 "apple_backend":"launches native Screen Sharing; Apple manages display mode",
                 "custom_streaming_backend":"not implemented",
-                "automatic_quality":"policy tested with simulations; not connected to Apple sessions",
+                "automatic_quality":"menu-bar network policy uses live TCP/RFB checks; experimental Apple mode requests and Accessibility reconnects require setup",
                 "inspection":"RFB greeting only; does not measure video latency, bandwidth or High Performance support",
                 "password_storage":"none; Apple handles credentials"
             }))

@@ -17,5 +17,7 @@ sw_vers
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
+./scripts/test-native.sh
 ./scripts/build-app.sh
+python3 scripts/test-network-cli.py dist/MacLink.app/Contents/Resources/maclink
 printf '%s\n' 'Local validation passed.'

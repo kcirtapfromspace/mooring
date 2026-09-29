@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import Darwin
 
-private struct SavedMac: Decodable {
+struct SavedMac: Decodable {
     let id: String
     let name: String
     let host: String
@@ -22,7 +22,7 @@ private struct HostInspection: Decodable {
     let note: String?
 }
 
-private struct CLIError: LocalizedError {
+struct CLIError: LocalizedError {
     let message: String
     var errorDescription: String? { message }
 }
@@ -35,7 +35,7 @@ private final class TimeoutState: @unchecked Sendable {
 }
 
 /// The UI only launches the CLI. Connection storage, validation and probing live in Rust.
-private final class CLIClient {
+final class CLIClient {
     func run(_ arguments: [String], timeout: TimeInterval = 15,
              completion: @escaping (Result<Data, CLIError>) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
@@ -118,7 +118,7 @@ private final class CLIClient {
     }
 }
 
-private func label(_ text: String, size: CGFloat = 13, weight: NSFont.Weight = .regular,
+func label(_ text: String, size: CGFloat = 13, weight: NSFont.Weight = .regular,
                    color: NSColor = .labelColor) -> NSTextField {
     let view = NSTextField(labelWithString: text)
     view.font = .systemFont(ofSize: size, weight: weight)
@@ -128,7 +128,7 @@ private func label(_ text: String, size: CGFloat = 13, weight: NSFont.Weight = .
     return view
 }
 
-private func stack(_ views: [NSView], orientation: NSUserInterfaceLayoutOrientation = .vertical,
+func stack(_ views: [NSView], orientation: NSUserInterfaceLayoutOrientation = .vertical,
                    spacing: CGFloat = 12) -> NSStackView {
     let view = NSStackView(views: views)
     view.orientation = orientation
@@ -253,9 +253,39 @@ private final class AddMacController: NSWindowController, NSTextFieldDelegate {
     @objc private func cancel() { onCancel?() }
 }
 
-private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation {
+/// Automation owns policy and session actions; the shell only renders this state.
+/// Coordinator callbacks and completions must be delivered on the main thread.
+struct AutomationMenuState {
+    var title: String = "Automation not configured"
+    var detail: String = "Open Settings to configure automation for a saved Mac."
+    var isConfigured: Bool = false
+    var isPaused: Bool = false
+    var isBusy: Bool = false
+}
+
+protocol MacLinkAutomationService: AnyObject {
+    var state: AutomationMenuState { get }
+    var onStateChange: ((AutomationMenuState) -> Void)? { get set }
+    var selectedPreference: String { get }
+    func setPreference(_ preference: String)
+    func start(connections: [SavedMac])
+    func updateConnections(_ connections: [SavedMac])
+    func togglePause()
+    func showSettings(connections: [SavedMac], parentWindow: NSWindow?)
+    func connect(_ connection: SavedMac, completion: @escaping (Result<Data, CLIError>) -> Void)
+    func stop()
+}
+
+private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation, NSMenuDelegate {
     private var window: NSWindow!
     private let cli = CLIClient()
+    private lazy var automation: MacLinkAutomationService = AutomationCoordinator(cli: cli)
+    private var automationState = AutomationMenuState()
+    private var automationStarted = false
+    private var initialLoad = true
+    private var statusItem: NSStatusItem!
+    private let statusMenu = NSMenu()
+    private var lastMenuAction: String?
     private let table = NSTableView()
     private var connections: [SavedMac] = []
     private var busy = false
@@ -277,15 +307,142 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
+        NSApp.setActivationPolicy(.accessory)
         buildMenu()
         buildWindow()
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        buildStatusItem()
+        automation.onStateChange = { [weak self] state in
+            guard let self else { return }
+            self.automationState = state
+            self.updateControls()
+        }
+        automationState = automation.state
         reloadConnections()
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showConnections()
+        return true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) { automation.stop() }
+
+    private func buildStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        if let button = statusItem.button {
+            let image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: "MacLink")
+            image?.isTemplate = true
+            button.image = image
+            button.setAccessibilityLabel("MacLink")
+        }
+        statusMenu.autoenablesItems = false
+        statusMenu.delegate = self
+        statusItem.menu = statusMenu
+        refreshStatusMenu()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        if menu === statusMenu { refreshStatusMenu() }
+    }
+
+    private func refreshStatusMenu() {
+        guard statusItem != nil else { return }
+        statusMenu.removeAllItems()
+        let heading = NSMenuItem(title: "MacLink", action: nil, keyEquivalent: "")
+        heading.isEnabled = false
+        statusMenu.addItem(heading)
+        let status = NSMenuItem(title: automationState.title, action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        status.toolTip = automationState.detail
+        statusMenu.addItem(status)
+        statusItem.button?.toolTip = "MacLink — \(automationState.title)"
+        if let lastMenuAction {
+            let recent = NSMenuItem(title: lastMenuAction, action: nil, keyEquivalent: "")
+            recent.isEnabled = false
+            statusMenu.addItem(recent)
+        }
+        statusMenu.addItem(.separator())
+        let available = !busy && !automationState.isBusy && addController == nil && window?.attachedSheet == nil
+        let connectMenuItem = NSMenuItem(title: "Connect to Mac", action: nil, keyEquivalent: "")
+        let connectMenu = NSMenu()
+        connectMenu.autoenablesItems = false
+        if connections.isEmpty {
+            let empty = NSMenuItem(title: "No saved Macs", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            connectMenu.addItem(empty)
+        } else {
+            for mac in connections {
+                let title = mac.name.count > 50 ? String(mac.name.prefix(49)) + "…" : mac.name
+                let item = NSMenuItem(title: title, action: #selector(connectFromMenu(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = mac.id
+                item.toolTip = "\(mac.name) — \(mac.endpoint)"
+                item.isEnabled = available
+                connectMenu.addItem(item)
+            }
+        }
+        connectMenuItem.submenu = connectMenu
+        connectMenuItem.isEnabled = !connections.isEmpty && available
+        statusMenu.addItem(connectMenuItem)
+        let openItem = NSMenuItem(title: "Open Connections…", action: #selector(showConnections), keyEquivalent: "o")
+        openItem.target = self
+        statusMenu.addItem(openItem)
+        let addItem = NSMenuItem(title: "Add Mac…", action: #selector(addMac), keyEquivalent: "n")
+        addItem.target = self
+        addItem.isEnabled = available
+        statusMenu.addItem(addItem)
+        statusMenu.addItem(.separator())
+        let preference = NSMenuItem(title: "Mode Preference", action: nil, keyEquivalent: "")
+        let choices = NSMenu()
+        choices.autoenablesItems = false
+        for (title, value) in [("Auto", "auto"), ("Standard", "standard"), ("Prefer High Performance", "high_performance")] {
+            let item = NSMenuItem(title: title, action: #selector(changePreference(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = value
+            item.state = automation.selectedPreference == value ? .on : .off
+            item.isEnabled = automationState.isConfigured && !automationState.isBusy
+            choices.addItem(item)
+        }
+        preference.submenu = choices
+        statusMenu.addItem(preference)
+        let pauseItem = NSMenuItem(title: automationState.isPaused ? "Resume Automation" : "Pause Automation",
+                                   action: #selector(toggleAutomation), keyEquivalent: "")
+        pauseItem.target = self
+        pauseItem.isEnabled = automationState.isConfigured
+        statusMenu.addItem(pauseItem)
+        let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        settings.target = self
+        settings.isEnabled = available
+        statusMenu.addItem(settings)
+        statusMenu.addItem(.separator())
+        let quit = NSMenuItem(title: "Quit MacLink", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
+        statusMenu.addItem(quit)
+    }
+
+    @objc private func showConnections() {
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func connectFromMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let row = connections.firstIndex(where: { $0.id == id }),
+              !busy, !automationState.isBusy, window.attachedSheet == nil else { return }
+        table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        connect()
+    }
+
+    @objc private func toggleAutomation() {
+        guard automationState.isConfigured else { return }
+        automation.togglePause()
+    }
+
+    @objc private func changePreference(_ sender: NSMenuItem) {
+        guard let value = sender.representedObject as? String else { return }
+        automation.setPreference(value)
+    }
 
     private func buildMenu() {
         let menu = NSMenu()
@@ -301,6 +458,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         menu.addItem(appItem)
         let file = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
         file.submenu = NSMenu(title: "File")
+        file.submenu!.addItem(withTitle: "Open Connections…", action: #selector(showConnections), keyEquivalent: "o")
         file.submenu!.addItem(withTitle: "Add Mac…", action: #selector(addMac), keyEquivalent: "n")
         file.submenu!.addItem(withTitle: "Connect", action: #selector(connect), keyEquivalent: "\r")
         file.submenu!.addItem(withTitle: "Check Connection", action: #selector(checkConnection), keyEquivalent: "r")
@@ -321,12 +479,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         menu.addItem(edit)
         let help = NSMenuItem(title: "Help", action: nil, keyEquivalent: "")
         help.submenu = NSMenu(title: "Help")
-        help.submenu!.addItem(withTitle: "Connecting to a Mac", action: #selector(showSettings), keyEquivalent: "?")
+        help.submenu!.addItem(withTitle: "Connecting to a Mac", action: #selector(showConnectionHelp), keyEquivalent: "?")
         menu.addItem(help)
         for submenu in [appMenu, file.submenu!, help.submenu!] {
             for item in submenu.items where item.action == #selector(showAbout) || item.action == #selector(showSettings)
                 || item.action == #selector(addMac) || item.action == #selector(connect)
-                || item.action == #selector(checkConnection) || item.action == #selector(removeMac) {
+                || item.action == #selector(checkConnection) || item.action == #selector(removeMac)
+                || item.action == #selector(showConnections) || item.action == #selector(showConnectionHelp) {
                 item.target = self
             }
         }
@@ -337,6 +496,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 540),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "MacLink"
+        window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 760, height: 520)
         window.setFrameAutosaveName("MacLinkMainWindow")
         window.center()
@@ -496,7 +656,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         let content = stack([intro, statusBox, buttons], spacing: 26)
         main.addSubview(content)
         let hint = label("Opens Apple Screen Sharing.\nDisplay mode is managed by Apple.", size: 12, color: .secondaryLabelColor)
-        let help = NSButton(image: NSImage(systemSymbolName: "questionmark.circle", accessibilityDescription: "Connection help and display mode")!, target: self, action: #selector(showSettings))
+        let help = NSButton(image: NSImage(systemSymbolName: "questionmark.circle", accessibilityDescription: "Connection help and display mode")!, target: self, action: #selector(showConnectionHelp))
         help.isBordered = false
         help.toolTip = "Connection help and display mode"
         let footer = stack([hint, NSView(), help], orientation: .horizontal, spacing: 10)
@@ -525,7 +685,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         cell.setAccessibilityLabel("\(connections[row].name), \(connections[row].endpoint)")
         return cell
     }
-    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { !busy && addController == nil }
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { !busy && !automationState.isBusy && addController == nil }
     func tableViewSelectionDidChange(_ notification: Notification) { updateSelection() }
 
     private func updateSelection() {
@@ -563,17 +723,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     private func updateControls() {
-        let available = !busy && addController == nil && window?.attachedSheet == nil
+        let available = !busy && !automationState.isBusy && addController == nil && window?.attachedSheet == nil
         connectButton.isEnabled = available && selectedMac != nil
         checkButton.isEnabled = available && selectedMac != nil
         removeButton.isEnabled = available && selectedMac != nil
         addButton.isEnabled = available
+        refreshStatusMenu()
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if menuItem.action == #selector(addMac) { return !busy && addController == nil && window.attachedSheet == nil }
+        if menuItem.action == #selector(showConnections) { return true }
+        if menuItem.action == #selector(addMac) || menuItem.action == #selector(showSettings) {
+            return !busy && !automationState.isBusy && addController == nil && window.attachedSheet == nil
+        }
         if [#selector(connect), #selector(checkConnection), #selector(removeMac)].contains(menuItem.action) {
-            return !busy && selectedMac != nil && window.attachedSheet == nil
+            return !busy && !automationState.isBusy && selectedMac != nil && window.attachedSheet == nil
         }
         return window?.attachedSheet == nil
     }
@@ -585,7 +749,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             guard let self else { return }
             self.setBusy(false)
             switch result {
-            case .failure(let error): self.setStatus("Couldn’t load saved Macs", error.message, error: true)
+            case .failure(let error):
+                self.setStatus("Couldn’t load saved Macs", error.message, error: true)
+                self.lastMenuAction = "Couldn’t load saved Macs"
+                self.showConnections()
+                self.refreshStatusMenu()
             case .success(let data):
                 do {
                     self.connections = try JSONDecoder().decode([SavedMac].self, from: data)
@@ -597,15 +765,27 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
                         self.table.deselectAll(nil)
                     }
                     self.updateSelection()
+                    if self.automationStarted {
+                        self.automation.updateConnections(self.connections)
+                    } else {
+                        self.automationStarted = true
+                        self.automation.start(connections: self.connections)
+                    }
+                    if self.initialLoad && self.connections.isEmpty { self.showConnections() }
+                    self.initialLoad = false
                 } catch {
                     self.setStatus("Couldn’t read saved Macs", "The MacLink command-line tool returned an unexpected response. \(error.localizedDescription)", error: true)
+                    self.lastMenuAction = "Couldn’t read saved Macs"
+                    self.showConnections()
+                    self.refreshStatusMenu()
                 }
             }
         }
     }
 
     @objc private func addMac() {
-        guard !busy, addController == nil, window.attachedSheet == nil else { return }
+        guard !busy, !automationState.isBusy, addController == nil, window.attachedSheet == nil else { return }
+        showConnections()
         let controller = AddMacController()
         addController = controller
         controller.onCancel = { [weak self] in self?.closeAddSheet() }
@@ -653,7 +833,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     @objc private func removeMac() {
-        guard !busy, window.attachedSheet == nil, let mac = selectedMac else { return }
+        guard !busy, !automationState.isBusy, window.attachedSheet == nil, let mac = selectedMac else { return }
         let alert = NSAlert()
         alert.messageText = "Remove \(mac.name)?"
         alert.informativeText = "This removes its saved address from MacLink. You can add it again anytime."
@@ -677,22 +857,28 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     @objc private func connect() {
-        guard !busy, window.attachedSheet == nil, let mac = selectedMac else { return }
+        guard !busy, !automationState.isBusy, window.attachedSheet == nil, let mac = selectedMac else { return }
+        lastMenuAction = "Opening \(mac.name.prefix(40))…"
         setBusy(true)
         setStatus("Opening Screen Sharing…", "Preparing a connection to \(mac.name).")
-        cli.run(["connect", mac.id]) { [weak self] result in
+        automation.connect(mac) { [weak self] result in
             guard let self else { return }
             self.setBusy(false)
             switch result {
-            case .failure(let error): self.setStatus("Couldn’t open Screen Sharing", error.message, error: true)
+            case .failure(let error):
+                self.lastMenuAction = "Couldn’t open Screen Sharing"
+                self.setStatus("Couldn’t open Screen Sharing", error.message, error: true)
+                self.showConnections()
             case .success:
-                self.setStatus("Handed off to Screen Sharing", "Complete the connection in Apple’s app. MacLink does not track whether the remote session is connected.", success: true)
+                self.lastMenuAction = "Screen Sharing opened"
+                self.setStatus("Handed off to Screen Sharing", "Complete sign-in in Apple’s app. The MacLink menu shows automation and session status when configured. A launch alone does not confirm the requested display mode.", success: true)
             }
+            self.refreshStatusMenu()
         }
     }
 
     @objc private func checkConnection() {
-        guard !busy, window.attachedSheet == nil, let mac = selectedMac else { return }
+        guard !busy, !automationState.isBusy, window.attachedSheet == nil, let mac = selectedMac else { return }
         setBusy(true)
         setStatus("Checking \(mac.name)…", "Testing the address and Screen Sharing service. This does not sign in.")
         cli.run(["inspect", mac.id], timeout: 20) { [weak self] result in
@@ -718,25 +904,39 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     @objc private func showSettings() {
+        guard !busy, !automationState.isBusy, window.attachedSheet == nil else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        automation.showSettings(connections: connections, parentWindow: window.isVisible ? window : nil)
+        updateControls()
+    }
+
+    @objc private func showConnectionHelp() {
         guard window.attachedSheet == nil else { return }
+        showConnections()
         let alert = NSAlert()
-        alert.messageText = "Connection & Display Settings"
-        alert.informativeText = "On the remote Mac, enable Screen Sharing in System Settings → General → Sharing, and allow the account you use to connect. Enter that Mac’s hostname or IP address in MacLink.\n\nMacLink currently opens Apple Screen Sharing. Select High Performance in Apple’s app when supported; Apple manages display mode, authentication and the remote session.\n\nAutomatic quality switching and a custom Rust streaming engine are under development and are not included in this build.\n\nMacLink saves names and addresses locally. Passwords are handled by Apple Screen Sharing."
+        alert.messageText = "Connecting to a Mac"
+        alert.informativeText = "MacLink lives in your menu bar. Use its display icon to connect, open this window, or manage automation in Settings. Closing this window leaves MacLink running.\n\nOn the remote Mac, enable Screen Sharing in System Settings → General → Sharing, and allow the account you use to connect. Enter that Mac’s hostname or IP address in MacLink.\n\nApple Screen Sharing provides the remote session. Display-mode options depend on Apple’s app and the selected connection profile. Use MacLink Settings to configure available automation.\n\nMacLink saves names and addresses locally. Passwords are handled by Apple Screen Sharing."
         alert.addButton(withTitle: "Done")
         alert.beginSheetModal(for: window) { [weak self] _ in self?.updateControls() }
         updateControls()
     }
 
     @objc private func showAbout() {
+        NSApp.activate(ignoringOtherApps: true)
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "MacLink",
-            .applicationVersion: "0.1.0 · Prototype",
-            .credits: NSAttributedString(string: "A small native launcher with a Rust core.\nRemote sessions are provided by Apple Screen Sharing.")
+            .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "MacLinkReleaseVersion") as? String ?? "Development",
+            .credits: NSAttributedString(string: "A menu bar companion with a Rust core.\nRemote sessions are provided by Apple Screen Sharing.")
         ])
     }
 }
 
-let app = NSApplication.shared
-private let delegate = AppDelegate()
-app.delegate = delegate
-app.run()
+@main
+private enum MacLinkMain {
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        withExtendedLifetime(delegate) { app.run() }
+    }
+}
