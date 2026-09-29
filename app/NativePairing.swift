@@ -118,6 +118,7 @@ struct NativePeerStore {
         try NativeTransport.check(ml_peers_remember(directory, &raw, address, &peer))
         return NativePeer(peer)
     }
+    func forget(_ id: String) throws { try NativeTransport.check(ml_peers_forget(directory, id)) }
     /// One-time import of the earlier preference list; a no-op once a store exists.
     func importLegacy(_ data: Data) throws {
         let status = data.withUnsafeBytes { bytes in
@@ -143,6 +144,12 @@ struct NativeKeychain {
         try read("peer-" + peerID).map(NativePairingCode.fromCredential)
     }
     func savePeerCode(_ code: NativePairingCode) throws { try save("peer-" + code.peerID, data: code.credential()) }
+    func deletePeerCode(_ peerID: String) throws {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                   kSecAttrService as String: service, kSecAttrAccount as String: "peer-" + peerID]
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw failure(status) }
+    }
 
     private func read(_ account: String) throws -> Data? {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,

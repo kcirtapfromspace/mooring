@@ -120,6 +120,19 @@ impl PeerStore {
         Ok(peer)
     }
 
+    /// Remove a peer. Returns whether it was saved; an absent peer is not an error.
+    pub(crate) fn forget(&self, id: &str) -> Result<bool> {
+        let _lock = self.lock()?;
+        let mut peers = self.load()?;
+        let before = peers.len();
+        peers.retain(|saved| saved.id != id);
+        if peers.len() == before {
+            return Ok(false);
+        }
+        self.save(peers)?;
+        Ok(true)
+    }
+
     /// One-time migration of the earlier preference list: `[{id,name,address}]`.
     /// Invalid entries are skipped as before. A readable existing store wins; an
     /// unreadable one fails, so the caller keeps the legacy list.
@@ -363,6 +376,31 @@ mod tests {
             corrupt.store().import_legacy(&bytes),
             Err(Error::Storage),
             "keep the legacy list"
+        );
+    }
+
+    #[test]
+    fn forgotten_peers_are_removed_and_absent_ones_are_not_an_error() {
+        let directory = Directory::new();
+        let first = directory
+            .store()
+            .remember(&peer_code(1), "mac.local")
+            .unwrap();
+        directory
+            .store()
+            .remember(&peer_code(2), "mac.local")
+            .unwrap();
+        assert_eq!(directory.store().forget(&first.id), Ok(true));
+        assert_eq!(directory.store().forget(&first.id), Ok(false));
+        assert_eq!(directory.store().forget("not-an-id"), Ok(false));
+        let peers = directory.store().load().unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].name, "Mac 2");
+        fs::write(directory.0.join(FILE_NAME), "{invalid").unwrap();
+        assert_eq!(
+            directory.store().forget(&peers[0].id),
+            Err(Error::Storage),
+            "never rewrite an unreadable store"
         );
     }
 

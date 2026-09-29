@@ -93,9 +93,16 @@ final class NativePairWindow: NSWindowController, NSWindowDelegate {
 final class NativeRemoteView: NativeVideoView {
     var onInput: ((NSEvent) -> Void)?
     var onReleaseInput: (() -> Void)?
+    /// Hides this Mac's pointer over the video when the remote pointer is in it.
+    var hidesLocalCursor = false { didSet { if hidesLocalCursor != oldValue { window?.invalidateCursorRects(for: self) } } }
+    private static let invisibleCursor = NSCursor(image: NSImage(size: NSSize(width: 16, height: 16), flipped: false) { _ in true },
+                                                  hotSpot: .zero)
     private var tracking: NSTrackingArea?
     private var commandKeyUps: NativeCommandKeyUpMonitor?
     override var acceptsFirstResponder: Bool { true }
+    override func resetCursorRects() {
+        if hidesLocalCursor { addCursorRect(bounds, cursor: Self.invisibleCursor) }
+    }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         commandKeyUps?.stop()
@@ -138,6 +145,9 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
     var onClose: (() -> Void)?
     var onReleaseInput: (() -> Void)?
     var onDiagnostics: (() -> Void)?
+    var onReconnect: (() -> Void)?
+    private let ended = NSVisualEffectView()
+    private let endedReason = label("", size: 13, color: .secondaryLabelColor)
     init(name: String) {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
@@ -163,8 +173,39 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
         ])
         window.initialFirstResponder = video
         window.acceptsMouseMovedEvents = true
+
+        // Shown over the cleared video when a session ends, so the reason is not
+        // lost in a full-screen black window.
+        ended.material = .hudWindow; ended.blendingMode = .withinWindow; ended.state = .active
+        ended.wantsLayer = true; ended.layer?.cornerRadius = 14
+        ended.translatesAutoresizingMaskIntoConstraints = false; ended.isHidden = true
+        let reconnect = NSButton(title: "Reconnect", target: self, action: #selector(reconnect))
+        reconnect.bezelStyle = .rounded; reconnect.keyEquivalent = "\r"
+        let close = NSButton(title: "Close", target: self, action: #selector(closeWindow))
+        close.bezelStyle = .rounded
+        endedReason.alignment = .center
+        let content = stack([label("Session ended", size: 17, weight: .semibold), endedReason,
+                             stack([close, reconnect], orientation: .horizontal, spacing: 10)], spacing: 12)
+        content.alignment = .centerX
+        ended.addSubview(content)
+        root.addSubview(ended)
+        NSLayoutConstraint.activate([
+            ended.centerXAnchor.constraint(equalTo: video.centerXAnchor), ended.centerYAnchor.constraint(equalTo: video.centerYAnchor),
+            ended.widthAnchor.constraint(equalToConstant: 380),
+            content.leadingAnchor.constraint(equalTo: ended.leadingAnchor, constant: 24),
+            content.trailingAnchor.constraint(equalTo: ended.trailingAnchor, constant: -24),
+            content.topAnchor.constraint(equalTo: ended.topAnchor, constant: 22),
+            content.bottomAnchor.constraint(equalTo: ended.bottomAnchor, constant: -20),
+            endedReason.widthAnchor.constraint(equalTo: content.widthAnchor)
+        ])
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    func showEnded(reason: String) {
+        endedReason.stringValue = reason
+        ended.isHidden = false
+    }
+    @objc private func reconnect() { onReconnect?() }
+    @objc private func closeWindow() { window?.performClose(nil) }
     func windowWillClose(_ notification: Notification) { onClose?() }
     func windowDidResignKey(_ notification: Notification) { onReleaseInput?() }
     func windowDidMiniaturize(_ notification: Notification) { onReleaseInput?() }

@@ -35,8 +35,13 @@ final class NativeSessionCoordinator {
     private var lastStatusTime: TimeInterval = 0
     private var lastViewerMeasurements: NativeSessionMeasurements?
     private var lastHostMeasurements: NativeSessionMeasurements?
-    private(set) var peers: [NativePeer] = []
+    /// Idle display and system sleep would end an active session, so each side
+    /// holds a power assertion only while a viewer is connected.
+    private var hostActivity: NSObjectProtocol?
+    private var viewerActivity: NSObjectProtocol?
+    private(set) var peers: [NativePeer] = [] { didSet { if peers != oldValue { onPeersChange?() } } }
     var onChange: (() -> Void)?
+    var onPeersChange: (() -> Void)?
     var isSharing: Bool { sharingToken?.isActive == true }
     var isConnected: Bool { viewerChannel?.token.isActive == true }
     var status: String? {
@@ -149,7 +154,12 @@ final class NativeSessionCoordinator {
         let channel = NativeSessionChannel(transport)
         hostChannel = channel; lastHostMeasurements = channel.measurements
         let injector = NativeInputInjector(); hostInjector = injector
-        let capture = NativeCapture(); self.capture = capture
+        // While the viewer controls this Mac its own pointer is the cursor; drawing
+        // this Mac's pointer into the video as well would show two.
+        let capture = NativeCapture(showsCursor: !NativeInputInjector.isTrusted); self.capture = capture
+        hostActivity = hostActivity ?? ProcessInfo.processInfo.beginActivity(
+            options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled, .userInitiated],
+            reason: "A paired Mac is viewing this display")
         channel.onFailure = { [weak self, weak channel] reason in
             guard let self, let channel, self.hostChannel === channel else { return }
             self.endHost(reason: reason)
@@ -167,6 +177,8 @@ final class NativeSessionCoordinator {
             channel.measurements.set("capture_pixel_height", Double(frame.metrics.pixel_height))
             channel.measurements.set("target_bitrate", Double(frame.metrics.target_bitrate))
             channel.measurements.set("hardware_encoder_required", frame.metrics.hardware_encoder ? 1 : 0)
+            channel.measurements.set("encoder_dropped_frames", Double(frame.metrics.dropped_frames))
+            channel.measurements.set("encoder_failed_frames", Double(frame.metrics.failed_frames))
             channel.send(.video(frame.packet), completion: release)
         }
         capture.onError = { [weak channel] message in channel?.fail(message) }
@@ -190,6 +202,7 @@ final class NativeSessionCoordinator {
         shareWindow?.control.title = NativeInputInjector.isTrusted ? "Keyboard & Mouse Enabled" : "Enable Keyboard & Mouse…"
         guard let channel = hostChannel, channel.token.isActive else { return }
         if !NativeInputInjector.isTrusted { hostInjector?.releaseAll() }
+        capture?.setShowsCursor(!NativeInputInjector.isTrusted)
         channel.control(.inputState(enabled: NativeInputInjector.isTrusted))
     }
 
@@ -231,6 +244,7 @@ final class NativeSessionCoordinator {
 
     private func endHost(reason: String) {
         hostChannel?.close(); hostChannel = nil
+        endHostActivity()
         capture?.stop(); capture = nil; hostInjector?.stop(); hostInjector = nil
         hostGeometryLock.lock(); hostGeometry = nil; hostGeometryLock.unlock()
         refreshShare(reason + " Waiting for a new connection.")
@@ -241,10 +255,16 @@ final class NativeSessionCoordinator {
         sharingToken?.cancel(); sharingToken = nil
         listener?.close(); listener = nil
         hostChannel?.close(); hostChannel = nil
+        endHostActivity()
         capture?.stop(); capture = nil; hostInjector?.stop(); hostInjector = nil
         permissionTimer?.invalidate(); permissionTimer = nil
         hostGeometryLock.lock(); hostGeometry = nil; hostGeometryLock.unlock()
         refreshShare(reason)
+    }
+
+    private func endHostActivity() {
+        if let hostActivity { ProcessInfo.processInfo.endActivity(hostActivity) }
+        hostActivity = nil
     }
 
     private func pairingCode() throws -> NativePairingCode {
@@ -287,6 +307,12 @@ final class NativeSessionCoordinator {
         }
         pairWindow?.setBusy(false); pairWindow?.error.stringValue = ""
         pairWindow?.showWindow(nil); pairWindow?.window?.center(); NSApp.activate(ignoringOtherApps: true)
+    }
+    /// Remove a pairing from this Mac: its saved metadata and its Keychain secret.
+    func forget(peerID: String) throws {
+        try peerStore.forget(peerID)
+        try keychain.deletePeerCode(peerID)
+        peers = (try? peerStore.load()) ?? peers.filter { $0.id != peerID }
     }
     func connect(peerID: String) {
         if isConnected { viewerWindow?.showWindow(nil); NSApp.activate(ignoringOtherApps: true); return }
@@ -337,6 +363,10 @@ final class NativeSessionCoordinator {
         viewerWindow?.video.onInput = nil; viewerWindow?.video.onReleaseInput = nil
         viewerWindow?.close()
         let window = NativeViewerWindow(name: peer.name); viewerWindow = window
+        viewerActivity = viewerActivity ?? ProcessInfo.processInfo.beginActivity(
+            options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled, .userInitiated],
+            reason: "Showing a paired Mac")
+        window.onReconnect = { [weak self] in self?.connect(peerID: peer.id) }
         window.onClose = { [weak self, weak channel] in
             guard let self, let channel, self.viewerChannel === channel else { return }
             self.disconnectViewer(reason: "Disconnected.")
@@ -432,6 +462,9 @@ final class NativeSessionCoordinator {
     private func setViewerInput(_ enabled: Bool) {
         if !enabled { releaseViewerInput() }
         viewerInputEnabled = enabled
+        // View only: the sharing Mac draws its own pointer into the video, so
+        // hide this Mac's pointer over it. With control, the reverse applies.
+        viewerWindow?.video.hidesLocalCursor = !enabled
     }
 
     private func sendInput(_ event: NSEvent) {
@@ -455,7 +488,10 @@ final class NativeSessionCoordinator {
         lastPresented = count; lastStatusTime = now
         channel.measurements.set("last_presented_fps", fps)
         let rtt = snapshot["network_round_trip_ms"].map { String(format: "%.0f ms RTT", $0) } ?? "checking connection"
-        viewerWindow?.status.stringValue = "\(viewerInputEnabled ? "Connected" : "View only") · \(String(format: "%.0f", fps)) fps · \(rtt)"
+        // The sharing Mac sends frames only when its screen changes.
+        let rate = fps < 0.5 ? "screen unchanged" : String(format: "%.0f fps", fps)
+        let size = viewerWindow?.video.geometry.map { " · \($0.pixelWidth)×\($0.pixelHeight)" } ?? ""
+        viewerWindow?.status.stringValue = "\(viewerInputEnabled ? "Connected" : "View only") · \(rate) · \(rtt)\(size)"
         if let pendingPing, now - pendingPing.1 > 8 { channel.fail("The sharing Mac stopped answering connection checks."); return }
         if pendingPing == nil {
             pingSequence &+= 1; pendingPing = (pingSequence, now)
@@ -464,12 +500,20 @@ final class NativeSessionCoordinator {
     }
     func disconnectViewer(reason: String) {
         connectAttempt?.cancel(); connectAttempt = nil
+        // Privacy and sleep events call this with no session; leave any window
+        // from an earlier session showing its own reason.
+        guard viewerChannel != nil else { return }
         releaseViewerInput(); viewerChannel?.close(); viewerChannel = nil
         decoder?.stop(); decoder = nil; viewerInputEnabled = false
         statusTimer?.invalidate(); statusTimer = nil
+        if let viewerActivity { ProcessInfo.processInfo.endActivity(viewerActivity) }
+        viewerActivity = nil
         viewerWindow?.status.stringValue = reason
-        // Remove the last remote frame as soon as the authenticated session ends.
+        // Remove the last remote frame as soon as the authenticated session ends,
+        // and say why in place of the picture.
         viewerWindow?.video.clearFrame()
+        viewerWindow?.video.hidesLocalCursor = false
+        viewerWindow?.showEnded(reason: reason)
         onChange?()
     }
 

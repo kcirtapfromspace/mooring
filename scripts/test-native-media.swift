@@ -18,7 +18,7 @@ struct NativeMediaTests {
         var errors: [String] = []
         var widths = Set<Int>(), heights = Set<Int>()
         var keyframeRequests = 0
-        var heldRelease: (() -> Void)?
+        var heldReleases: [() -> Void] = []
         let firstOutput = DispatchSemaphore(value: 0)
         let decodeOutput = DispatchSemaphore(value: 0)
         func record(_ frame: NativeEncodedFrame) { lock.lock(); encoded.append(frame); lock.unlock() }
@@ -68,25 +68,32 @@ struct NativeMediaTests {
         decoder.onError = { collector.fail($0) }
         decoder.onNeedsKeyframe = { collector.lock.lock(); collector.keyframeRequests += 1; collector.lock.unlock(); encoder.requestKeyframe() }
         decoder.onFrame = { collector.record($0) }
+        // The first two frames simulate sends that have not finished yet.
         encoder.onEncodedFrame = { frame, release in
             collector.record(frame)
             collector.lock.lock()
-            let first = collector.encoded.count == 1
-            if first { collector.heldRelease = release }
+            let held = collector.encoded.count <= NativeVideoEncoder.maxInFlight
+            if held { collector.heldReleases.append(release) }
             collector.lock.unlock()
             _ = decoder.decode(frame.packet)
-            if first { collector.firstOutput.signal() } else { release() }
+            if held { collector.firstOutput.signal() } else { release() }
         }
-        let first = try image(index: 0, width: width, height: height)
-        try require(encoder.encode(first, presentationTime: CMTime(value: 0, timescale: 60)), "First frame admission")
-        try require(collector.firstOutput.wait(timeout: .now() + 5) == .success, "First hardware encode timed out")
-        try require(collector.decodeOutput.wait(timeout: .now() + 5) == .success, "First hardware decode timed out")
-        for _ in 0..<100 { try require(!encoder.encode(first, presentationTime: CMTime(value: 1, timescale: 60)), "Encode backpressure admitted an extra frame") }
-        try require(encoder.inFlightCount == 1 && encoder.snapshot.encoded_frames == 1, "Encode/send backlog must remain one")
-        collector.lock.lock(); let release = collector.heldRelease; collector.heldRelease = nil; collector.lock.unlock()
-        release?(); release?() // Idempotent completion from a transport teardown.
+        for index in 0..<NativeVideoEncoder.maxInFlight {
+            let pixels = try image(index: index, width: width, height: height)
+            try require(encoder.encode(pixels, presentationTime: CMTime(value: Int64(index), timescale: 60)),
+                        "A frame may encode while an earlier one is still sending")
+            try require(collector.firstOutput.wait(timeout: .now() + 5) == .success, "Hardware encode timed out")
+            try require(collector.decodeOutput.wait(timeout: .now() + 5) == .success, "Hardware decode timed out")
+        }
+        let blocked = try image(index: 99, width: width, height: height)
+        for _ in 0..<100 { try require(!encoder.encode(blocked, presentationTime: CMTime(value: 2, timescale: 60)), "Encode backpressure admitted an extra frame") }
+        try require(encoder.inFlightCount == NativeVideoEncoder.maxInFlight && encoder.snapshot.encoded_frames == 2,
+                    "Encode/send backlog is bounded at two frames")
+        collector.lock.lock(); let releases = collector.heldReleases; collector.heldReleases = []; collector.lock.unlock()
+        for release in releases { release(); release() } // Idempotent completion from a transport teardown.
+        try require(encoder.inFlightCount == 0, "Released frames free their admission slots")
         let began = ProcessInfo.processInfo.systemUptime
-        for index in 1..<frames {
+        for index in NativeVideoEncoder.maxInFlight..<frames {
             let scheduled = began + Double(index - 1) / 60
             let delay = scheduled - ProcessInfo.processInfo.systemUptime
             if delay > 0 { Thread.sleep(forTimeInterval: delay) }
@@ -97,7 +104,7 @@ struct NativeMediaTests {
             try require(encoder.encode(pixel, presentationTime: CMTime(value: Int64(index), timescale: 60)), "Paced frame admission \(index)")
             try require(decoder.pendingFrameCount <= 1 && encoder.inFlightCount <= 1, "Pipeline queue bound")
         }
-        for _ in 1..<frames { try require(collector.decodeOutput.wait(timeout: .now() + 5) == .success, "Paced decode timed out") }
+        for _ in NativeVideoEncoder.maxInFlight..<frames { try require(collector.decodeOutput.wait(timeout: .now() + 5) == .success, "Paced decode timed out") }
         let elapsed = ProcessInfo.processInfo.systemUptime - began
         collector.lock.lock()
         let encoded = collector.encoded, decoded = collector.decoded, errors = collector.errors
@@ -133,6 +140,7 @@ struct NativeMediaTests {
                     && !NativeVideoPacket.validDimensions(-2, 16), "Dimension rules come from Rust")
         try testRecovery(encoded)
         try testOverflow(encoded)
+        try testFailureBudget(encoded)
         let inspected = try inspectBitstream(packets)
         let stopped = DispatchSemaphore(value: 0)
         encoder.stop { stopped.signal() }
@@ -144,7 +152,8 @@ struct NativeMediaTests {
             "hardware_encoder_evidence": encoder.snapshot.hardware_encoder_evidence,
             "paced_seconds": elapsed, "measured_roundtrip_fps": Double(frames - 1) / elapsed,
             "average_encode_ms": encoded.map { $0.metrics.encode_ms }.reduce(0, +) / Double(frames),
-            "maximum_encode_send_inflight": 1, "maximum_decoder_pending": 1,
+            "maximum_encode_send_inflight": NativeVideoEncoder.maxInFlight, "maximum_decoder_pending": 1,
+            "decoder_failure_budget": "passed",
             "backpressure_capture_skips": encoder.snapshot.skipped_capture_frames, "ffprobe": inspected,
             "four_k_smoke": fourK, "gap_and_overflow_recovery": "passed"]
         let json = try JSONSerialization.data(withJSONObject: stats, options: [.prettyPrinted, .sortedKeys])
@@ -195,6 +204,30 @@ struct NativeMediaTests {
         try require(decoder.decode(frames[60].packet), "Recovery keyframe occupies the one pending slot")
         resume.signal()
         try require(recovered.wait(timeout: .now() + 3) == .success, "Overflow recovers with IDR")
+    }
+    /// A keyframe whose header disagrees with its parameter sets always fails.
+    static func testFailureBudget(_ frames: [NativeEncodedFrame]) throws {
+        let decoder = NativeVideoDecoder(keyframeRetryInterval: 0)
+        let requested = DispatchSemaphore(value: 0), output = DispatchSemaphore(value: 0), reported = DispatchSemaphore(value: 0)
+        defer { decoder.stop() }
+        decoder.onNeedsKeyframe = { requested.signal() }
+        decoder.onFrame = { _ in output.signal() }
+        decoder.onError = { _ in reported.signal() }
+        let good = frames[0].packet
+        let bad = NativeVideoPacket(width: good.width - 2, height: good.height, sequence: good.sequence, timestamp: good.timestamp,
+                                    keyframe: true, sps: good.sps, pps: good.pps, avcc: good.avcc)
+        for _ in 1..<NativeVideoDecoder.failureBudget {
+            try require(decoder.decode(bad), "Failing keyframe admission")
+            try require(requested.wait(timeout: .now() + 3) == .success, "A failed frame requests a keyframe")
+        }
+        try require(reported.wait(timeout: .now() + 0.2) == .timedOut, "Isolated decode failures recover instead of ending the session")
+        try require(decoder.decode(good), "Good keyframe admission")
+        try require(output.wait(timeout: .now() + 3) == .success, "A good keyframe decodes and resets the failure run")
+        for _ in 0..<NativeVideoDecoder.failureBudget {
+            try require(decoder.decode(bad), "Failing keyframe admission")
+            try require(requested.wait(timeout: .now() + 3) == .success, "A failed frame requests a keyframe")
+        }
+        try require(reported.wait(timeout: .now() + 3) == .success, "A run of decode failures is still reported")
     }
     static func testFourK() throws -> [String: Any] {
         let encoder = try NativeVideoEncoder(width: 3840, height: 2160, framesPerSecond: 60, bitrate: 25_000_000)

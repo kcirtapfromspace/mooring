@@ -226,6 +226,7 @@ int32_t ml_pairing_credential_decode(const uint8_t *data, size_t length, MLPairi
  * ~/Library/Application Support/MacLink. Most recent first; at most 32. */
 int32_t ml_peers_load(const char *directory, MLPeer *out, size_t capacity, size_t *count);
 int32_t ml_peers_remember(const char *directory, const MLPairingCode *code, const char *address, MLPeer *out);
+int32_t ml_peers_forget(const char *directory, const char *id);
 int32_t ml_peers_import_legacy(const char *directory, const uint8_t *json, size_t length, size_t *imported);
 
 #ifdef __cplusplus

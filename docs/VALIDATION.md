@@ -58,6 +58,16 @@ Review corrected Command-held key releases that AppKit never delivers, keyframe 
 
 Apple accepted the native session build as submission `cfa02dc6-48de-466f-8fca-bcb1843e5030` with no issues. Both arm64 executables use Developer ID, hardened runtime and secure timestamps. The final extracted ZIP passed strict signature, stapled-ticket and Gatekeeper validation as Notarized Developer ID. The built app was not launched on this host, and no permission was granted or changed.
 
+## Native session fixes
+
+For `v0.3.0-preview.2`, the complete local validation script passed with 128 Rust tests (61 session) and every native Swift suite. New checks cover forgetting saved peers (including never rewriting an unreadable store), the encoder's two-frame in-flight bound with held transport sends, and decoder recovery: isolated failures request a keyframe without ending the session, while a run of five is reported. Restoring the old fatal-on-first-failure decoder behavior made that test fail.
+
+A paced 60 Hz synthetic feed through the hardware encoder, encrypted loopback and hardware decoder measured decoded frame rates before and after allowing two frames in flight: 3456×2234 rose from 28.3 to 41.3 fps, 3024×1964 from 30.3 to 51.0 fps, and 1920×1080 stayed at 60 fps. Loopback excludes network transmission, capture and display.
+
+The pointer, Connections list, power assertions and session-ended overlay are AppKit behavior verified only by compilation here; they need the two-Mac checks in the testing guide.
+
+Apple accepted the preview 2 build as submission `28240f8a-2fc0-4079-97e9-92d24f05ceb2` with no issues. The final extracted arm64 ZIP passed strict signature, stapled-ticket and Gatekeeper validation as Notarized Developer ID.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

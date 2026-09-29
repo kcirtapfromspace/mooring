@@ -1,6 +1,6 @@
 # Testing the preview on another Mac
 
-Download `MacLink-v0.3.0-preview.1-macos-arm64.zip` and `SHA256SUMS.txt` from the release while signed in to the GitHub account with repository access. MacLink supports Apple silicon only and requires macOS 14 or later. Apple's High Performance mode additionally requires compatible Macs at both ends. The experimental native session requires this preview on both Macs.
+Download `MacLink-v0.3.0-preview.2-macos-arm64.zip` and `SHA256SUMS.txt` from the release while signed in to the GitHub account with repository access. MacLink supports Apple silicon only and requires macOS 14 or later. Apple's High Performance mode additionally requires compatible Macs at both ends. The experimental native session requires this preview on both Macs.
 
 1. In the download directory, verify the ZIP with `shasum -a 256 -c SHA256SUMS.txt`.
 2. Quit older MacLink copies. Extract the ZIP and replace `MacLink.app` in Applications. Saved Macs and existing configured preferences are preserved.
@@ -17,13 +17,13 @@ Download `MacLink-v0.3.0-preview.1-macos-arm64.zip` and `SHA256SUMS.txt` from th
 
 1. On the Mac to share, choose **Share This Mac…** and click **Start Sharing**. Grant Screen Recording when macOS asks, then click Start Sharing again if needed. If macOS asks whether MacLink may accept incoming connections, allow it. Click **Copy Pairing Code**.
 2. Move the code to the viewing Mac without posting it anywhere shared; it works like a password. On the viewing Mac, choose **Connect with MacLink…**, paste the code and click **Pair & Connect**. Leave **Address** empty on the same local network; enter the sharing Mac's IP address for other paths.
-3. Verify the remote display appears and enters full screen, and that the status bar shows frame rate and round-trip time. The session is view-only until the sharing Mac clicks **Enable Keyboard & Mouse…** and allows MacLink in Accessibility.
+3. Verify the remote display appears and enters full screen, and that the status bar shows frame rate, round-trip time and the sharing Mac's resolution ("screen unchanged" means no new frames were needed). The session is view-only until the sharing Mac clicks **Enable Keyboard & Mouse…** and allows MacLink in Accessibility. Confirm there is exactly one pointer in both view-only and control modes.
 4. With control enabled, test typing, repeated shortcuts such as Cmd-Z twice, modifier keys, clicks, double-clicks, drags, right-clicks and trackpad scrolling. Switch away from the viewer mid-drag or mid-keypress and confirm nothing stays pressed on the sharing Mac.
 5. Test colored terminal text and small UI text for legibility, window dragging, scrolling and video playback. Note any stalls, stale regions or dropped frames.
-6. Close the viewer, then reconnect from the paired Mac's name in the menu. Stop sharing, lock the sharing Mac, and put it to sleep; each must end the session, and unlocking must not resume sharing on its own. After **Reset Pairing**, the old code must fail.
-7. **Save Diagnostics…** in the Share window and **Diagnostics…** in the viewer save measurements only. Attach them to a report if useful.
+6. Close the viewer, then reconnect from the paired Mac's name in the menu and from **Open Connections…**, where pairings are listed with Screen Sharing Macs. Leave a session idle past the sharing Mac's display-sleep time; it should stay connected. Stop sharing, lock the sharing Mac, and put it to sleep; each must end the session with a stated reason and a **Reconnect** button, and unlocking must not resume sharing on its own. After **Reset Pairing**, the old code must fail; **Remove** in Connections must forget a pairing.
+7. While scrolling or dragging a window on the sharing Mac, note the frame rate, then use **Save Diagnostics…** in the Share window and **Diagnostics…** in the viewer. Both save measurements only, including per-frame encode and send times, frame sizes and encoder drops. Attach both to your report.
 
-The distribution is Developer ID signed, notarized and stapled. macOS may still show its normal first-launch downloaded-app confirmation. If **Apple could not verify MacLink.app** appears, confirm that you opened the extracted 0.3.0 preview 1 app rather than an older copy; do not change Gatekeeper settings. Local development builds are ad hoc by default.
+The distribution is Developer ID signed, notarized and stapled. macOS may still show its normal first-launch downloaded-app confirmation. If **Apple could not verify MacLink.app** appears, confirm that you opened the extracted 0.3.0 preview 2 app rather than an older copy; do not change Gatekeeper settings. Local development builds are ad hoc by default.
 
 ## What to report
 
@@ -43,9 +43,9 @@ All compilation, tests, linting, signing, archive creation and Gatekeeper valida
 ./scripts/ci-local.sh
 MACLINK_CODESIGN_IDENTITY='Developer ID Application: YOUR NAME (TEAM_ID)' \
   MACLINK_NOTARY_PROFILE=MacLink \
-  ./scripts/notarize-release.sh 0.3.0-preview.1
+  ./scripts/notarize-release.sh 0.3.0-preview.2
 ```
 
-The local suite includes 127 Rust tests (8 CLI, 41 core, 18 platform, 60 session), 73 Swift session-parser checks, the defaults/home-state regressions, loopback CLI integration, and the native Swift checks: input boundary and Command key-up dispatch, privacy classification, hardware H.264 encode/decode with recovery, session boundary, and an encrypted 1080p loopback stream. Published assets include validation output and checksums.
+The local suite includes 128 Rust tests (8 CLI, 41 core, 18 platform, 61 session), 73 Swift session-parser checks, the defaults/home-state regressions, loopback CLI integration, and the native Swift checks: input boundary and Command key-up dispatch, privacy classification, hardware H.264 encode/decode with recovery and the two-frame in-flight bound, session boundary, and an encrypted 1080p loopback stream. Published assets include validation output and checksums.
 
 Local tests do not verify live two-Mac negotiation, a real native session between two Macs, display behavior or performance. Complete the checks above on the second Apple silicon Mac.

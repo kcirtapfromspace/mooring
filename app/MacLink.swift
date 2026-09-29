@@ -139,13 +139,46 @@ func stack(_ views: [NSView], orientation: NSUserInterfaceLayoutOrientation = .v
     return view
 }
 
+/// One row of the Connections list: an Apple Screen Sharing Mac saved by the
+/// CLI store, or a Mac paired for a MacLink session.
+private enum ConnectionRow {
+    case screenSharing(SavedMac)
+    case maclink(NativePeer)
+
+    static func screenSharingID(_ id: String) -> String { "screen-sharing:" + id }
+    var id: String {
+        switch self {
+        case .screenSharing(let mac): return Self.screenSharingID(mac.id)
+        case .maclink(let peer): return "maclink:" + peer.id
+        }
+    }
+    var name: String {
+        switch self {
+        case .screenSharing(let mac): return mac.name
+        case .maclink(let peer): return peer.name
+        }
+    }
+    var detail: String {
+        switch self {
+        case .screenSharing(let mac): return "Screen Sharing · " + mac.endpoint
+        case .maclink(let peer): return "MacLink · " + peer.address
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .screenSharing: return "desktopcomputer"
+        case .maclink: return "bolt.horizontal.circle"
+        }
+    }
+}
+
 private final class MacCell: NSTableCellView {
     let nameLabel = label("", size: 13, weight: .medium)
     let hostLabel = label("", size: 11, color: .secondaryLabelColor)
+    let symbol = NSImageView(image: NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: nil)!)
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        let symbol = NSImageView(image: NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: nil)!)
         symbol.contentTintColor = .secondaryLabelColor
         symbol.translatesAutoresizingMaskIntoConstraints = false
         nameLabel.maximumNumberOfLines = 1
@@ -311,7 +344,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     private let statusMenu = NSMenu()
     private var lastMenuAction: String?
     private let table = NSTableView()
+    /// Apple Screen Sharing Macs; automation uses only these.
     private var connections: [SavedMac] = []
+    private var rows: [ConnectionRow] = []
     private var busy = false
     private var addController: AddMacController?
     private let countLabel = label("0", size: 11, color: .secondaryLabelColor)
@@ -326,8 +361,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     private let addButton = NSButton(title: "Add Mac", target: nil, action: nil)
     private let removeButton = NSButton(title: "", target: nil, action: nil)
 
+    private var selectedRow: ConnectionRow? {
+        rows.indices.contains(table.selectedRow) ? rows[table.selectedRow] : nil
+    }
     private var selectedMac: SavedMac? {
-        connections.indices.contains(table.selectedRow) ? connections[table.selectedRow] : nil
+        if case .screenSharing(let mac) = selectedRow { return mac }
+        return nil
+    }
+    private var selectedPeer: NativePeer? {
+        if case .maclink(let peer) = selectedRow { return peer }
+        return nil
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -342,6 +385,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         }
         automationState = automation.state
         native.onChange = { [weak self] in self?.refreshStatusMenu() }
+        native.onPeersChange = { [weak self] in self?.rebuildRows() }
         reloadConnections()
     }
 
@@ -718,19 +762,41 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         updateControls()
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { connections.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let cell = MacCell()
-        cell.nameLabel.stringValue = connections[row].name
-        cell.hostLabel.stringValue = connections[row].endpoint
-        cell.setAccessibilityLabel("\(connections[row].name), \(connections[row].endpoint)")
+        let cell = MacCell(), item = rows[row]
+        cell.nameLabel.stringValue = item.name
+        cell.hostLabel.stringValue = item.detail
+        cell.symbol.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil)
+        cell.setAccessibilityLabel("\(item.name), \(item.detail)")
         return cell
+    }
+
+    /// MacLink pairings first, then Apple Screen Sharing Macs. Keeps the
+    /// selection when the same entry is still present.
+    private func rebuildRows(select id: String? = nil) {
+        let selection = id ?? selectedRow?.id
+        rows = native.peers.map(ConnectionRow.maclink) + connections.map(ConnectionRow.screenSharing)
+        countLabel.stringValue = String(rows.count)
+        table.reloadData()
+        if let row = rows.firstIndex(where: { $0.id == selection }) ?? (rows.isEmpty ? nil : 0) {
+            table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        } else {
+            table.deselectAll(nil)
+        }
+        updateSelection()
     }
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { !busy && !automationState.isBusy && addController == nil }
     func tableViewSelectionDidChange(_ notification: Notification) { updateSelection() }
 
     private func updateSelection() {
-        if let mac = selectedMac {
+        if let peer = selectedPeer {
+            titleLabel.stringValue = peer.name
+            titleLabel.toolTip = peer.name
+            addressLabel.stringValue = "Paired with MacLink · " + peer.address
+            addressLabel.toolTip = peer.address
+            setStatus("Ready when you are", "Connects directly with MacLink’s encrypted session. On \(peer.name), open MacLink → Share This Mac → Start Sharing first.")
+        } else if let mac = selectedMac {
             titleLabel.stringValue = mac.name
             titleLabel.toolTip = mac.name
             addressLabel.stringValue = mac.endpoint
@@ -765,9 +831,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
 
     private func updateControls() {
         let available = !busy && !automationState.isBusy && addController == nil && window?.attachedSheet == nil
-        connectButton.isEnabled = available && selectedMac != nil
+        connectButton.isEnabled = available && selectedRow != nil
         checkButton.isEnabled = available && selectedMac != nil
-        removeButton.isEnabled = available && selectedMac != nil
+        removeButton.isEnabled = available && selectedRow != nil
         addButton.isEnabled = available
         refreshStatusMenu()
     }
@@ -777,20 +843,25 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         if menuItem.action == #selector(addMac) || menuItem.action == #selector(showSettings) {
             return !busy && !automationState.isBusy && addController == nil && window.attachedSheet == nil
         }
-        if [#selector(connect), #selector(checkConnection), #selector(removeMac)].contains(menuItem.action) {
+        if [#selector(connect), #selector(removeMac)].contains(menuItem.action) {
+            return !busy && !automationState.isBusy && selectedRow != nil && window.attachedSheet == nil
+        }
+        if menuItem.action == #selector(checkConnection) {
             return !busy && !automationState.isBusy && selectedMac != nil && window.attachedSheet == nil
         }
         return window?.attachedSheet == nil
     }
 
+    /// `id` selects a saved Screen Sharing Mac by its store ID.
     private func reloadConnections(select id: String? = nil, onLoaded: (() -> Void)? = nil) {
-        let selection = id ?? selectedMac?.id
+        let selection = id.map(ConnectionRow.screenSharingID) ?? selectedRow?.id
         setBusy(true)
         cli.run(["list"]) { [weak self] result in
             guard let self else { return }
             self.setBusy(false)
             switch result {
             case .failure(let error):
+                self.rebuildRows()
                 self.setStatus("Couldn’t load saved Macs", error.message, error: true)
                 self.lastMenuAction = "Couldn’t load saved Macs"
                 self.showConnections()
@@ -798,21 +869,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             case .success(let data):
                 do {
                     self.connections = try JSONDecoder().decode([SavedMac].self, from: data)
-                    self.countLabel.stringValue = String(self.connections.count)
-                    self.table.reloadData()
-                    if let row = self.connections.firstIndex(where: { $0.id == selection }) ?? (self.connections.isEmpty ? nil : 0) {
-                        self.table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-                    } else {
-                        self.table.deselectAll(nil)
-                    }
-                    self.updateSelection()
+                    self.rebuildRows(select: selection)
                     if self.automationStarted {
                         self.automation.updateConnections(self.connections)
                     } else {
                         self.automationStarted = true
                         self.automation.start(connections: self.connections)
                     }
-                    if self.initialLoad && self.connections.isEmpty { self.showConnections() }
+                    if self.initialLoad && self.rows.isEmpty { self.showConnections() }
                     self.initialLoad = false
                     onLoaded?()
                 } catch {
@@ -878,7 +942,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     @objc private func removeMac() {
-        guard !busy, !automationState.isBusy, window.attachedSheet == nil, let mac = selectedMac else { return }
+        guard !busy, !automationState.isBusy, window.attachedSheet == nil else { return }
+        if let peer = selectedPeer { forgetPairing(peer); return }
+        guard let mac = selectedMac else { return }
         let alert = NSAlert()
         alert.messageText = "Remove \(mac.name)?"
         alert.informativeText = "This removes its saved address from MacLink. You can add it again anytime."
@@ -901,8 +967,32 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         updateControls()
     }
 
+    private func forgetPairing(_ peer: NativePeer) {
+        let alert = NSAlert()
+        alert.messageText = "Forget \(peer.name)?"
+        alert.informativeText = "This removes the pairing and its secret from this Mac. To connect again, copy a new pairing code from \(peer.name)."
+        alert.addButton(withTitle: "Forget")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            self.updateControls()
+            guard response == .alertFirstButtonReturn else { return }
+            do { try self.native.forget(peerID: peer.id) }
+            catch { self.setStatus("Couldn’t forget this Mac", error.localizedDescription, error: true) }
+        }
+        updateControls()
+    }
+
     @objc private func connect() {
-        guard !busy, !automationState.isBusy, window.attachedSheet == nil, let mac = selectedMac else { return }
+        guard !busy, !automationState.isBusy, window.attachedSheet == nil else { return }
+        if let peer = selectedPeer {
+            lastMenuAction = "Connecting to \(peer.name.prefix(40))…"
+            setStatus("Connecting with MacLink…", "Connecting to \(peer.name). If it does not open, make sure \(peer.name) is sharing.")
+            native.connect(peerID: peer.id)
+            refreshStatusMenu()
+            return
+        }
+        guard let mac = selectedMac else { return }
         lastMenuAction = "Opening \(mac.name.prefix(40))…"
         setBusy(true)
         setStatus("Opening Screen Sharing…", "Preparing a connection to \(mac.name).")

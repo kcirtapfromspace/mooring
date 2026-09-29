@@ -1089,6 +1089,16 @@ fn peers_abi_loads_remembers_and_imports() {
             ("Studio".into(), "10.0.0.2".into())
         );
         assert_eq!(text(&peers[1].name), "Old Mac");
+        assert_eq!(ml_peers_forget(path.as_ptr(), code.peer_id.as_ptr()), 0);
+        assert_eq!(
+            ml_peers_forget(path.as_ptr(), std::ptr::null()),
+            Error::Invalid as i32
+        );
+        assert_eq!(
+            ml_peers_load(path.as_ptr(), peers.as_mut_ptr(), 32, &mut count),
+            0
+        );
+        assert_eq!((count, text(&peers[0].name)), (1, "Old Mac".into()));
         let empty = CString::new("").unwrap();
         assert_eq!(
             ml_peers_load(empty.as_ptr(), peers.as_mut_ptr(), 32, &mut count),

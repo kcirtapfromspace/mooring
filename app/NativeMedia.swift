@@ -41,6 +41,10 @@ struct NativeMediaMetrics: Codable {
     var pixel_width: Int = 0
     var pixel_height: Int = 0
     var target_bitrate: Int = 0
+    /// Frames the hardware rate control skipped; the chain continues without them.
+    var dropped_frames: UInt64 = 0
+    /// Frames that failed and restarted the chain with a keyframe.
+    var failed_frames: UInt64 = 0
 }
 
 struct NativeEncodedFrame {
@@ -128,19 +132,28 @@ struct NativeVideoPacket {
     }
 }
 
-/// Thread-safe admission; only one raw encode or completed send is outstanding.
-/// Configure callbacks before encoding. Call release after the transport finishes
-/// writing this access unit, including on failure. Never drop an encoded P frame
-/// and continue the same chain: requestKeyframe() after a failed transport send.
+/// Thread-safe admission. At most two frames are in flight, from admission until
+/// the transport finishes writing them, so the next frame can encode while the
+/// previous one is still being sent. Configure callbacks before encoding. Call
+/// release after the transport finishes writing an access unit, including on
+/// failure. Never drop an encoded P frame and continue the same chain:
+/// requestKeyframe() after a failed transport send.
 final class NativeVideoEncoder {
+    static let maxInFlight = 2
+    /// Consecutive failed frames tolerated before reporting a fatal error.
+    static let failureBudget = 8
     var onEncodedFrame: ((NativeEncodedFrame, @escaping () -> Void) -> Void)?
     var onError: ((String) -> Void)?
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "MacLink.native.encode", qos: .userInteractive)
     private var session: VTCompressionSession?
     private var active = true
-    private var busy = false
+    private var outstanding = Set<UInt64>()
+    private var nextToken: UInt64 = 0
+    private var consecutiveFailures = 0
     private var forceKeyframe = true
+    /// Wire sequence, assigned only to frames actually emitted: a frame rate
+    /// control skips must not look like a gap to the viewer.
     private var sequence: UInt64 = 0
     private var metrics = NativeMediaMetrics()
     private var targetBitrate: Int
@@ -202,7 +215,7 @@ final class NativeVideoEncoder {
     }
     deinit { if let session { VTCompressionSessionInvalidate(session) } }
     var snapshot: NativeMediaMetrics { lock.lock(); defer { lock.unlock() }; return metrics }
-    var inFlightCount: Int { lock.lock(); defer { lock.unlock() }; return busy ? 1 : 0 }
+    var inFlightCount: Int { lock.lock(); defer { lock.unlock() }; return outstanding.count }
     func setTargetBitrate(_ bitsPerSecond: Int) {
         lock.lock(); targetBitrate = min(80_000_000, max(1_000_000, bitsPerSecond)); lock.unlock()
     }
@@ -210,18 +223,19 @@ final class NativeVideoEncoder {
     @discardableResult
     func encode(_ image: CVPixelBuffer, presentationTime: CMTime) -> Bool {
         lock.lock()
-        guard active, !busy else { if active { metrics.skipped_capture_frames &+= 1 }; lock.unlock(); return false }
+        guard active, outstanding.count < Self.maxInFlight else { if active { metrics.skipped_capture_frames &+= 1 }; lock.unlock(); return false }
         guard CVPixelBufferGetWidth(image) == width, CVPixelBufferGetHeight(image) == height,
               presentationTime.isNumeric, presentationTime.seconds >= 0 else { lock.unlock(); return false }
-        busy = true; sequence &+= 1
-        let frameSequence = sequence, keyframe = forceKeyframe, bitrate = targetBitrate
+        nextToken &+= 1
+        let token = nextToken, keyframe = forceKeyframe, bitrate = targetBitrate
+        outstanding.insert(token)
         forceKeyframe = false
         lock.unlock()
         let began = ProcessInfo.processInfo.systemUptime
         queue.async { [weak self] in
             guard let self else { return }
             self.lock.lock(); let active = self.active; self.lock.unlock()
-            guard active, let session = self.session else { self.release(frameSequence); return }
+            guard active, let session = self.session else { self.release(token); return }
             if bitrate != self.appliedBitrate {
                 let result = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFNumber)
                 if result == noErr { self.appliedBitrate = bitrate }
@@ -231,26 +245,41 @@ final class NativeVideoEncoder {
                 presentationTimeStamp: presentationTime, duration: CMTime(value: 1, timescale: Int32(self.framesPerSecond)),
                 frameProperties: properties, infoFlagsOut: nil) { [weak self] status, flags, sample in
                     self?.queue.async { [weak self] in
-                        self?.encoded(status: status, flags: flags, sample: sample, sequence: frameSequence, began: began)
+                        self?.encoded(status: status, flags: flags, sample: sample, token: token, began: began)
                     }
                 }
-            if result != noErr { self.fail(frameSequence, "H.264 encode failed (\(result)).") }
+            if result != noErr { self.fail(token, "H.264 encode failed (\(result)).") }
         }
         return true
     }
-    private func release(_ frameSequence: UInt64) {
-        lock.lock(); if sequence == frameSequence { busy = false }; lock.unlock()
+    /// Idempotent, including after stop.
+    private func release(_ token: UInt64) {
+        lock.lock(); outstanding.remove(token); lock.unlock()
     }
-    private func fail(_ sequence: UInt64, _ message: String) {
-        requestKeyframe(); release(sequence)
-        lock.lock(); let report = active; lock.unlock()
+    /// A failed frame is skipped and the chain restarts with a keyframe. Only a
+    /// run of failures, such as an invalidated session, ends the session. The
+    /// failure consumes a sequence number: a later frame already in the encoder
+    /// may reference the lost one, so the viewer must see a gap and wait for
+    /// the keyframe rather than decode against the wrong reference.
+    private func fail(_ token: UInt64, _ message: String) {
+        requestKeyframe()
+        lock.lock()
+        outstanding.remove(token); consecutiveFailures += 1; metrics.failed_frames &+= 1; sequence &+= 1
+        let report = active && consecutiveFailures >= Self.failureBudget
+        lock.unlock()
         if report { onError?(message) }
     }
-    private func encoded(status: OSStatus, flags: VTEncodeInfoFlags, sample: CMSampleBuffer?, sequence: UInt64, began: TimeInterval) {
-        lock.lock(); let valid = active && busy && self.sequence == sequence; lock.unlock()
+    private func encoded(status: OSStatus, flags: VTEncodeInfoFlags, sample: CMSampleBuffer?, token: UInt64, began: TimeInterval) {
+        lock.lock(); let valid = active && outstanding.contains(token); lock.unlock()
         guard valid else { return }
-        guard status == noErr, !flags.contains(.frameDropped), let sample, CMSampleBufferDataIsReady(sample) else {
-            fail(sequence, "Hardware encoder did not produce a complete frame (\(status))."); return
+        if status == noErr && flags.contains(.frameDropped) {
+            // Real-time rate control skipped this frame; the encoder's references
+            // are unchanged, so the chain continues without it.
+            lock.lock(); outstanding.remove(token); metrics.dropped_frames &+= 1; lock.unlock()
+            return
+        }
+        guard status == noErr, let sample, CMSampleBufferDataIsReady(sample) else {
+            fail(token, "Hardware encoder did not produce a complete frame (\(status))."); return
         }
         do {
             guard let format = CMSampleBufferGetFormatDescription(sample),
@@ -277,22 +306,23 @@ final class NativeVideoEncoder {
             let keyframe = attachments?.first?[kCMSampleAttachmentKey_NotSync] as? Bool != true
             let timestamp = CMSampleBufferGetPresentationTimeStamp(sample).seconds
             guard timestamp.isFinite, timestamp >= 0, timestamp < Double(UInt64.max) / 1_000_000 else { throw NativeMediaError("Invalid capture timestamp.") }
+            try NativeVideoPacket(width: width, height: height, sequence: 0, timestamp: UInt64(timestamp * 1_000_000),
+                keyframe: keyframe, sps: parameterSets[0], pps: parameterSets[1], avcc: bytes).validate()
+            lock.lock()
+            sequence &+= 1; consecutiveFailures = 0
             let packet = NativeVideoPacket(width: width, height: height, sequence: sequence,
                 timestamp: UInt64(timestamp * 1_000_000), keyframe: keyframe,
                 sps: parameterSets[0], pps: parameterSets[1], avcc: bytes)
-            try packet.validate()
-            lock.lock()
             metrics.encode_ms = max(0, (ProcessInfo.processInfo.systemUptime - began) * 1000)
             metrics.encoded_frames &+= 1; metrics.encoded_bytes &+= UInt64(packet.wireSize); metrics.target_bitrate = appliedBitrate
             let report = metrics
             lock.unlock()
-            guard let callback = onEncodedFrame else { release(sequence); return }
-            // Sequence guards make release idempotent, including after stop.
-            callback(NativeEncodedFrame(packet: packet, metrics: report)) { [weak self] in self?.release(sequence) }
-        } catch { fail(sequence, error.localizedDescription) }
+            guard let callback = onEncodedFrame else { release(token); return }
+            callback(NativeEncodedFrame(packet: packet, metrics: report)) { [weak self] in self?.release(token) }
+        } catch { fail(token, error.localizedDescription) }
     }
     func stop(completion: (() -> Void)? = nil) {
-        lock.lock(); active = false; busy = false; lock.unlock()
+        lock.lock(); active = false; outstanding.removeAll(); lock.unlock()
         queue.async { [self] in
             if let session { VTCompressionSessionInvalidate(session); self.session = nil }
             completion?()
@@ -313,6 +343,8 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var captureDisplay: CGDirectDisplayID?
     private var captureGeometry: NativeDisplayGeometry?
     private var stream: SCStream?
+    private var configuration: SCStreamConfiguration?
+    private var showsCursor: Bool
     private var generation: UInt64 = 0
     private var starting = false
     private let maxPixelWidth: Int
@@ -320,7 +352,8 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let framesPerSecond: Int
     private var bitrate = 25_000_000
 
-    init(maxPixelWidth: Int = 3840, maxPixelHeight: Int = 2160, framesPerSecond: Int = 60) {
+    init(maxPixelWidth: Int = 3840, maxPixelHeight: Int = 2160, framesPerSecond: Int = 60, showsCursor: Bool = true) {
+        self.showsCursor = showsCursor
         self.maxPixelWidth = min(3840, max(16, maxPixelWidth))
         self.maxPixelHeight = min(2160, max(16, maxPixelHeight))
         self.framesPerSecond = min(60, max(1, framesPerSecond))
@@ -358,12 +391,12 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 configuration.width = width; configuration.height = height
                 configuration.minimumFrameInterval = CMTime(value: 1, timescale: Int32(self.framesPerSecond))
                 configuration.queueDepth = 3; configuration.pixelFormat = kCVPixelFormatType_32BGRA
-                configuration.showsCursor = true; configuration.capturesAudio = false
+                configuration.showsCursor = self.showsCursor; configuration.capturesAudio = false
                 configuration.scalesToFit = true; configuration.colorSpaceName = CGColorSpace.sRGB
                 configuration.captureResolution = .best
                 let stream = SCStream(filter: SCContentFilter(display: display, excludingWindows: []), configuration: configuration, delegate: self)
                 try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.captureQueue)
-                self.stream = stream
+                self.stream = stream; self.configuration = configuration
                 self.setStreamMetadata(stream, display: identifier, geometry: geometry)
                 // Enqueue control geometry before SCK can deliver the first frame.
                 self.onGeometry?(geometry)
@@ -391,7 +424,17 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         precondition(Thread.isMainThread)
         generation &+= 1; starting = false
         takeEncoder()?.stop()
-        if let stream { self.stream = nil; Task { try? await stream.stopCapture() } }
+        if let stream { self.stream = nil; configuration = nil; Task { try? await stream.stopCapture() } }
+    }
+    /// Draw this Mac's pointer into the video only when it is not the viewer's
+    /// own pointer; a controlling viewer already shows it locally.
+    func setShowsCursor(_ show: Bool) {
+        precondition(Thread.isMainThread)
+        guard show != showsCursor else { return }
+        showsCursor = show
+        guard let stream, let configuration else { return }
+        configuration.showsCursor = show
+        stream.updateConfiguration(configuration) { _ in }
     }
     func requestKeyframe() { currentEncoder()?.requestKeyframe() }
     func setTargetBitrate(_ bitsPerSecond: Int) {
@@ -448,6 +491,9 @@ final class NativeVideoDecoder {
     private var discontinuityEpoch: UInt64 = 0
     private var requestOutstanding = false
     private var requestedAt = -Double.infinity
+    private var consecutiveFailures = 0
+    /// Consecutive failed decodes tolerated before reporting a fatal error.
+    static let failureBudget = 5
     private let keyframeRetryInterval: TimeInterval
     private var session: VTDecompressionSession?
     private var format: CMFormatDescription?
@@ -485,13 +531,17 @@ final class NativeVideoDecoder {
         queue.async { [weak self] in self?.process(packet) }
         return true
     }
+    /// A failed frame restarts the chain with a keyframe; waiting for that
+    /// keyframe is not a failure. Only a run of failures is reported as fatal.
     private func notifyRecovery(_ message: String, reportError: Bool = true) {
         lock.lock()
         guard active else { lock.unlock(); return }
         discontinuity = true; discontinuityEpoch &+= 1; pending = nil
+        if reportError { consecutiveFailures += 1 }
+        let fatal = reportError && consecutiveFailures >= Self.failureBudget
         let notify = claimKeyframeRequestLocked(); lock.unlock()
         if notify { onNeedsKeyframe?() }
-        if reportError { onError?(message) }
+        if fatal { onError?(message) }
     }
     private func process(_ packet: NativeVideoPacket) {
         defer {
@@ -542,7 +592,7 @@ final class NativeVideoDecoder {
                 throw NativeMediaError("Hardware video decode failed (\(result)/\(outputStatus)).")
             }
             lastSequence = packet.sequence
-            lock.lock(); let deliver = self.active && !discontinuity; lock.unlock()
+            lock.lock(); let deliver = self.active && !discontinuity; if deliver { consecutiveFailures = 0 }; lock.unlock()
             if deliver { onFrame?(output) }
         } catch { notifyRecovery(error.localizedDescription) }
     }

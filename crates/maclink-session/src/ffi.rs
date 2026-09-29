@@ -956,6 +956,16 @@ pub unsafe extern "C" fn ml_peers_remember(
         }
     })
 }
+/// Forget a saved peer by ID; forgetting an absent peer succeeds.
+/// # Safety
+/// `directory` null or NUL terminated; `id` NUL terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_peers_forget(directory: *const c_char, id: *const c_char) -> i32 {
+    ffi(|| {
+        let id = unsafe { text(id)? };
+        unsafe { store(directory)? }.forget(&id).map(|_| ())
+    })
+}
 /// Import the earlier preference list once; a no-op when a store exists.
 /// # Safety
 /// `directory` null or NUL terminated; `json` readable for `length`;

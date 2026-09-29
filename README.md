@@ -4,7 +4,7 @@ A small native Mac connection app with a Rust core. The product goal is reliable
 
 **Current milestone:** enter a Mac's address and connect. Auto mode, full screen and reconnection on learned networks are the defaults. MacLink can request Standard or High Performance and supervise a uniquely identified Apple Screen Sharing session. Apple supplies authentication and video. Its mode URL options are undocumented; actual negotiation, full screen, and switching still need two-Mac validation. There is no claim of performance parity or measured video bandwidth.
 
-**Experimental:** a direct native session. **Share This Mac** captures the main display with ScreenCaptureKit and hardware H.264; **Connect with MacLink** pairs with a copied code and views or controls it over an encrypted, authenticated LAN connection. It has not yet been tested between two Macs. See the [release notes](docs/release-notes-v0.3.0-preview.1.md) for limits.
+**Experimental:** a direct native session. **Share This Mac** captures the main display with ScreenCaptureKit and hardware H.264; **Connect with MacLink** pairs with a copied code and views or controls it over an encrypted, authenticated LAN connection. It has not yet been tested between two Macs. See the [release notes](docs/release-notes-v0.3.0-preview.2.md) for limits.
 
 ## Run
 
@@ -19,7 +19,7 @@ MacLink lives behind a display icon in the macOS menu bar. Choose **Add Mac**, e
 
 No home-network marking or capability checkbox is required to start. Auto starts with Standard and learns a direct network after an explicitly opened, identified session and sustained healthy checks. It may then make a bounded High Performance trial without claiming that support or bandwidth has been verified. Settings contains optional display, login and connection preferences; **Advanced** contains home overrides and detailed tuning. Previously configured preferences are preserved.
 
-Builds and GitHub preview releases target Apple silicon (arm64) only. Download the [native session preview](https://github.com/kcirtapfromspace/maclink/releases/tag/v0.3.0-preview.1). Distribution uses Developer ID signing, Apple notarization, and a stapled ticket checked after extracting the final ZIP. Local development builds remain ad hoc by default. See [testing instructions](docs/TESTING.md), [automation behavior](docs/AUTOMATION.md), and the [notarization workflow](docs/NOTARIZATION.md).
+Builds and GitHub preview releases target Apple silicon (arm64) only. Download the [native session preview](https://github.com/kcirtapfromspace/maclink/releases/tag/v0.3.0-preview.2). Distribution uses Developer ID signing, Apple notarization, and a stapled ticket checked after extracting the final ZIP. Local development builds remain ad hoc by default. See [testing instructions](docs/TESTING.md), [automation behavior](docs/AUTOMATION.md), and the [notarization workflow](docs/NOTARIZATION.md).
 
 ## CLI
 
