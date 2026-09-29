@@ -13,9 +13,9 @@ Requires macOS 14 or newer, Xcode Command Line Tools, and Rust 1.89 or newer. Ap
 open dist/MacLink.app
 ```
 
-MacLink lives behind a display icon in the macOS menu bar. Add a Mac, then open **Settings** to enable automation, check and mark the current home path, confirm High Performance support, and optionally enable login launch. Grant MacLink Accessibility access there for session tracking and full screen. **Mode Preference** and **Pause Automation** are available directly in the menu. MacLink never asks for or stores a remote password.
+MacLink lives behind a display icon in the macOS menu bar. Add a Mac, then open **Settings** to enable automation, use Detect Network → Use This Network as Home, confirm High Performance support, and optionally enable login launch. Grant MacLink Accessibility access there for session tracking and full screen. **Mode Preference** and **Pause Automation** are available directly in the menu. MacLink never asks for or stores a remote password.
 
-Builds and GitHub preview releases target Apple silicon (arm64) only. Download the [menu-bar automation preview](https://github.com/kcirtapfromspace/maclink/releases/tag/v0.2.0-preview.1). Distribution uses Developer ID signing, Apple notarization, and a stapled ticket checked after extracting the final ZIP. Local development builds remain ad hoc by default. See [testing instructions](docs/TESTING.md), [automation behavior](docs/AUTOMATION.md), and the [notarization workflow](docs/NOTARIZATION.md).
+Builds and GitHub preview releases target Apple silicon (arm64) only. Download the [menu-bar automation preview](https://github.com/kcirtapfromspace/maclink/releases/tag/v0.2.0-preview.2). Distribution uses Developer ID signing, Apple notarization, and a stapled ticket checked after extracting the final ZIP. Local development builds remain ad hoc by default. See [testing instructions](docs/TESTING.md), [automation behavior](docs/AUTOMATION.md), and the [notarization workflow](docs/NOTARIZATION.md).
 
 ## CLI
 

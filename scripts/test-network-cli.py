@@ -15,6 +15,15 @@ with tempfile.TemporaryDirectory(prefix="maclink-network-cli-") as directory:
                                 capture_output=True, text=True, timeout=10)
         return json.loads(result.stdout)
 
+    # Setup must work independently of the saved-Mac store, DNS and RFB.
+    # Corrupting this isolated fixture makes any accidental store read fail.
+    config = Path(directory) / "connections.json"
+    config.write_text("invalid test store")
+    local = run("home-network")
+    assert isinstance(local["description"], str) and local["description"]
+    assert local["fingerprint"] is None or local["fingerprint"].startswith("v2|")
+    config.unlink()
+
     with socket.socket() as server:
         server.bind(("127.0.0.1", 0))
         server.listen(1)
@@ -51,5 +60,8 @@ with tempfile.TemporaryDirectory(prefix="maclink-network-cli-") as directory:
         request["state"] = decision["state"]
         request["probes"] = []
         assert run("network-evaluate", json.dumps(request))["recommended_mode"] == "standard"
-    assert run("network-probe", mac["id"])["status"] == "connect_failed"
-print("Packaged network CLI: live loopback, zero writes, policy round-trip, refusal passed.")
+    failure = run("network-probe", mac["id"])
+    assert failure["status"] == "connect_failed"
+    assert "local_network" in failure
+    assert isinstance(run("home-network")["description"], str)
+print("Packaged network CLI: local home detection without a saved/reachable Mac, live loopback, zero writes, policy round-trip, refusal passed.")

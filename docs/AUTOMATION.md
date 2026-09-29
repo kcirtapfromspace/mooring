@@ -5,12 +5,12 @@ MacLink now stays in the menu bar when its Connections window closes. Existing s
 ## Setup
 
 1. Add the remote Mac through the menu's Open Connections window.
-2. Open Settings and choose the Mac to automate. On your home connection, click Check Current Path, then Mark This Path as Home. Save after configuring the options below.
+2. Open Settings and choose the Mac to automate. On your home connection, click Detect Network, then Use This Network as Home. Save after configuring the options below.
 3. Confirm that both Macs support Apple's High Performance sharing if you want Auto to consider it. Enable VPN paths only if you want to try High Performance through an identified tunnel.
 4. Enable Accessibility for the installed, signed MacLink app using the Settings button. macOS requires you to grant this permission. It enables identification, full screen and closing/reopening the matching viewer window; MacLink never types passwords or approves authentication dialogs.
 5. Enable automation, automatic home connection and full screen. Optionally select Launch MacLink at Login. Moving the app to Applications before registering login launch keeps the registered path stable.
 
-Home marking records the selected Mac, resolved target address, route interface and gateway. It is a preference hint, **not authentication or proof of physical location**. Ethernet and Wi-Fi can produce different fingerprints; mark each while at home. MacLink remembers up to eight home paths and includes Forget Home Paths to clear them. A Ubiquiti travel bridge may reproduce the same path; checks still evaluate timing, but cannot reliably infer your physical location or available bandwidth. No SSID or Location Services permission is required.
+Home marking reads this Mac’s physical network interface, gateway and cached router hardware address. It does not resolve or contact the remote Mac, and it works before adding a saved Mac. Existing home preferences from the first automation preview remain supported. It is a preference hint, **not authentication or proof of physical location**. Ethernet and Wi-Fi can produce different fingerprints; mark each while at home. MacLink remembers up to eight home paths and includes Forget Home Paths to clear them. A Ubiquiti travel bridge may reproduce the same path; checks still evaluate timing, but cannot reliably infer your physical location or available bandwidth. No SSID or Location Services permission is required. Detection has a bounded timeout and returns an explanation if the router cache is empty or the physical path is ambiguous. Ordinary network activity can populate the router cache; then retry Detect Network. A target connection check may still fail independently.
 
 ## Decisions and actions
 

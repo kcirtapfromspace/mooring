@@ -5,7 +5,7 @@ Validated locally on an Apple M1 Ultra running macOS 26.6.2. Rust 1.98.1 and the
 ## Automated checks
 
 - Workspace formatting and Clippy with warnings denied.
-- 58 Rust tests: eight CLI/storage tests, 37 network/quality/mailbox/reconnect tests, and 13 platform tests.
+- 63 Rust tests: eight CLI/storage tests, 37 network/quality/mailbox/reconnect tests, and 18 platform tests.
 - 73 Swift connection-document parser and bounded-reader checks, including IPv6, ambiguous modes, invalid ports, oversized files, symlinks and FIFOs. These perform no Accessibility actions.
 - Packaged CLI integration against a live loopback RFB fixture verifies zero application bytes sent, real timing/route JSON, policy-state round-trip, and connection-refused output.
 - Storage tests exercise concurrent saves, corrupted/future schemas, private file permissions, oversized IDs, and malformed input.
@@ -29,6 +29,14 @@ Used a separate app identifier and isolated connection store. Verified empty sta
 For the automation preview, an isolated accessory app verified first-run setup, adding a localhost target, the 610×660 scrollable settings window, live Check Current Path results, explicit home marking, saving/reopening settings, closing Connections without quitting, reopening it with the menu command, and quitting the QA copy. Accessibility and login registration were not granted or changed during QA. The user's existing app and connections were preserved.
 
 Review corrected queued-action cancellation, stale network-change callbacks, intentional viewer quit handling, and the cancelled-authentication retry path. No two-Mac Accessibility or mode transition is claimed by those reviews or parser tests.
+
+## Home-settings regression checks
+
+The updated local detector completed in approximately 0.3 seconds on this host without contacting a remote Mac. Local CI exercises router identity parsing, missing/ambiguous neighbors, IPv6/VPN route handling, timeout cleanup, and detection with a corrupted isolated connection store. Swift state tests cover late callbacks, timeout recovery, network invalidation, explicit marking, saving, bounds and settings migration.
+
+A separate QA app verified Detect Network → Use This Network as Home → Save with no saved Mac, persisted home settings after adding a Mac, and successful detection while background checks repeatedly failed against an unreachable loopback target. The candidate remained usable after those failures. No Accessibility or login permissions were changed.
+
+Apple accepted the home-settings fix, `v0.2.0-preview.2`, as submission `3e09ae81-d055-4f19-89e2-0ccb1c2f1b12`. The final extracted ZIP passed strict code-signature verification, stapled-ticket validation and Gatekeeper assessment as Notarized Developer ID.
 
 ## Media feasibility
 

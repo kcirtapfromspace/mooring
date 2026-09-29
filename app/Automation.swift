@@ -22,6 +22,7 @@ final class AutomationCoordinator: MacLinkAutomationService {
     private var path: NWPath?
     private var timer: Timer?
     private var generation = 0
+    private var networkGeneration = 0
     private var intent = AutomationIntent()
     private var probeBusy = false
     private var observationBusy = false
@@ -33,6 +34,7 @@ final class AutomationCoordinator: MacLinkAutomationService {
     private var policyState: [String: Any]?
     private var latestProbe: [String: Any]?
     private var routeFingerprint: String?
+    private var localNetworkFingerprint: String?
     private var routeDescription = "Check the saved Mac to identify its current path."
     private var recommendation = "standard"
     private var reachable = false
@@ -84,10 +86,12 @@ final class AutomationCoordinator: MacLinkAutomationService {
         monitor.pathUpdateHandler = { [weak self] path in
             DispatchQueue.main.async {
                 guard let self, !self.stopped else { return }
-                if self.path != nil { self.invalidateEvidence() }
+                let changed = self.path != nil
                 self.path = path
+                if changed || path.status != .satisfied {
+                    self.invalidateNetwork("The network changed. Detect it again before marking it as home.")
+                }
                 if path.status != .satisfied {
-                    self.invalidateEvidence()
                     if self.settings.enabled && !self.settings.paused { self.publish("Waiting for network", "The saved Mac will be checked when connectivity returns.") }
                 }
             }
@@ -95,10 +99,10 @@ final class AutomationCoordinator: MacLinkAutomationService {
         monitor.start(queue: DispatchQueue(label: "dev.maclink.network-path"))
         let center = NSWorkspace.shared.notificationCenter
         workspaceObservers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.invalidateEvidence()
+            self?.invalidateNetwork("The Mac is going to sleep. Detect the network again after waking.")
         })
         workspaceObservers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.invalidateEvidence(); self?.tick()
+            self?.invalidateNetwork("The Mac woke up. Detect the current network again."); self?.tick()
         })
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.tick() }
         if let timer { RunLoop.main.add(timer, forMode: .common) }
@@ -106,6 +110,7 @@ final class AutomationCoordinator: MacLinkAutomationService {
     }
     func updateConnections(_ connections: [SavedMac]) {
         self.connections = connections
+        settingsWindow?.updateConnections(connections)
         if target == nil { invalidateEvidence(); sessionRequested = false; sessionConnected = false }
         refreshIdleState()
     }
@@ -113,7 +118,13 @@ final class AutomationCoordinator: MacLinkAutomationService {
         intent.cancel(); intent = AutomationIntent()
         generation += 1; policyState = nil; latestProbe = nil; firstProbeAt = nil
         routeFingerprint = nil; reachable = false; recommendation = "standard"
+        localNetworkFingerprint = nil
         nextProbeAt = 0; offlineCooling = false
+    }
+    private func invalidateNetwork(_ reason: String) {
+        networkGeneration += 1
+        invalidateEvidence()
+        settingsWindow?.invalidateHomeCheck(reason: reason)
     }
     private func refreshIdleState() {
         if !settings.enabled { publish("Automation is off", "Choose a Mac and enable automation in Settings.") }
@@ -140,9 +151,9 @@ final class AutomationCoordinator: MacLinkAutomationService {
         guard !stopped, settings.enabled, !settings.paused, let mac = target else { return }
         if sessionRequested && !launchBusy { observeSession() }
         guard !probeBusy, !launchBusy, now >= nextProbeAt else { return }
-        probe(mac, forSettings: false)
+        probe(mac)
     }
-    private func probe(_ mac: SavedMac, forSettings: Bool) {
+    private func probe(_ mac: SavedMac) {
         guard !probeBusy else { return }
         probeBusy = true
         let epoch = generation
@@ -155,10 +166,10 @@ final class AutomationCoordinator: MacLinkAutomationService {
             case .success(let data): response = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
             case .failure(let error): response = ["status": "connect_failed", "error": error.message]
             }
-            self.receiveProbe(response, mac: mac, evaluate: !forSettings)
+            self.receiveProbe(response, mac: mac)
         }
     }
-    private func receiveProbe(_ response: [String: Any], mac: SavedMac, evaluate: Bool) {
+    private func receiveProbe(_ response: [String: Any], mac: SavedMac) {
         let inspection = response["inspection"] as? [String: Any] ?? [:]
         let route = response["route"] as? [String: Any] ?? [:]
         let success = response["status"] as? String == "rfb_ready"
@@ -169,13 +180,13 @@ final class AutomationCoordinator: MacLinkAutomationService {
             let tcp = inspection["tcp_connect_ms"] as? Double ?? 0
             measuredDescription = "\(interface) · \(route["tunnel"] as? Bool == true ? "tunnel to target" : "route to target") · TCP \(String(format: "%.1f", tcp)) ms"
         } else { measuredDescription = response["error"] as? String ?? "The target route could not be identified." }
-        if settingsWindow?.selectedTargetID == mac.id {
-            settingsWindow?.showRoute(measuredDescription, fingerprint: measuredFingerprint)
-        }
-        guard evaluate, settings.enabled, !settings.paused else { return }
+        guard settings.enabled, !settings.paused else { return }
+        let previousNetwork = localNetworkFingerprint
+        let localNetwork = response["local_network"] as? [String: Any] ?? [:]
+        localNetworkFingerprint = localNetwork["fingerprint"] as? String
         let previousRoute = routeFingerprint
         routeFingerprint = measuredFingerprint; routeDescription = measuredDescription
-        if previousRoute != routeFingerprint { firstProbeAt = nil }
+        if previousRoute != routeFingerprint || previousNetwork != localNetworkFingerprint { firstProbeAt = nil }
         if success && offlineCooling { offlineCooling = false; policyState = nil }
         nextProbeAt = now + (offlineCooling ? 60 : 3)
         reachable = success
@@ -192,12 +203,14 @@ final class AutomationCoordinator: MacLinkAutomationService {
         let transport: String
         switch type { case .wifi: transport = "wifi"; case .wiredEthernet: transport = "ethernet"; case .cellular: transport = "cellular"; default: transport = route["tunnel"] as? Bool == true ? "other" : "unknown" }
         let vpn: String = (route["tunnel"] as? Bool).map { $0 ? "present" : "absent" } ?? "unknown"
-        let home = routeFingerprint.map { settings.homeRoutes.contains($0) } ?? false
+        // Keep previously saved target-route preferences working while new setup
+        // identifies the local network independently of the remote Mac.
+        let home = [routeFingerprint, localNetworkFingerprint].compactMap { $0 }.contains { settings.homeRoutes.contains($0) }
         var context: [String: Any] = ["trusted_home_baseline": home,
                                      "allow_high_performance_override": settings.allowVPN || settings.preference == "high_performance",
                                      "high_performance_supported": settings.highPerformanceConfirmed && settings.preference != "standard" && !crashFallback,
                                      "transport": transport, "vpn": vpn]
-        if let routeFingerprint { context["route_identity"] = routeFingerprint }
+        if let routeFingerprint { context["route_identity"] = routeFingerprint + "|" + (localNetworkFingerprint ?? "unknown-local-network") }
         var request: [String: Any] = ["now_ms": UInt64(now * 1000), "context": context, "probes": [sample]]
         if let policyState { request["state"] = policyState }
         guard let data = try? JSONSerialization.data(withJSONObject: request), let json = String(data: data, encoding: .utf8) else { return }
@@ -365,30 +378,51 @@ final class AutomationCoordinator: MacLinkAutomationService {
     func showSettings(connections: [SavedMac], parentWindow: NSWindow?) {
         self.connections = connections
         if let controller = settingsWindow, controller.window?.isVisible == true {
+            controller.updateConnections(connections)
             NSApp.activate(ignoringOtherApps: true); controller.window?.makeKeyAndOrderFront(nil); return
         }
         let controller = AutomationSettingsController(settings: settings, connections: connections)
         settingsWindow = controller
-        controller.showRoute(routeDescription, fingerprint: routeFingerprint)
-        controller.onCheckHome = { [weak self, weak controller] in
-            guard let self, let controller, let mac = connections.first(where: { $0.id == controller.selectedTargetID }) else { return }
-            if self.probeBusy { controller.showRoute("A check is already running. Try again shortly.", fingerprint: nil); return }
-            self.probe(mac, forSettings: true)
+        controller.onCheckHome = { [weak self, weak controller] request in
+            guard let self, let controller else { return }
+            let networkEpoch = self.networkGeneration
+            // Separate from ongoing remote probes: an asleep Mac, slow DNS or
+            // occupied probe slot must never prevent local home-network setup.
+            self.cli.run(["home-network"], timeout: 4) { [weak self, weak controller] result in
+                guard let self, let controller, !self.stopped else { return }
+                guard self.networkGeneration == networkEpoch else {
+                    controller.completeHomeCheck(request: request, description: "The network changed during detection. Try Detect Network again.", fingerprint: nil)
+                    return
+                }
+                switch result {
+                case .failure(let error):
+                    controller.completeHomeCheck(request: request, description: "Couldn’t detect this network. \(error.message)", fingerprint: nil)
+                case .success(let data):
+                    guard let response = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let description = response["description"] as? String else {
+                        controller.completeHomeCheck(request: request, description: "The network check returned an invalid result. Try again.", fingerprint: nil); return
+                    }
+                    controller.completeHomeCheck(request: request, description: description, fingerprint: response["fingerprint"] as? String)
+                }
+            }
         }
         controller.onSave = { [weak self, weak controller] updated, launchAtLogin in
             guard let self else { return }
-            do {
-                if launchAtLogin && SMAppService.mainApp.status != .enabled { try SMAppService.mainApp.register() }
-                else if !launchAtLogin && SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() }
-            } catch {
-                let alert = NSAlert(); alert.messageText = "Couldn’t update Launch at Login"; alert.informativeText = error.localizedDescription
-                alert.runModal(); return
-            }
             let changedTarget = updated.targetID != self.settings.targetID
             self.settings = updated; self.save(); self.invalidateEvidence()
             self.launches = 0; self.crashFallback = false
             if changedTarget { self.sessionRequested = false; self.sessionConnected = false; self.requestedMode = nil }
             controller?.close(); self.refreshIdleState(); self.tick()
+            // Login registration is independent of saving home preferences.
+            do {
+                let status = SMAppService.mainApp.status
+                if launchAtLogin && status != .enabled && status != .requiresApproval { try SMAppService.mainApp.register() }
+                else if !launchAtLogin && (status == .enabled || status == .requiresApproval) { try SMAppService.mainApp.unregister() }
+            } catch {
+                let alert = NSAlert(); alert.messageText = "Settings saved; login launch couldn’t be updated"
+                alert.informativeText = "Your home networks and automation settings were saved. \(error.localizedDescription)"
+                alert.runModal()
+            }
         }
         controller.showWindow(nil); controller.window?.center(); NSApp.activate(ignoringOtherApps: true)
     }

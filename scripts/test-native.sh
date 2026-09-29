@@ -8,3 +8,7 @@ swiftc -swift-version 5 -warnings-as-errors -parse-as-library \
   app/AppleSession.swift scripts/test-apple-session.swift \
   -o target/maclink-apple-session-tests
 target/maclink-apple-session-tests
+swiftc -swift-version 5 -warnings-as-errors -parse-as-library \
+  -target arm64-apple-macosx14.0 app/HomeNetworkCheck.swift scripts/test-home-network.swift \
+  -o target/maclink-home-network-tests
+target/maclink-home-network-tests

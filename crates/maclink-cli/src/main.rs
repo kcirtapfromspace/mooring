@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::{path::PathBuf, time::Duration};
 use store::Store;
 
-const HELP: &str = "MacLink — native Mac connections, Rust foundation\n\nUsage: maclink [--config-dir PATH] COMMAND\n\n  list                         List saved Macs as JSON\n  add --name NAME --host HOST [--port PORT]\n                               Save a Mac (default port 5900)\n  remove ID                    Remove a saved Mac\n  inspect ID                   Read the server's RFB greeting; no login\n  connect ID                   Open Apple Screen Sharing\n  connect-mode ID MODE         Request standard or high_performance\n  network-probe ID             Measure target TCP/RFB timing and route\n  network-evaluate JSON        Evaluate live probe metadata with state\n  doctor                       Report local capabilities and limitations\n  simulate                     Run simulated adaptive-quality scenarios\n\nMode requests use experimental native-exported Apple URL options.\nThey do not confirm video negotiation. MacLink has no custom video engine.\nNo passwords are stored. MACLINK_HOME overrides the connection directory.\n";
+const HELP: &str = "MacLink — native Mac connections, Rust foundation\n\nUsage: maclink [--config-dir PATH] COMMAND\n\n  list                         List saved Macs as JSON\n  add --name NAME --host HOST [--port PORT]\n                               Save a Mac (default port 5900)\n  remove ID                    Remove a saved Mac\n  inspect ID                   Read the server's RFB greeting; no login\n  connect ID                   Open Apple Screen Sharing\n  connect-mode ID MODE         Request standard or high_performance\n  home-network                 Identify the local network without contacting a Mac\n  network-probe ID             Measure target TCP/RFB timing and route\n  network-evaluate JSON        Evaluate live probe metadata with state\n  doctor                       Report local capabilities and limitations\n  simulate                     Run simulated adaptive-quality scenarios\n\nMode requests use experimental native-exported Apple URL options.\nThey do not confirm video negotiation. MacLink has no custom video engine.\nNo passwords are stored. MACLINK_HOME overrides the connection directory.\n";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -83,9 +83,14 @@ fn execute(args: &[String]) -> Result<Value, String> {
                 json!({"status":"requested", "mode":mode, "note":"Requested Apple's native exported-connection URL options. Launch does not confirm the negotiated mode."}),
             )
         }
+        "home-network" => {
+            require_count(trailing, 0)?;
+            Ok(json!(maclink_platform::network_probe::local_network()))
+        }
         "network-probe" => {
             require_count(trailing, 1)?;
             let connection = store.get(&trailing[0])?;
+            let local_network = maclink_platform::network_probe::local_network();
             match maclink_platform::inspect_host(
                 &connection.host,
                 connection.port,
@@ -94,9 +99,13 @@ fn execute(args: &[String]) -> Result<Value, String> {
                 Ok(inspection) => {
                     let route =
                         maclink_platform::network_probe::target_route(inspection.resolved_address);
-                    Ok(json!({"status":"rfb_ready", "inspection":inspection, "route":route}))
+                    Ok(
+                        json!({"status":"rfb_ready", "inspection":inspection, "route":route, "local_network":local_network}),
+                    )
                 }
-                Err(error) => Ok(json!({"status":"connect_failed", "error":error})),
+                Err(error) => Ok(
+                    json!({"status":"connect_failed", "error":error, "local_network":local_network}),
+                ),
             }
         }
         "network-evaluate" => {
