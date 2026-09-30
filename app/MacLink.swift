@@ -467,6 +467,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         sound.target = self; sound.state = native.playsSound ? .on : .off
         sound.toolTip = "When viewing, play the sharing Mac's sound on this Mac. It still plays on the sharing Mac too."
         statusMenu.addItem(sound)
+        let latency = NSMenuItem(title: "Lower Display Latency (May Tear)", action: #selector(toggleDisplayLatency), keyEquivalent: "")
+        latency.target = self; latency.state = native.lowersDisplayLatency ? .on : .off
+        latency.toolTip = "When viewing, show each frame without waiting for this display's next refresh. Sooner, but moving pictures can show a tear line."
+        statusMenu.addItem(latency)
         let clipboard = NSMenuItem(title: "Shared Clipboard", action: #selector(toggleSharedClipboard), keyEquivalent: "")
         clipboard.target = self; clipboard.state = native.sharesClipboard ? .on : .off
         clipboard.toolTip = "Copy on one Mac and paste on the other during a MacLink session."
@@ -543,6 +547,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     @objc private func toggleSharedClipboard() { native.sharesClipboard.toggle() }
     @objc private func toggleMatchScreen() { native.matchesScreen.toggle() }
     @objc private func toggleSharedSound() { native.playsSound.toggle() }
+    @objc private func toggleDisplayLatency() { native.lowersDisplayLatency.toggle() }
     @objc private func connectNativePeer(_ sender: NSMenuItem) {
         if let id = sender.representedObject as? String { native.connect(peerID: id) }
     }

@@ -38,6 +38,8 @@ enum NativePresentMeasurement {
         view.autoresizingMask = [.width, .height]
         window.contentView!.addSubview(view)
         view.geometry = NativeDisplayGeometry(x: 0, y: 0, width: 1920, height: 1080, pixelWidth: 1920, pixelHeight: 1080)
+        // MACLINK_PRESENT_NO_SYNC=1 measures Lower Display Latency.
+        view.waitsForDisplayRefresh = ProcessInfo.processInfo.environment["MACLINK_PRESENT_NO_SYNC"] != "1"
         window.orderFrontRegardless()
 
         var pool: CVPixelBufferPool?
@@ -51,40 +53,57 @@ enum NativePresentMeasurement {
         // Drawable sizes: this Mac's window as is, then a Retina full-screen viewer's.
         let retina = CGSize(width: 3456, height: 2234)
         let window1080 = CGSize(width: 1600, height: 900)
-        let runs: [(size: CGSize?, paired: Bool)] = [(window1080, false), (retina, false), (window1080, true), (retina, true)]
+        // Arrival: even 60 fps, pairs 1 ms apart, or sparse (4 a second, like
+        // typing), which measures the wait from decoded to shown.
+        let runs: [(size: CGSize?, arrival: String)] = [(window1080, "even"), (retina, "even"), (window1080, "paired"), (retina, "paired"),
+                                                          (retina, "sparse")]
         func run(_ index: Int) {
             guard index < runs.count else {
                 let data = try! JSONSerialization.data(withJSONObject: results, options: [.prettyPrinted, .sortedKeys])
                 print(String(decoding: data, as: UTF8.self)); exit(0)
             }
-            let paired = runs[index].paired
+            let arrival = runs[index].arrival, paired = arrival == "paired", sparse = arrival == "sparse"
             if let size = runs[index].size { view.autoResizeDrawable = false; view.drawableSize = size }
             else { view.autoResizeDrawable = true }
-            var presented = 0
+            var presented = 0, waits: [Double] = []
             view.onPresented = { presented += 1 }
+            // A virtual display gives no present time; then the handler's own
+            // time, just after presentation, stands in for it.
+            view.onFrameTiming = { timing in
+                let shown = timing.presentedUs > 0 ? timing.presentedUs : NativeClock.nowUs
+                waits.append(Double(shown - timing.decodedUs) / 1000)
+            }
             _ = view.takeDrawStats()
-            let seconds = 5.0, total = Int(seconds * 60)
+            let seconds = 5.0, total = sparse ? 20 : Int(seconds * 60)
             let feeder = DispatchQueue(label: "feeder", qos: .userInteractive)
             let began = ProcessInfo.processInfo.systemUptime
             // Warm up, then count only the measured span.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                presented = 0
+                presented = 0; waits = []
                 let start = ProcessInfo.processInfo.systemUptime
                 feeder.async {
                     for frameIndex in 0..<total {
                         // Paired: two frames 1 ms apart every 1/30 s, still 60 per second.
+                        // Sparse frames land at random points within a refresh.
                         let due = paired ? start + Double(frameIndex / 2) / 30 + Double(frameIndex % 2) * 0.001
+                                         : sparse ? start + Double(frameIndex) * 0.25 + Double.random(in: 0..<0.0167)
                                          : start + Double(frameIndex) / 60
                         let wait = due - ProcessInfo.processInfo.systemUptime
                         if wait > 0 { Thread.sleep(forTimeInterval: wait) }
-                        if let buffer = frame(frameIndex, pool: pool) { view.display(buffer) }
+                        if let buffer = frame(frameIndex, pool: pool) {
+                            let now = NativeClock.nowUs
+                            NativeFrameTiming.attach(buffer, hostUs: now, decodeStartUs: now, decodedUs: now)
+                            view.display(buffer)
+                        }
                     }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                         let elapsed = ProcessInfo.processInfo.systemUptime - start
                         let draw = view.takeDrawStats()
                         results.append(["drawable": "\(Int(view.drawableSize.width))x\(Int(view.drawableSize.height))",
                                         "drawing": draw.summary,
-                                        "arrival": paired ? "paired" : "even",
+                                        "arrival": arrival,
+                                        "decoded_to_shown_ms_median": NativeLatencyWindow.percentile(waits, 0.5) ?? -1,
+                                        "decoded_to_shown_ms_p95": NativeLatencyWindow.percentile(waits, 0.95) ?? -1,
                                         "offered_fps": Double(total) / seconds, "presented_fps": Double(presented) / seconds, "elapsed_s": elapsed,
                                         "setup_s": start - began])
                         run(index + 1)

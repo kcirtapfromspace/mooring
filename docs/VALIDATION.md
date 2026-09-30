@@ -296,6 +296,25 @@ In `v0.3.0-preview.16`, sharing and connecting wait for the self-tests, which ta
 
 The local suite does not relaunch the app, so this is verified by the next update between the two Macs: the sharing Mac's log should show the self-test results before "sharing started automatically".
 
+## Viewer decode and presentation
+
+With preview 16 on both Macs (MacBook Pro viewer at 60 Hz, sharing Mac at 3360×2032):
+
+| Stage | Time |
+|---|---|
+| Latency, screen change to the MacBook's display | median 66–82 ms, 95th percentile up to about 130 ms |
+| Until decoding starts | 17–28 ms |
+| Decode | about 17 ms |
+| Decoded to shown | 25–57 ms |
+
+Totals fell in 16.6 ms steps, the display's refresh.
+
+For `v0.3.0-preview.17`:
+
+- **Decode to YCbCr.** The viewer asks the decoder for YCbCr at the stream's chroma (4:4:4 for HEVC, 4:2:0 for H.264) instead of BGRA. On the build Mac, decoding 3360×2032 text frames took 4.6 ms median against 7.6 ms. Rendered through Core Image into the same sRGB target, the two pictures differed by 0.1 colour levels on average, at most 2 of 255, and the YCbCr path was marginally closer to the source. The encrypted loopback median from capture timestamp to decoded fell from about 9.7 to 7.6 ms.
+- **Draw frames on arrival.** Tried and not shipped. Drawing a frame as soon as it was decoded, with MacLink's own display link instead of MTKView's timer, was measured with `scripts/measure-native-present.swift` (now with a sparse, typing-like case and a decoded-to-presented figure). Isolated frames were at best about 5 ms sooner. Steady 60 fps streams were often a refresh later, and the build Mac's virtual display gives no presentation time, so the figures are the presented handler's time. The change was reverted.
+- **Lower Display Latency (May Tear).** A new viewer option, off by default, turns off CAMetalLayer display sync. On the build Mac, over two runs each: steady 60 fps into a window, 46–69 ms with sync against 14 ms without; retina-sized, 19–30 against 20–23; isolated frames, 25 against 19–22. Its effect on a real display, including any tearing, is checked between two Macs.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

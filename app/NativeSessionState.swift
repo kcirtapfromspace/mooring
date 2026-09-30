@@ -144,7 +144,7 @@ final class NativeClockSync {
     /// Milliseconds from the host's screen change to each stage here, or nil
     /// before the clocks are placed or for a value outside 0 to 2 s.
     func latency(_ timing: NativeFrameTiming) -> (total: Double, toViewer: Double, displayWait: Double)? {
-        guard let estimate, timing.hostUs <= UInt64(Int64.max) else { return nil }
+        guard let estimate, timing.presentedUs > 0, timing.hostUs <= UInt64(Int64.max) else { return nil }
         let hostHere = Int64(timing.hostUs) - estimate.offsetUs
         func since(_ start: Int64, _ end: UInt64) -> Double? {
             guard end <= UInt64(Int64.max) else { return nil }

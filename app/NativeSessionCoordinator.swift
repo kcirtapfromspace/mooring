@@ -41,6 +41,7 @@ final class NativeSessionCoordinator {
     private static let sharedClipboardKey = "native.shareClipboard"
     private static let matchScreenKey = "native.matchScreen"
     private static let playSoundKey = "native.playSound"
+    private static let lowLatencyDisplayKey = "native.lowLatencyDisplay"
     private let defaults: UserDefaults
     private let keychain = NativeKeychain()
     private let peerStore = NativePeerStore()
@@ -174,6 +175,16 @@ final class NativeSessionCoordinator {
     var matchesScreen: Bool {
         get { defaults.object(forKey: Self.matchScreenKey) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Self.matchScreenKey); onChange?() }
+    }
+    /// Viewer: hand frames to the display without waiting for its refresh.
+    /// Off by default, since a fast-changing picture can tear.
+    var lowersDisplayLatency: Bool {
+        get { defaults.bool(forKey: Self.lowLatencyDisplayKey) }
+        set {
+            defaults.set(newValue, forKey: Self.lowLatencyDisplayKey)
+            viewerWindow?.video.waitsForDisplayRefresh = !newValue
+            onChange?()
+        }
     }
     /// Viewer: play the sharing Mac's sound here. On by default; turning it
     /// off silences a running session at once.
@@ -1032,6 +1043,7 @@ final class NativeSessionCoordinator {
         statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.updateViewerStatus() }
         if let statusTimer { RunLoop.main.add(statusTimer, forMode: .common) }
         audioPlayer?.stop(); audioPlayer = NativeAudioPlayer(muted: !playsSound); audioReported = NativeAudioStats()
+        window.video.waitsForDisplayRefresh = !lowersDisplayLatency
         readViewer(channel, decoder: decoder)
         onChange?()
     }
