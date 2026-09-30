@@ -288,6 +288,14 @@ What changed and what didn't:
 - **The fix:** preview 15 turns real-time mode off for HEVC and keeps Apple's low-latency mode for H.264. Through MacLink's own encoder, a frame after a 500 ms pause now takes 18 ms instead of 54 ms.
 - **Local suite:** 1080p HEVC 4:4:4 encode averages about 7 ms, down from about 10 ms. The loopback median from capture timestamp to decoded fell from about 12 ms to 9 ms.
 
+## Sessions wait for the launch self-tests
+
+After preview 15 installed, the sharing Mac relaunched and started sharing, and the viewer reconnected within about 130 ms. That was before the sharing Mac's self-tests (HEVC 4:4:4, Opus, virtual display) had finished. Each side announces its capabilities once, at the start of a session, so that session ran with H.264 at 1920×1080, no sound, no screen matching and no latency figures.
+
+In `v0.3.0-preview.16`, sharing and connecting wait for the self-tests, which take well under a second. At most eight requests wait. If the tests haven't finished after 5 s, sessions go ahead with the capabilities that need no test.
+
+The local suite does not relaunch the app, so this is verified by the next update between the two Macs: the sharing Mac's log should show the self-test results before "sharing started automatically".
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

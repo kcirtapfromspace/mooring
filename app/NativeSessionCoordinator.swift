@@ -110,6 +110,12 @@ final class NativeSessionCoordinator {
     private var hevc444Available = false
     /// Found at launch by encoding and decoding a tone through Opus.
     private var audioAvailable = false
+    /// A session announces this Mac's capabilities once, when it starts, so
+    /// sharing and connecting wait for the launch self-tests (well under a
+    /// second). Without this, a viewer that reconnected the moment this Mac
+    /// relaunched after an update got H.264, no sound and no screen matching.
+    private var capabilitiesReady = false
+    private var waitingForCapabilities: [() -> Void] = []
     /// Host: numbers the viewer's sound packets and bounds those waiting.
     private var hostAudioGate: NativeAudioSendGate?
     /// Viewer: plays the sharing Mac's sound.
@@ -210,20 +216,29 @@ final class NativeSessionCoordinator {
             self.stopSharing(reason: self.pausedReason("Sharing stopped because this Mac locked or its display went to sleep."))
             self.disconnectViewer(reason: "This Mac locked or its display went to sleep. Reconnect when ready.")
         }
-        // Announce HEVC 4:4:4 only after this Mac has proven it can encode and
-        // decode it; sessions that start before the test finishes use H.264.
+        // Announce HEVC 4:4:4 and sound only after this Mac has proven it can
+        // encode and decode them. Sessions wait for this; if the tests stall,
+        // they go ahead after 5 s with what needs no test.
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let hevc = NativeCodecSupport.probeHEVC444()
             let audio = NativeAudioSupport.probeOpus()
             DispatchQueue.main.async {
-                self?.hevc444Available = hevc
-                self?.audioAvailable = audio
+                guard let self else { return }
+                self.hevc444Available = hevc
+                self.audioAvailable = audio
                 let virtualDisplay = NativeSharedDisplay.isAvailable
                 ml_capabilities_set(NativeCapabilities.local(hevc444: hevc, virtualDisplay: virtualDisplay, audio: audio))
                 NativeLog.session.notice("Opus sound encode and decode: \(audio ? "available" : "unavailable", privacy: .public)")
                 NativeLog.session.notice("virtual display for viewers: \(virtualDisplay ? "available" : "unavailable", privacy: .public)")
                 NativeLog.session.notice("HEVC 4:4:4 hardware encode and decode: \(hevc ? "available" : "unavailable", privacy: .public)")
+                self.capabilitiesAreReady()
             }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, !self.capabilitiesReady else { return }
+            NativeLog.session.error("launch self-tests still running after 5 s; sessions start without HEVC 4:4:4 and sound")
+            ml_capabilities_set(NativeCapabilities.local(hevc444: false, virtualDisplay: NativeSharedDisplay.isAvailable, audio: false))
+            self.capabilitiesAreReady()
         }
         clipboard.onSend = { [weak self] content in self?.sendClipboard(content) }
         cursorWatcher.onChange = { [weak self] image in
@@ -283,9 +298,23 @@ final class NativeSessionCoordinator {
             : reason + " Start Sharing when ready."
     }
 
+    private func capabilitiesAreReady() {
+        guard !capabilitiesReady else { return }
+        capabilitiesReady = true
+        let waiting = waitingForCapabilities; waitingForCapabilities = []
+        waiting.forEach { $0() }
+    }
+    /// Runs `work` now, or once the launch self-tests finish. At most eight wait.
+    private func whenCapabilitiesReady(_ work: @escaping () -> Void) -> Bool {
+        if capabilitiesReady { return true }
+        if waitingForCapabilities.count < 8 { waitingForCapabilities.append(work) }
+        return false
+    }
+
     /// Automatic starts never show a permission prompt; the first manual start asks once.
     private func startSharing(automatic: Bool = false) {
         guard !isSharing else { return }
+        guard whenCapabilitiesReady({ [weak self] in self?.startSharing(automatic: automatic) }) else { return }
         guard NativePrivacyGuard.mayShareNow() else {
             refreshShare("Unlock this Mac and sign in before starting sharing.")
             return
@@ -763,6 +792,9 @@ final class NativeSessionCoordinator {
     /// MacLink forward or take keyboard focus from another app.
     private func connect(code: NativePairingCode, address: String, pairing: Bool = false, automatic: Bool = false) {
         guard !isConnected else { return }
+        guard whenCapabilitiesReady({ [weak self] in
+            self?.connect(code: code, address: address, pairing: pairing, automatic: automatic)
+        }) else { return }
         if let current = connecting {
             // A new pairing takes over from automatic reconnecting; anything else waits.
             guard pairing, !current.pairing else { return }
