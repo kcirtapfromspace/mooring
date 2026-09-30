@@ -39,6 +39,9 @@ enum NativeControlMessage: Equatable {
     case updateRequest
     /// Protocol 5, sharing Mac to viewer; for ready, the waiting update.
     case updateStatus(NativeUpdateState, ready: NativeVersion?)
+    /// Protocol 5, viewer to a sharing Mac that waits for dropped viewers:
+    /// this viewer is ending the session on purpose.
+    case leaving
 
     var raw: MLControlMessage {
         var raw = MLControlMessage()
@@ -63,6 +66,7 @@ enum NativeControlMessage: Equatable {
         case .updateStatus(let state, let ready):
             raw.kind = UInt8(ML_CONTROL_UPDATE_STATUS); raw.geometry.pixel_height = state.rawValue
             if state == .ready, let ready { raw.ping_id = ready.release; raw.geometry.pixel_width = ready.build }
+        case .leaving: raw.kind = UInt8(ML_CONTROL_LEAVING)
         }
         return raw
     }
@@ -88,6 +92,7 @@ enum NativeControlMessage: Equatable {
             }
             let ready = state == .ready ? NativeVersion(build: raw.geometry.pixel_width, release: raw.ping_id) : nil
             self = .updateStatus(state, ready: ready)
+        case ML_CONTROL_LEAVING: self = .leaving
         default: throw NativeSessionError(message: "The other Mac sent an unsupported session command.")
         }
     }
@@ -160,13 +165,14 @@ final class NativeFlowLimit: @unchecked Sendable {
     }
 }
 
-/// What this Mac announces in protocol 5. Pointer shapes, gestures, latency
-/// and versions need nothing beyond this build; the rest depend on launch
-/// self-tests, and remote updates on a release build with an update feed.
+/// What this Mac announces in protocol 5. Pointer shapes, gestures, latency,
+/// versions and waiting for a dropped viewer need nothing beyond this build;
+/// the rest depend on launch self-tests, and remote updates on a release
+/// build with an update feed.
 enum NativeCapabilities {
     static func local(hevc444: Bool, virtualDisplay: Bool, audio: Bool, updatesItself: Bool = false) -> UInt64 {
         var capabilities = UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_GESTURES) | UInt64(ML_CAPABILITY_LATENCY)
-            | UInt64(ML_CAPABILITY_VERSION)
+            | UInt64(ML_CAPABILITY_VERSION) | UInt64(ML_CAPABILITY_WAITS)
         if hevc444 { capabilities |= UInt64(ML_CAPABILITY_HEVC_444) }
         if virtualDisplay { capabilities |= UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) }
         if audio { capabilities |= UInt64(ML_CAPABILITY_AUDIO) }
@@ -448,6 +454,12 @@ final class NativeSessionChannel: @unchecked Sendable {
     private var openMove: PendingMove?
     private var peerStats = NativeStats()
     private var peerStatsTime: TimeInterval?
+    private var leaving = false
+    /// Host: the viewer said it was ending the session on purpose. Set on the
+    /// reader thread, since a queued main-thread update is skipped once the
+    /// connection closes right after.
+    var viewerLeft: Bool { lock.lock(); defer { lock.unlock() }; return leaving }
+    func noteViewerLeaving() { lock.lock(); leaving = true; lock.unlock() }
     var onFailure: ((String) -> Void)?
     func storePeerStats(_ stats: NativeStats) {
         lock.lock(); peerStats = stats; peerStatsTime = ProcessInfo.processInfo.systemUptime; lock.unlock()
@@ -522,5 +534,8 @@ final class NativeSessionChannel: @unchecked Sendable {
         DispatchQueue.main.async { [weak self] in self?.onFailure?(message) }
     }
     func close() { token.cancel(); transport.close() }
+    /// Writes `message` after anything already queued, then closes. The write
+    /// is bounded by the send timeout; if it fails, the channel just closes.
+    func close(after message: NativeSessionMessage) { send(message) { [self] in close() } }
     deinit { transport.close() }
 }

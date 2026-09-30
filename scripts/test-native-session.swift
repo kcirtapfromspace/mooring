@@ -64,6 +64,11 @@ enum NativeSessionTests {
         done.wait()
         return (viewer, host.value)
     }
+    /// The next message within about two seconds.
+    static func next(_ transport: NativeTransport) throws -> NativeSessionMessage {
+        for _ in 0..<40 { if let message = try transport.receive() { return message } }
+        throw Failure("No message arrived")
+    }
     static func refused(_ result: Result<(NativeTransport, NativeTransport.Mode), Error>) -> Bool {
         if case .failure(let error) = result { return (error as? NativeSessionError)?.isAuthenticationFailure == true }
         return false
@@ -71,6 +76,9 @@ enum NativeSessionTests {
     /// A one-time code approves this Mac's key, the saved pairing connects by
     /// it, and a removed Mac is refused. Loopback and a temporary list only.
     static func testDevicePairing() throws {
+        // Protocol 5 with what every build announces, so the viewer may say it's leaving.
+        ml_capabilities_set(NativeCapabilities.local(hevc444: false, virtualDisplay: false, audio: false))
+        defer { ml_capabilities_set(0) }
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("maclink-devices-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -100,8 +108,22 @@ enum NativeSessionTests {
         let (again, againMode) = try returning.get()
         try require(againMode == .device && !againMode.approvedKey && returningHost?.peerDevice == id,
                     "The saved pairing connects as the approved Mac")
-        again.close(); returningHost?.close()
-        try require(returningHost?.peerDevice == nil, "A closed session names no Mac")
+        guard let returningHost else { throw Failure("The host session is missing") }
+        // A viewer that ends the session on purpose says so after anything queued, then closes.
+        guard case .control(.hello) = try next(again), case .control(.hello) = try next(returningHost) else {
+            throw Failure("Protocol 5 sessions open with each side's Hello")
+        }
+        let channel = NativeSessionChannel(again)
+        channel.control(.ping(7))
+        channel.close(after: .control(.leaving))
+        let ping = try next(returningHost), leaving = try next(returningHost)
+        var closed = false
+        do { _ = try next(returningHost) } catch { closed = (error as? NativeSessionError)?.status == Int32(ML_SESSION_CLOSED) }
+        var ordered = false
+        if case .control(.ping(7)) = ping, case .control(.leaving) = leaving { ordered = true }
+        try require(ordered && closed, "The host reads the viewer's leaving message, in order, before the connection closes")
+        returningHost.close()
+        try require(returningHost.peerDevice == nil, "A closed session names no Mac")
 
         let file = try String(contentsOf: folder.appendingPathComponent("native-devices.json"), encoding: .utf8)
         for sensitive in [key.privateKey, identity.privateKey, identity.secret, code.secret] {
@@ -142,9 +164,9 @@ enum NativeSessionTests {
     static func testLatency() throws {
         // Every build announces what it always supports; self-tests add the rest.
         let always = UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_GESTURES) | UInt64(ML_CAPABILITY_LATENCY)
-            | UInt64(ML_CAPABILITY_VERSION)
+            | UInt64(ML_CAPABILITY_VERSION) | UInt64(ML_CAPABILITY_WAITS)
         try require(NativeCapabilities.local(hevc444: false, virtualDisplay: false, audio: false) == always,
-                    "Pointer shapes, gestures, latency and versions are always announced")
+                    "Pointer shapes, gestures, latency, versions and waiting for a dropped viewer are always announced")
         let everything = always | UInt64(ML_CAPABILITY_HEVC_444) | UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) | UInt64(ML_CAPABILITY_AUDIO)
             | UInt64(ML_CAPABILITY_REMOTE_UPDATE)
         try require(NativeCapabilities.local(hevc444: true, virtualDisplay: true, audio: true, updatesItself: true) == everything,
@@ -283,12 +305,13 @@ enum NativeSessionTests {
                                               .ping(0), .pong(UInt64.max), .keyframe, .clock(7, hostUs: 0x0123_4567_89AB_CDEF),
                                               .version(NativeVersion(build: 24, release: 3 << 32 | 19)), .updateRequest,
                                               .updateStatus(.checking, ready: nil),
-                                              .updateStatus(.ready, ready: NativeVersion(build: 25, release: 3 << 32 | 20))] {
+                                              .updateStatus(.ready, ready: NativeVersion(build: 25, release: 3 << 32 | 20)),
+                                              .leaving] {
             try require(try NativeControlMessage(validated: message.raw) == message, "Every control message round-trips the C ABI")
         }
         try testLatency()
         try testPointer()
-        var unknown = MLControlMessage(); unknown.kind = 12
+        var unknown = MLControlMessage(); unknown.kind = 13
         try rejects("Unknown control kinds are rejected") { _ = try NativeControlMessage(validated: unknown) }
 
         try testTelemetry()

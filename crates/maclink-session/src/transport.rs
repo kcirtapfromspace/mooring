@@ -17,8 +17,8 @@ use crate::pairing::{CodeKind, PairingCode, local_name, validate_name};
 use crate::policy::{
     AUDIO, Admission, CAPABILITY_AUDIO, CAPABILITY_CURSOR, CAPABILITY_GESTURES,
     CAPABILITY_HEVC_444, CAPABILITY_LATENCY, CAPABILITY_REMOTE_UPDATE, CAPABILITY_VERSION,
-    CAPABILITY_VIRTUAL_DISPLAY, CLIPBOARD, CONTROL, CURSOR, INPUT, PROTOCOL_MAX, PROTOCOL_MIN,
-    ReceivePolicy, Role, TELEMETRY, VIDEO,
+    CAPABILITY_VIRTUAL_DISPLAY, CAPABILITY_WAITS, CLIPBOARD, CONTROL, CURSOR, INPUT, PROTOCOL_MAX,
+    PROTOCOL_MIN, ReceivePolicy, Role, TELEMETRY, VIDEO,
 };
 use crate::telemetry::{MAX_TELEMETRY, TelemetryMessage};
 use crate::video::Codec;
@@ -697,6 +697,12 @@ impl Session {
             Outgoing::Control(ControlMessage::UpdateRequest)
                 if self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_REMOTE_UPDATE
                     == 0 =>
+            {
+                Err(Error::Invalid)
+            }
+            // Saying it's leaving only to a host that would otherwise wait.
+            Outgoing::Control(ControlMessage::Leaving)
+                if self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_WAITS == 0 =>
             {
                 Err(Error::Invalid)
             }

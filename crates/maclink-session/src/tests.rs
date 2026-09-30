@@ -1565,6 +1565,7 @@ const TEST_CAPABILITIES: u64 = ML_CAPABILITY_HEVC_444
     | ML_CAPABILITY_LATENCY
     | ML_CAPABILITY_VERSION
     | ML_CAPABILITY_REMOTE_UPDATE
+    | ML_CAPABILITY_WAITS
     | 1 << 40; // plus a bit no build knows
 fn hello(id: u64) -> u64 {
     let mut buffer = vec![0; 4096];
@@ -2198,6 +2199,34 @@ fn versions_and_update_requests_reach_only_macs_that_read_them() {
     assert_eq!(send_control(old_viewer.0, &version), Error::Invalid as i32);
     assert_eq!(send_control(old_viewer.0, &request), Error::Invalid as i32);
     assert_eq!(send_control(old_host.0, &ready), Error::Invalid as i32);
+    assert!(!is_closed(old_viewer.0) && !is_closed(old_host.0));
+}
+
+#[test]
+fn a_viewer_says_it_is_leaving_before_the_connection_closes() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let leaving = control(12, 0);
+    let (viewer, host) = pair_version(5);
+    hello(host.0);
+    hello(viewer.0);
+    assert_eq!(
+        send_control(host.0, &leaving),
+        Error::Invalid as i32,
+        "hosts never leave this way"
+    );
+    assert_eq!(send_control(viewer.0, &leaving), 0);
+    assert_eq!(ml_session_close(viewer.0), 0);
+    let mut buffer = vec![0; 4096];
+    let (status, message) = typed(host.0, &mut buffer, 2000);
+    assert_eq!(
+        (status, message.control.kind),
+        (0, 12),
+        "read before the close"
+    );
+    assert_eq!(typed(host.0, &mut buffer, 2000).0, Error::Closed as i32);
+    // Protocol 4 peers announce nothing, so nothing is sent to them.
+    let (old_viewer, old_host) = pair_version(4);
+    assert_eq!(send_control(old_viewer.0, &leaving), Error::Invalid as i32);
     assert!(!is_closed(old_viewer.0) && !is_closed(old_host.0));
 }
 

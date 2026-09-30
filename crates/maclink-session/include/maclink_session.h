@@ -90,7 +90,11 @@ enum {
     /* protocol 5, host to a viewer with ML_CAPABILITY_VERSION: the state
      * (ML_UPDATE_*) in geometry.pixel_height; for READY, the waiting update's
      * build and release as in VERSION, otherwise zero. */
-    ML_CONTROL_UPDATE_STATUS = 11
+    ML_CONTROL_UPDATE_STATUS = 11,
+    /* protocol 5, viewer to a host with ML_CAPABILITY_WAITS, all fields zero:
+     * this viewer is ending the session on purpose. Sent just before closing;
+     * without it, the host waits for the viewer to come back. */
+    ML_CONTROL_LEAVING = 12
 };
 enum {
     ML_INPUT_KEY_DOWN = 1, ML_INPUT_KEY_UP = 2, ML_INPUT_POINTER_MOVE = 3,
@@ -144,6 +148,8 @@ enum { ML_CODEC_H264 = 1, ML_CODEC_HEVC = 2 };
 #define ML_CAPABILITY_LATENCY 32ull /* clock replies and latency metrics; peers without it never receive them */
 #define ML_CAPABILITY_VERSION 64ull /* sends and reads the MacLink version and update status */
 #define ML_CAPABILITY_REMOTE_UPDATE 128ull /* a sharing Mac that updates itself when a viewer asks */
+#define ML_CAPABILITY_WAITS 256ull /* a sharing Mac that waits for a viewer whose session dropped */
+#define ML_VIEWER_WAIT_SECONDS 43200u /* it keeps its display on and takes connections this long */
 #define ML_RELEASE_CAPACITY 64u
 enum { ML_UPDATE_CHECKING = 1, ML_UPDATE_UP_TO_DATE = 2, ML_UPDATE_READY = 3, ML_UPDATE_FAILED = 4 };
 #define ML_AUDIO_MAX_PAYLOAD 1500u /* bytes in one Opus packet */

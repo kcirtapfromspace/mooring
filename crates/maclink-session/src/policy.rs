@@ -40,6 +40,12 @@ pub(crate) const CAPABILITY_VERSION: u64 = 1 << 6;
 /// This sharing Mac updates itself from the release feed, and checks when a
 /// viewer asks.
 pub(crate) const CAPABILITY_REMOTE_UPDATE: u64 = 1 << 7;
+/// This sharing Mac keeps its display on, and keeps taking connections, for a
+/// viewer whose session dropped without it saying it was leaving.
+pub(crate) const CAPABILITY_WAITS: u64 = 1 << 8;
+/// How long a sharing Mac waits for a viewer whose session dropped: a night
+/// with the lid closed.
+pub(crate) const VIEWER_WAIT: Duration = Duration::from_secs(12 * 60 * 60);
 /// Hosts send a cursor only when it changes; this stops a flood.
 const CURSORS_PER_WINDOW: u32 = 20;
 /// Four times the rate of 10 ms packets. Sound beyond it, as after a stall, is
@@ -133,6 +139,7 @@ impl Role {
                     | ControlKind::DisplayRequest
                     | ControlKind::Version
                     | ControlKind::UpdateRequest
+                    | ControlKind::Leaving
             ),
         }
     }
@@ -252,6 +259,11 @@ impl ReceivePolicy {
             }
             Incoming::Control(ControlMessage::UpdateRequest)
                 if self.version < 5 || self.local_capabilities & CAPABILITY_REMOTE_UPDATE == 0 =>
+            {
+                return Err(Error::Protocol);
+            }
+            Incoming::Control(ControlMessage::Leaving)
+                if self.version < 5 || self.local_capabilities & CAPABILITY_WAITS == 0 =>
             {
                 return Err(Error::Protocol);
             }
@@ -594,6 +606,28 @@ mod tests {
         assert_eq!(viewer.admit(&sound(), now), Ok(Admission::Skip));
         assert_eq!(viewer.admit(&stats(), now), Ok(Admission::Deliver));
         assert_eq!(viewer.admit(&sound(), now + WINDOW), Ok(Admission::Deliver));
+    }
+
+    #[test]
+    fn only_hosts_that_wait_hear_a_viewer_is_leaving() {
+        let now = Instant::now();
+        let leaving = || control(ControlMessage::Leaving);
+        assert!(Role::Viewer.may_send_control(ControlKind::Leaving));
+        assert!(!Role::Host.may_send_control(ControlKind::Leaving));
+        for (version_number, capabilities) in [(5, 0), (4, CAPABILITY_WAITS)] {
+            let mut host =
+                ReceivePolicy::for_version(Role::Host, version_number, capabilities, now);
+            assert_eq!(host.admit(&leaving(), now), Err(Error::Protocol));
+        }
+        let mut host = ReceivePolicy::for_version(Role::Host, 5, CAPABILITY_WAITS, now);
+        assert_eq!(host.admit(&leaving(), now), Ok(Admission::Deliver));
+        let mut viewer = ReceivePolicy::for_version(Role::Viewer, 5, CAPABILITY_WAITS, now);
+        assert_eq!(
+            viewer.admit(&leaving(), now),
+            Err(Error::Protocol),
+            "hosts never leave this way"
+        );
+        assert_eq!(VIEWER_WAIT, Duration::from_secs(43_200));
     }
 
     #[test]

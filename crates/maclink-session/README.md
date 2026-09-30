@@ -150,6 +150,13 @@ protocol violation.
 Hosts send `ML_SESSION_CURSOR` messages to such viewers, at most 20 per second:
 size and hotspot in points (at most 256), then a PNG (64 KiB at most).
 
+`ML_CAPABILITY_WAITS` means "this host waits for a viewer whose session
+dropped". A viewer that ends a session on purpose sends such a host
+`ML_CONTROL_LEAVING`, all fields zero, just before closing. Rust refuses to send
+it to other hosts, and hosts without the capability treat one as a protocol
+violation. After an end without it, the host keeps its display on and keeps
+taking connections for up to `ML_VIEWER_WAIT_SECONDS` (12 hours).
+
 ## Shared clipboard
 
 Either side may send a clipboard message: one to three representations of one

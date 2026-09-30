@@ -415,6 +415,24 @@ For `v0.3.0-preview.21`, the size is set first and the image is anchored at its 
 
 For `v0.3.0-preview.21`, a controlling viewer enters full screen with this Mac's menu bar and Dock hidden, so the top edge reaches the sharing Mac's menu bar. An in-process check without a visible window showed that the viewer window does not handle ⌃⌘F itself. Before this release, the chord fell through to the remote view and went to the sharing Mac. The new **View → Enter Full Screen** item takes it. Whether the menu bar and title bar stay hidden at the top edge is checked on the two Macs; the local suite does not enter full screen.
 
+## Waiting for a dropped viewer
+
+For `v0.3.0-preview.22`, a sharing Mac tells a session the viewer ended apart from one that dropped.
+
+- **Protocol.** Rust adds `Leaving`, control kind 12:
+  - viewer to host only, all fields zero;
+  - sent only to a host that announced `ML_CAPABILITY_WAITS` (bit 8);
+  - a protocol violation for a host without it, or in protocol 4.
+
+  The wait's bound, 12 hours, is Rust's `ML_VIEWER_WAIT_SECONDS`.
+- **Ordering.** The host notes the message on its reader thread. A queued main-thread update would be skipped, because the viewer closes the connection right after. The viewer writes it behind anything already queued, then closes. The Swift loopback test checks that the host reads a ping, then `Leaving`, then the close. Sending the goodbye after closing fails it.
+- **Host.**
+  - After an end without `Leaving`, the host keeps the session's display and sleep assertion, and keeps its listener, for up to 12 hours or until the next session, **Stop Sharing**, or a lock.
+  - Remove and Stop Now never wait.
+  - Only a viewer closing its window or quitting MacLink says it's leaving; sleep, lock, dropped connections and the update hand-off don't.
+- **Viewer.** A session ended by this Mac's sleep or lock is reconnected by the one-second tick, once this Mac is awake and unlocked, with a fresh budget. Notifications still only stop sessions; nothing starts from one.
+- **Not verified.** Whether the display assertion also keeps a screen saver from starting and locking is untested. The overnight lid-close check (TESTING.md step 10) is the gate.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

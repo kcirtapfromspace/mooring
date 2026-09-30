@@ -64,6 +64,9 @@ pub(crate) enum ControlKind {
     UpdateRequest = 10,
     /// Protocol 5, host to viewer: how that check is going.
     UpdateStatus = 11,
+    /// Protocol 5, viewer to a host that waits for dropped viewers: this
+    /// viewer is ending the session on purpose, so the host needn't wait.
+    Leaving = 12,
 }
 
 /// A MacLink release like 0.3.0-preview.19, packed as major, minor, patch
@@ -173,6 +176,7 @@ pub(crate) enum ControlMessage {
         build: u32,
         release: Release,
     },
+    Leaving,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -267,6 +271,7 @@ impl ControlMessage {
                 }
             }
             10 if !enabled && geometry.is_zero() && ping_id == 0 => Self::UpdateRequest,
+            12 if !enabled && geometry.is_zero() && ping_id == 0 => Self::Leaving,
             11 if !enabled
                 && [geometry.x, geometry.y, geometry.width, geometry.height] == [0.0; 4] =>
             {
@@ -307,6 +312,7 @@ impl ControlMessage {
             Self::Version { .. } => ControlKind::Version,
             Self::UpdateRequest => ControlKind::UpdateRequest,
             Self::UpdateStatus { .. } => ControlKind::UpdateStatus,
+            Self::Leaving => ControlKind::Leaving,
         }
     }
 
@@ -342,7 +348,7 @@ impl ControlMessage {
                     ..DisplayGeometry::default()
                 },
             ),
-            Self::UpdateRequest => (0, 0, DisplayGeometry::default()),
+            Self::UpdateRequest | Self::Leaving => (0, 0, DisplayGeometry::default()),
             Self::UpdateStatus {
                 state,
                 build,
@@ -462,6 +468,7 @@ mod tests {
                 build: 0,
                 release: Release(0),
             },
+            ControlMessage::Leaving,
         ];
         for message in messages {
             assert_eq!(ControlMessage::decode(&message.encode()).unwrap(), message);
@@ -674,8 +681,11 @@ mod tests {
             (5, 0, 0, display),
             (6, 1, 3, zero), // hello carries only capabilities
             (6, 0, 3, display),
+            (12, 1, 0, zero), // leaving carries nothing
+            (12, 0, 1, zero),
+            (12, 0, 0, display),
             (0, 0, 0, zero), // unknown kinds
-            (12, 0, 0, zero),
+            (13, 0, 0, zero),
         ] {
             assert!(ControlMessage::from_parts(kind, enabled, id, value).is_err());
         }
