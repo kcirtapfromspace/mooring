@@ -44,6 +44,13 @@ enum NativeSessionTests {
     }
     /// Clock placement and latency arithmetic; no session or display.
     static func testLatency() throws {
+        // Every build announces what it always supports; self-tests add the rest.
+        let always = UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_GESTURES) | UInt64(ML_CAPABILITY_LATENCY)
+        try require(NativeCapabilities.local(hevc444: false, virtualDisplay: false, audio: false) == always,
+                    "Pointer shapes, gestures and latency are always announced")
+        let everything = always | UInt64(ML_CAPABILITY_HEVC_444) | UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) | UInt64(ML_CAPABILITY_AUDIO)
+        try require(NativeCapabilities.local(hevc444: true, virtualDisplay: true, audio: true) == everything,
+                    "Self-tested capabilities are announced when they pass")
         let sync = NativeClockSync()
         let frame = NativeFrameTiming(hostUs: 5_100_000, decodeStartUs: 112_000, decodedUs: 116_000, presentedUs: 130_000)
         try require(sync.latency(frame) == nil, "No latency before the clocks are placed")

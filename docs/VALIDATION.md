@@ -267,6 +267,27 @@ The native session suite checks the clock placement, the latency arithmetic and 
 
 Between two Macs, the figure also includes ScreenCaptureKit's delivery, the network, and waiting for the viewer's display refresh. Two-Mac values are reported, not asserted.
 
+## Encoder pacing
+
+Preview 14 between the two Macs (sharing Mac at 3360×2032) showed HEVC 4:4:4 encoding took about 50 ms per frame, even at 2 frames a second with nothing queued. Preview 14 also left the latency capability out of what each Mac announces, so the latency figures never started; `v0.3.0-preview.15` announces it, and a native session check covers the announced set.
+
+Benchmarks on the build Mac (M1 Ultra), with text-heavy 3360×2032 frames and the live session running, found the cause. In real-time mode, VideoToolbox paces the HEVC encoder to the gap between frame timestamps. A desktop changes in bursts, so most frames follow a pause and were encoded slowly, and with a larger bit budget.
+
+| Frames arrive | Real-time mode | Without |
+|---|---|---|
+| 16 ms apart | 23 ms, 119 KB | 17 ms, 104 KB |
+| 33 ms apart | 23 ms, 164 KB | 18 ms, 145 KB |
+| 100 ms apart | 54 ms, 380 KB | 19 ms, 210 KB |
+| 500 ms apart | 56 ms, 386 KB | 18 ms, 197 KB |
+
+What changed and what didn't:
+
+- **What didn't matter:** colour tagging (about 2 ms), the power-efficiency setting, and frame pacing with evenly spaced timestamps.
+- **Why not switch encoders:** low-latency HEVC 4:2:0 and H.264 took 25–27 ms, so HEVC 4:4:4 without real-time mode is both the fastest and the sharpest.
+- **Decoding:** it didn't depend on real-time mode (8–10 ms on the build Mac).
+- **The fix:** preview 15 turns real-time mode off for HEVC and keeps Apple's low-latency mode for H.264. Through MacLink's own encoder, a frame after a 500 ms pause now takes 18 ms instead of 54 ms.
+- **Local suite:** 1080p HEVC 4:4:4 encode averages about 7 ms, down from about 10 ms. The loopback median from capture timestamp to decoded fell from about 12 ms to 9 ms.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

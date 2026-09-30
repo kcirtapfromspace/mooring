@@ -219,11 +219,7 @@ final class NativeSessionCoordinator {
                 self?.hevc444Available = hevc
                 self?.audioAvailable = audio
                 let virtualDisplay = NativeSharedDisplay.isAvailable
-                // Every build with this code draws the host's pointer shape and
-                // posts trackpad gestures.
-                ml_capabilities_set((hevc ? UInt64(ML_CAPABILITY_HEVC_444) : 0) | (virtualDisplay ? UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) : 0)
-                                    | UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_GESTURES)
-                                    | (audio ? UInt64(ML_CAPABILITY_AUDIO) : 0))
+                ml_capabilities_set(NativeCapabilities.local(hevc444: hevc, virtualDisplay: virtualDisplay, audio: audio))
                 NativeLog.session.notice("Opus sound encode and decode: \(audio ? "available" : "unavailable", privacy: .public)")
                 NativeLog.session.notice("virtual display for viewers: \(virtualDisplay ? "available" : "unavailable", privacy: .public)")
                 NativeLog.session.notice("HEVC 4:4:4 hardware encode and decode: \(hevc ? "available" : "unavailable", privacy: .public)")

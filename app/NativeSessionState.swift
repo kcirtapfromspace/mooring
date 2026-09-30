@@ -113,6 +113,18 @@ struct NativeMetric: Hashable {
     static let clockErrorMs = Self(ML_METRIC_CLOCK_ERROR_MS)
 }
 
+/// What this Mac announces in protocol 5. Pointer shapes, gestures and latency
+/// need nothing beyond this build; the rest depend on launch self-tests.
+enum NativeCapabilities {
+    static func local(hevc444: Bool, virtualDisplay: Bool, audio: Bool) -> UInt64 {
+        var capabilities = UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_GESTURES) | UInt64(ML_CAPABILITY_LATENCY)
+        if hevc444 { capabilities |= UInt64(ML_CAPABILITY_HEVC_444) }
+        if virtualDisplay { capabilities |= UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) }
+        if audio { capabilities |= UInt64(ML_CAPABILITY_AUDIO) }
+        return capabilities
+    }
+}
+
 /// Viewer: the host's clock relative to this Mac's, from recent clock replies.
 /// Rust picks the sample with the shortest round trip. Main thread.
 final class NativeClockSync {

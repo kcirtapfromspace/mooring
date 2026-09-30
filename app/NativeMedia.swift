@@ -279,7 +279,11 @@ final class NativeVideoEncoder {
 
     /// H.264 uses Apple's low-latency encoder. HEVC 4:4:4 needs a normal
     /// session: the low-latency one silently falls back to 4:2:0, so frame
-    /// reordering is disabled and real-time mode requested instead.
+    /// reordering is disabled instead. Real-time mode stays off for HEVC: it
+    /// paces the encoder to the gap between frames, and a desktop changes in
+    /// bursts. Measured on an M1 Ultra at 3360×2032 with text, a frame after a
+    /// 100-500 ms pause took 52-56 ms in real-time mode and 18-19 ms without
+    /// it, and 23 ms against 17 ms at 60 fps, with frames no larger.
     init(width: Int, height: Int, framesPerSecond: Int = 60, bitrate: Int = 25_000_000, keyframeSeconds: Int = 2,
          codec: NativeVideoCodec = .h264) throws {
         guard NativeVideoPacket.validDimensions(width, height), (1...60).contains(framesPerSecond),
@@ -311,7 +315,7 @@ final class NativeVideoEncoder {
             let profile: [(CFString, CFTypeRef)] = codec == .h264
                 ? [(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel as CFTypeRef)] : []
             for (key, value) in profile + [
-                (kVTCompressionPropertyKey_RealTime, kCFBooleanTrue as CFTypeRef),
+                (kVTCompressionPropertyKey_RealTime, (codec == .h264 ? kCFBooleanTrue : kCFBooleanFalse) as CFTypeRef),
                 (kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse as CFTypeRef),
                 (kVTCompressionPropertyKey_AverageBitRate, bitrate as CFNumber),
                 (kVTCompressionPropertyKey_ExpectedFrameRate, framesPerSecond as CFNumber),
