@@ -960,6 +960,7 @@ fn empty_code() -> MLPairingCode {
         peer_id: [0; ML_PEER_ID_CAPACITY],
         public_key: [0; 32],
         secret: [0; 32],
+        kind: 0,
     }
 }
 
@@ -974,6 +975,7 @@ fn pairing_abi_round_trips_codes_and_credentials() {
             name.as_ptr(),
             public.as_ptr(),
             psk.as_ptr(),
+            1,
             &mut code,
         )
     };
@@ -1103,6 +1105,7 @@ fn peers_abi_loads_remembers_and_imports() {
                 c"Studio".as_ptr(),
                 public.as_ptr(),
                 psk.as_ptr(),
+                1,
                 &mut code
             ),
             0
@@ -2196,4 +2199,602 @@ fn versions_and_update_requests_reach_only_macs_that_read_them() {
     assert_eq!(send_control(old_viewer.0, &request), Error::Invalid as i32);
     assert_eq!(send_control(old_host.0, &ready), Error::Invalid as i32);
     assert!(!is_closed(old_viewer.0) && !is_closed(old_host.0));
+}
+
+// Per-device pairing keys. Values from maclink_session.h.
+const PAIRING_LEGACY: u8 = 1;
+const PAIRING_ONE_TIME: u8 = 2;
+const PAIRING_DEVICE: u8 = 3;
+const MODE_LEGACY: u8 = 0;
+const MODE_PAIR: u8 = 1;
+const MODE_DEVICE: u8 = 2;
+const MODE_MIGRATE: u8 = 3;
+const VIA_CODE: u8 = 1;
+const VIA_MIGRATED: u8 = 2;
+const LEGACY_STOP_NOW: u8 = 1;
+
+struct Scratch(std::path::PathBuf, CString);
+impl Scratch {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "maclink-devices-abi-{}-{}",
+            std::process::id(),
+            crate::files::next_sequence()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        let text = CString::new(path.to_str().unwrap()).unwrap();
+        Self(path, text)
+    }
+}
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A sharing Mac with per-device keys.
+struct DeviceHost {
+    listener: Owned,
+    public: [u8; 32],
+    psk: [u8; 32],
+    store: Scratch,
+}
+fn device_host(accept_old_code: bool) -> DeviceHost {
+    crate::transport::TEST_OFFER.with(|value| value.set(5));
+    let (private, public, psk) = identity();
+    let store = Scratch::new();
+    assert_eq!(
+        unsafe { ml_devices_init(store.1.as_ptr(), accept_old_code as u8) },
+        0
+    );
+    let mut id = 0;
+    assert_eq!(
+        unsafe {
+            ml_session_listen_devices(
+                c"127.0.0.1".as_ptr(),
+                0,
+                private.as_ptr(),
+                psk.as_ptr(),
+                store.1.as_ptr(),
+                &mut id,
+            )
+        },
+        0
+    );
+    DeviceHost {
+        listener: Owned(id),
+        public,
+        psk,
+        store,
+    }
+}
+impl DeviceHost {
+    fn port(&self) -> u16 {
+        ml_session_listener_port(self.listener.0)
+    }
+    fn code(&self, secret: &[u8; 32], kind: u8) -> MLPairingCode {
+        host_code(&self.public, secret, kind)
+    }
+    fn one_time_code(&self) -> MLPairingCode {
+        let mut secret = [0; 32];
+        assert_eq!(
+            unsafe { ml_listener_pairing_secret(self.listener.0, secret.as_mut_ptr()) },
+            0
+        );
+        self.code(&secret, PAIRING_ONE_TIME)
+    }
+    fn devices(&self) -> (Vec<MLDevice>, MLLegacyState) {
+        let mut devices: Vec<MLDevice> = (0..ML_DEVICES_MAX)
+            .map(|_| MLDevice {
+                paired: 0,
+                last_seen: 0,
+                id: [0; ML_PEER_ID_CAPACITY],
+                name: [0; ML_TEXT_CAPACITY],
+                via: 0,
+            })
+            .collect();
+        let (mut count, mut legacy) = (0, MLLegacyState::default());
+        assert_eq!(
+            unsafe {
+                ml_devices_load(
+                    self.store.1.as_ptr(),
+                    devices.as_mut_ptr(),
+                    devices.len(),
+                    &mut count,
+                    &mut legacy,
+                )
+            },
+            0
+        );
+        devices.truncate(count);
+        (devices, legacy)
+    }
+}
+fn host_code(public: &[u8; 32], secret: &[u8; 32], kind: u8) -> MLPairingCode {
+    let mut code = empty_code();
+    assert_eq!(
+        unsafe {
+            ml_pairing_code_for_host(
+                c"127.0.0.1".as_ptr(),
+                c"Studio".as_ptr(),
+                public.as_ptr(),
+                secret.as_ptr(),
+                kind,
+                &mut code,
+            )
+        },
+        0
+    );
+    code
+}
+/// A viewer Mac's device key: (private, id).
+fn device_key() -> ([u8; 32], String) {
+    let (private, public, _) = identity();
+    (private, crate::devices::device_id(&public))
+}
+
+/// Runs `viewer` while the listener accepts, returning the viewer's result
+/// and each handshake's on the host: a session or a failure status.
+fn exchange<T>(listener: u64, viewer: impl FnOnce() -> T) -> (T, Vec<Result<Owned, i32>>) {
+    let (stop, stopped) = mpsc::channel::<()>();
+    let host = std::thread::spawn(move || {
+        let mut results = vec![];
+        loop {
+            let mut session = 0;
+            match unsafe { ml_session_accept(listener, 100, &mut session) } {
+                0 => results.push(Ok(Owned(session))),
+                status if status == Error::Timeout as i32 => {
+                    if stopped.try_recv().is_ok() {
+                        return results;
+                    }
+                }
+                status => results.push(Err(status)),
+            }
+        }
+    });
+    let result = viewer();
+    stop.send(()).unwrap();
+    (result, host.join().unwrap())
+}
+fn connect_paired(port: u16, code: &MLPairingCode, device: &[u8; 32]) -> (i32, Option<Owned>, u8) {
+    let (mut out, mut mode) = (0, 0);
+    let status = unsafe {
+        ml_session_connect_paired(
+            c"127.0.0.1".as_ptr(),
+            port,
+            code,
+            device.as_ptr(),
+            c" MacBook\u{200b} Pro\n".as_ptr(),
+            5000,
+            &mut out,
+            &mut mode,
+        )
+    };
+    (status, (status == 0).then_some(Owned(out)), mode)
+}
+fn peer_device(host: u64) -> String {
+    let mut out = [0 as c_char; ML_PEER_ID_CAPACITY];
+    assert_eq!(unsafe { ml_session_peer_device(host, out.as_mut_ptr()) }, 0);
+    text(&out)
+}
+fn statuses(results: &[Result<Owned, i32>]) -> Vec<i32> {
+    results
+        .iter()
+        .map(|result| *result.as_ref().err().unwrap_or(&0))
+        .collect()
+}
+/// Pairs with the listener and returns the viewer and host sessions.
+fn paired(host: &DeviceHost, code: &MLPairingCode, device: &[u8; 32], mode: u8) -> (Owned, Owned) {
+    let ((status, viewer, used), mut results) = exchange(host.listener.0, || {
+        connect_paired(host.port(), code, device)
+    });
+    assert_eq!((status, used, statuses(&results)), (0, mode, vec![0]));
+    let host_session = results.pop().unwrap().unwrap();
+    let viewer = viewer.unwrap();
+    // Both ends derived the same keys.
+    assert_eq!(hello(host_session.0), TEST_CAPABILITIES);
+    assert_eq!(hello(viewer.0), TEST_CAPABILITIES);
+    (viewer, host_session)
+}
+/// A refused attempt: the viewer saw the host close without an answer, and
+/// the host refused every handshake.
+fn refused(host: &DeviceHost, code: &MLPairingCode, device: &[u8; 32]) -> Vec<i32> {
+    let ((status, viewer, _), results) = exchange(host.listener.0, || {
+        connect_paired(host.port(), code, device)
+    });
+    assert!(viewer.is_none());
+    assert_eq!(status, Error::Auth as i32, "a refusal isn't worth retrying");
+    let statuses = statuses(&results);
+    assert!(
+        !statuses.is_empty() && !statuses.contains(&0),
+        "{statuses:?}"
+    );
+    statuses
+}
+
+#[test]
+fn old_viewers_keep_the_old_code_until_the_sharing_mac_stops_it() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let host = device_host(true);
+    let (status, mut results) = exchange(host.listener.0, || {
+        let mut viewer = 0;
+        let status = connect(host.port(), &host.public, &host.psk, 5000, &mut viewer);
+        (status, Owned(viewer))
+    });
+    assert_eq!((status.0, statuses(&results)), (0, vec![0]));
+    let session = results.pop().unwrap().unwrap();
+    assert_eq!(peer_device(session.0), "", "the old code is no device");
+    let (devices, legacy) = host.devices();
+    assert!(devices.is_empty());
+    assert_eq!((legacy.accepted, legacy.closes_at), (1, 0));
+    assert_ne!(legacy.last_used, 0, "Settings shows when it was last used");
+
+    assert_eq!(
+        unsafe { ml_devices_legacy_action(host.store.1.as_ptr(), LEGACY_STOP_NOW) },
+        0
+    );
+    let (status, results) = exchange(host.listener.0, || {
+        connect(host.port(), &host.public, &host.psk, 5000, &mut 0)
+    });
+    assert_ne!(status, 0);
+    assert!(
+        statuses(&results)
+            .iter()
+            .all(|value| *value == Error::Auth as i32)
+    );
+
+    // A new sharing identity never accepts the old handshake.
+    let fresh = device_host(false);
+    let (status, results) = exchange(fresh.listener.0, || {
+        connect(fresh.port(), &fresh.public, &fresh.psk, 5000, &mut 0)
+    });
+    assert_ne!(status, 0);
+    assert!(
+        statuses(&results)
+            .iter()
+            .all(|value| *value == Error::Auth as i32)
+    );
+}
+
+#[test]
+fn an_old_pairing_moves_to_this_macs_key_once_then_uses_it() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let host = device_host(true);
+    let (device, id) = device_key();
+    let old = host.code(&host.psk, PAIRING_LEGACY);
+    let (_viewer, session) = paired(&host, &old, &device, MODE_MIGRATE);
+    assert_eq!(peer_device(session.0), id);
+    let (devices, legacy) = host.devices();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(
+        (text(&devices[0].id), text(&devices[0].name), devices[0].via),
+        (id.clone(), "MacBook Pro".into(), VIA_MIGRATED)
+    );
+    let now = devices[0].paired;
+    assert_eq!(
+        (legacy.accepted, legacy.closes_at),
+        (1, now + ML_LEGACY_GRACE_SECONDS),
+        "the first move-over starts the old code's last week"
+    );
+
+    // The saved pairing: the host's key only, which survives the Keychain.
+    let mut saved = empty_code();
+    assert_eq!(unsafe { ml_pairing_device(&old, &mut saved) }, 0);
+    assert_eq!((saved.kind, saved.secret), (PAIRING_DEVICE, [0; 32]));
+    let mut credential = vec![0; ML_CREDENTIAL_CAPACITY];
+    let mut length = 0;
+    assert_eq!(
+        unsafe {
+            ml_pairing_credential_encode(
+                &saved,
+                credential.as_mut_ptr(),
+                credential.len(),
+                &mut length,
+            )
+        },
+        0
+    );
+    let mut restored = empty_code();
+    assert_eq!(
+        unsafe { ml_pairing_credential_decode(credential.as_ptr(), length, &mut restored) },
+        0
+    );
+    assert_eq!(
+        (restored.kind, restored.public_key, restored.secret),
+        (PAIRING_DEVICE, host.public, [0; 32])
+    );
+    let mut encoded = vec![0 as c_char; ML_PAIRING_CODE_CAPACITY];
+    assert_eq!(
+        unsafe { ml_pairing_code_encode(&restored, encoded.as_mut_ptr(), encoded.len()) },
+        Error::Invalid as i32,
+        "a device pairing is no code to share"
+    );
+
+    let (_viewer, session) = paired(&host, &restored, &device, MODE_DEVICE);
+    assert_eq!(peer_device(session.0), id);
+    assert_eq!(host.devices().0.len(), 1);
+
+    // The same pairing on a Mac with another key proves nothing.
+    let (other, _) = device_key();
+    assert_eq!(refused(&host, &restored, &other), vec![Error::Auth as i32]);
+}
+
+#[test]
+fn a_move_over_the_sharing_mac_answered_never_falls_back() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let host = device_host(true);
+    // The old code has approved all the Macs it may: this one is refused
+    // after the host answered, when it would record the approval.
+    let store = crate::devices::DeviceStore::new(host.store.0.clone());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    for index in 0..crate::devices::MAX_MIGRATED {
+        let (_, public, _) = identity();
+        store
+            .approve(
+                &public,
+                &format!("Mac {index}"),
+                crate::devices::Via::Migrated,
+                now,
+            )
+            .unwrap();
+    }
+    let (device, _) = device_key();
+    let old = host.code(&host.psk, PAIRING_LEGACY);
+    let ((status, viewer, _), results) = exchange(host.listener.0, || {
+        connect_paired(host.port(), &old, &device)
+    });
+    assert!(viewer.is_none());
+    assert_eq!(
+        (status, statuses(&results)),
+        (Error::Closed as i32, vec![Error::Busy as i32]),
+        "no second attempt with the old handshake"
+    );
+}
+
+#[test]
+fn newer_viewers_use_the_old_code_with_sharing_macs_before_device_keys() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    crate::transport::TEST_OFFER.with(|value| value.set(5));
+    let (private, public, psk) = identity();
+    // Without a device store, a listener stands in for an older build.
+    let listener = bind(&private, &psk);
+    let port = ml_session_listener_port(listener.0);
+    let (device, _) = device_key();
+    let old = host_code(&public, &psk, PAIRING_LEGACY);
+    let ((status, viewer, mode), mut results) =
+        exchange(listener.0, || connect_paired(port, &old, &device));
+    assert_eq!(
+        (status, mode, statuses(&results)),
+        (0, MODE_LEGACY, vec![Error::Auth as i32, 0]),
+        "the mode record reads as a malformed first message"
+    );
+    let session = results.pop().unwrap().unwrap();
+    assert_eq!(peer_device(session.0), "");
+    assert_eq!(hello(session.0), TEST_CAPABILITIES);
+    assert_eq!(hello(viewer.unwrap().0), TEST_CAPABILITIES);
+    let mut secret = [0; 32];
+    assert_eq!(
+        unsafe { ml_listener_pairing_secret(listener.0, secret.as_mut_ptr()) },
+        Error::Invalid as i32,
+        "no one-time codes without a device store"
+    );
+}
+
+#[test]
+fn one_time_codes_approve_one_mac_within_ten_minutes() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let host = device_host(false);
+    let code = host.one_time_code();
+    let mut encoded = vec![0 as c_char; ML_PAIRING_CODE_CAPACITY];
+    assert_eq!(
+        unsafe { ml_pairing_code_encode(&code, encoded.as_mut_ptr(), encoded.len()) },
+        0
+    );
+    let shared = text(&<[c_char; ML_PAIRING_CODE_CAPACITY]>::try_from(encoded.as_slice()).unwrap());
+    assert!(shared.starts_with("MLP2."), "{shared}");
+    let mut parsed = empty_code();
+    assert_eq!(
+        unsafe { ml_pairing_code_parse(encoded.as_ptr(), &mut parsed) },
+        0
+    );
+    assert_eq!(
+        (parsed.kind, parsed.secret, parsed.public_key),
+        (PAIRING_ONE_TIME, code.secret, host.public)
+    );
+    let mut credential = vec![0; ML_CREDENTIAL_CAPACITY];
+    assert_eq!(
+        unsafe {
+            ml_pairing_credential_encode(&parsed, credential.as_mut_ptr(), credential.len(), &mut 0)
+        },
+        Error::Invalid as i32,
+        "a one-time code is never saved"
+    );
+
+    let (first, first_id) = device_key();
+    let (_viewer, session) = paired(&host, &parsed, &first, MODE_PAIR);
+    assert_eq!(peer_device(session.0), first_id);
+    let devices = host.devices().0;
+    assert_eq!(
+        (devices.len(), text(&devices[0].id), devices[0].via),
+        (1, first_id.clone(), VIA_CODE)
+    );
+
+    // Used up, for this Mac and any other.
+    let (second, second_id) = device_key();
+    assert_eq!(refused(&host, &parsed, &second), vec![Error::Auth as i32]);
+    assert_eq!(refused(&host, &parsed, &first), vec![Error::Auth as i32]);
+    // Neither the old code, which this identity never accepted.
+    let old = host.code(&host.psk, PAIRING_LEGACY);
+    assert!(
+        refused(&host, &old, &second)
+            .iter()
+            .all(|value| *value == Error::Auth as i32)
+    );
+    // A new code replaces an unused one.
+    let replaced = host.one_time_code();
+    let current = host.one_time_code();
+    assert_eq!(refused(&host, &replaced, &second), vec![Error::Auth as i32]);
+    // A guessed secret is refused.
+    let guessed = host.code(&[7; 32], PAIRING_ONE_TIME);
+    assert_eq!(refused(&host, &guessed, &second), vec![Error::Auth as i32]);
+    // And so is one past its time.
+    let listener = crate::transport::listener(host.listener.0).unwrap();
+    listener.expire_pairing();
+    assert_eq!(refused(&host, &current, &second), vec![Error::Auth as i32]);
+    let fresh = host.one_time_code();
+    paired(&host, &fresh, &second, MODE_PAIR);
+    let ids: Vec<String> = host
+        .devices()
+        .0
+        .iter()
+        .map(|device| text(&device.id))
+        .collect();
+    assert_eq!(ids, vec![first_id, second_id]);
+}
+
+#[test]
+fn removed_macs_are_refused_and_their_live_session_is_found() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let host = device_host(false);
+    let (device, id) = device_key();
+    let code = host.one_time_code();
+    let (_viewer, live) = paired(&host, &code, &device, MODE_PAIR);
+    let mut saved = empty_code();
+    assert_eq!(unsafe { ml_pairing_device(&code, &mut saved) }, 0);
+    paired(&host, &saved, &device, MODE_DEVICE);
+
+    let id_text = CString::new(id.clone()).unwrap();
+    assert_eq!(
+        unsafe { ml_devices_remove(host.store.1.as_ptr(), id_text.as_ptr()) },
+        0
+    );
+    assert!(host.devices().0.is_empty());
+    // The app ends the removed Mac's session by its device.
+    assert_eq!(peer_device(live.0), id);
+    assert_eq!(ml_session_close(live.0), 0);
+    assert_eq!(refused(&host, &saved, &device), vec![Error::Auth as i32]);
+
+    // Reset Pairing approves no one and never accepts the old code.
+    let code = host.one_time_code();
+    paired(&host, &code, &device, MODE_PAIR);
+    assert_eq!(unsafe { ml_devices_reset(host.store.1.as_ptr()) }, 0);
+    let (devices, legacy) = host.devices();
+    assert!(devices.is_empty() && legacy.accepted == 0);
+    assert_eq!(refused(&host, &saved, &device), vec![Error::Auth as i32]);
+}
+
+/// Sends a mode record and a per-device first message built for
+/// `prologue_mode`, with `psk` if any, and returns what the host answered
+/// (Closed: nothing) and how its handshake ended.
+fn raw_attempt(
+    host: &DeviceHost,
+    sent: &[u8],
+    prologue_mode: crate::transport::Mode,
+    psk: Option<&[u8; 32]>,
+    device: &[u8; 32],
+) -> (i32, Vec<i32>) {
+    use crate::transport::{DEVICE_PATTERN, PAIRING_PATTERN, mode_prologue};
+    let prologue = mode_prologue(prologue_mode);
+    let pattern = if psk.is_some() {
+        PAIRING_PATTERN
+    } else {
+        DEVICE_PATTERN
+    };
+    let mut builder = snow::Builder::new(pattern.parse().unwrap())
+        .local_private_key(device)
+        .unwrap()
+        .remote_public_key(&host.public)
+        .unwrap()
+        .prologue(&prologue)
+        .unwrap();
+    if let Some(psk) = psk {
+        builder = builder.psk(1, psk).unwrap();
+    }
+    let mut noise = builder.build_initiator().unwrap();
+    let (answer, results) = exchange(host.listener.0, || {
+        let socket = TcpStream::connect(("127.0.0.1", host.port())).unwrap();
+        let end = deadline(3000).unwrap();
+        write_record(&socket, sent, end).unwrap();
+        let mut message = [0; 1024];
+        let size = noise
+            .write_message(b"maclink-session/5\0MacBook Pro", &mut message)
+            .unwrap();
+        write_record(&socket, &message[..size], end).unwrap();
+        match read_record(&socket, &mut message, end, &mut 0) {
+            Ok(_) => 0,
+            Err(error) => error as i32,
+        }
+    });
+    (answer, statuses(&results))
+}
+
+#[test]
+fn the_mode_is_bound_into_the_handshake_and_refusals_come_before_an_answer() {
+    use crate::transport::{Mode, mode_hello};
+    let host = device_host(true);
+    let code = host.one_time_code();
+    let (device, _) = device_key();
+    let auth = vec![Error::Auth as i32];
+    let closed = Error::Closed as i32;
+    // The right secret with the mode changed in transit: pair ↔ migrate.
+    assert_eq!(
+        raw_attempt(
+            &host,
+            &mode_hello(Mode::Pair),
+            Mode::Migrate,
+            Some(&code.secret),
+            &device
+        ),
+        (closed, auth.clone())
+    );
+    assert_eq!(
+        raw_attempt(
+            &host,
+            &mode_hello(Mode::Migrate),
+            Mode::Pair,
+            Some(&host.psk),
+            &device
+        ),
+        (closed, auth.clone())
+    );
+    // An unknown key asking as a returning Mac gets no answer at all.
+    assert_eq!(
+        raw_attempt(
+            &host,
+            &mode_hello(Mode::Device),
+            Mode::Device,
+            None,
+            &device
+        ),
+        (closed, auth.clone())
+    );
+    // An unknown mode is an old first message, which it isn't.
+    let mut unknown = mode_hello(Mode::Device);
+    unknown[15] = 4;
+    assert_eq!(
+        raw_attempt(&host, &unknown, Mode::Device, None, &device),
+        (closed, auth.clone())
+    );
+    // Nothing above used the code or approved a Mac.
+    assert!(host.devices().0.is_empty());
+    assert_eq!(
+        raw_attempt(
+            &host,
+            &mode_hello(Mode::Pair),
+            Mode::Pair,
+            Some(&code.secret),
+            &device
+        )
+        .1,
+        vec![Error::Closed as i32],
+        "the right mode and secret get an answer; this client stops there"
+    );
+    assert!(
+        host.devices().0.is_empty(),
+        "an unfinished handshake approves no one"
+    );
+    paired(&host, &code, &device, MODE_PAIR);
 }

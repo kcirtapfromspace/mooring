@@ -31,6 +31,18 @@ struct NativeStreamIntegration {
         let writer = DispatchQueue(label: "native-test-writer")
         func fail(_ message: String) { lock.lock(); if error == nil { error = message }; lock.unlock(); decoded.signal(); returnedControl.signal(); accepted.signal() }
     }
+    /// A loopback listener with a temporary device list, and a one-time code
+    /// for it; remove the folder when done.
+    static func loopbackListener(_ identity: NativeHostIdentity, name: String) throws -> (NativeTransport, NativePairingCode, URL) {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("maclink-stream-devices-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let devices = NativeDeviceStore(directory: folder.path)
+        try devices.prepare(acceptOldCode: false)
+        let listener = try NativeTransport.listen(identity: identity, devices: devices, bindAddress: "127.0.0.1", port: 0)
+        let code = try NativePairingCode.forHost(address: "127.0.0.1", computerName: name, identity: identity,
+                                                 oneTimeSecret: listener.newPairingSecret())
+        return (listener, code, folder)
+    }
     /// Protocol 5 end to end: both sides announce HEVC 4:4:4, the host sees the
     /// viewer's Hello and streams HEVC, and the viewer decodes 4:4:4 frames.
     static func hevcStream() throws -> (frames: Int, medianLatency: Double) {
@@ -40,16 +52,16 @@ struct NativeStreamIntegration {
                             | UInt64(ML_CAPABILITY_LATENCY))
         defer { ml_capabilities_set(0) }
         let identity = try NativeHostIdentity.create()
-        let code = try NativePairingCode.forHost(address: "127.0.0.1", computerName: "Synthetic HEVC test", identity: identity)
-        let listener = try NativeTransport.listen(identity: identity, bindAddress: "127.0.0.1", port: 0)
-        defer { listener.close() }
+        let (listener, code, folder) = try loopbackListener(identity, name: "Synthetic HEVC test")
+        defer { listener.close(); try? FileManager.default.removeItem(at: folder) }
         let accepted = DispatchSemaphore(value: 0), lock = NSLock()
         var server: NativeTransport?
         DispatchQueue.global().async {
             let transport = try? listener.accept()
             lock.lock(); server = transport; lock.unlock(); accepted.signal()
         }
-        let client = try NativeTransport.connect(address: "127.0.0.1", code: code, port: listener.listeningPort)
+        let (client, _) = try NativeTransport.connect(address: "127.0.0.1", code: code, deviceKey: NativeDeviceKey.create(),
+                                                      port: listener.listeningPort)
         defer { client.close() }
         try require(accepted.wait(timeout: .now() + 5) == .success, "HEVC session accept")
         lock.lock(); let host = server; lock.unlock()
@@ -191,9 +203,8 @@ struct NativeStreamIntegration {
     static func run() throws {
         let state = State(), token = NativeRunToken()
         let identity = try NativeHostIdentity.create()
-        let code = try NativePairingCode.forHost(address: "127.0.0.1", computerName: "Synthetic test", identity: identity)
-        let listener = try NativeTransport.listen(identity: identity, bindAddress: "127.0.0.1", port: 0)
-        defer { token.cancel(); listener.close(); state.server?.close() }
+        let (listener, code, folder) = try loopbackListener(identity, name: "Synthetic test")
+        defer { token.cancel(); listener.close(); state.server?.close(); try? FileManager.default.removeItem(at: folder) }
         DispatchQueue.global().async {
             do {
                 guard let server = try listener.accept() else { state.fail("Accept timed out"); return }
@@ -214,8 +225,10 @@ struct NativeStreamIntegration {
                 }
             } catch { if token.isActive { state.fail(error.localizedDescription) } }
         }
-        let client = try NativeTransport.connect(address: "127.0.0.1", code: code, port: listener.listeningPort)
+        let (client, mode) = try NativeTransport.connect(address: "127.0.0.1", code: code, deviceKey: NativeDeviceKey.create(),
+                                                         port: listener.listeningPort)
         defer { client.close() }
+        try require(mode == .pair, "A one-time code pairs this Mac's key")
         try require(state.accepted.wait(timeout: .now() + 5) == .success, "Encrypted accept deadline")
         try require(state.error == nil && state.server != nil, "Authenticated session did not complete")
         let server = state.server!

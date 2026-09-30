@@ -44,32 +44,57 @@ final class NativeTransport: @unchecked Sendable {
             throw NativeSessionError(message: String(cString: ml_session_error_string(status)), status: status)
         }
     }
-    static func listen(identity: NativeHostIdentity, bindAddress: String = "0.0.0.0", port: UInt16 = 45900) throws -> NativeTransport {
+    /// Listens for Macs approved in `devices`, and for the old code while that
+    /// store still accepts it.
+    static func listen(identity: NativeHostIdentity, devices: NativeDeviceStore,
+                       bindAddress: String = "0.0.0.0", port: UInt16 = 45900) throws -> NativeTransport {
         try identity.validate()
         var handle: UInt64 = 0
         let status = identity.privateKey.withUnsafeBytes { privateBytes in
             identity.secret.withUnsafeBytes { secretBytes in
-                ml_session_listen(bindAddress, port,
-                                  privateBytes.bindMemory(to: UInt8.self).baseAddress!,
-                                  secretBytes.bindMemory(to: UInt8.self).baseAddress!, &handle)
+                ml_session_listen_devices(bindAddress, port,
+                                          privateBytes.bindMemory(to: UInt8.self).baseAddress!,
+                                          secretBytes.bindMemory(to: UInt8.self).baseAddress!, devices.directory, &handle)
             }
         }
         try check(status)
         return NativeTransport(handle, receivesVideo: false)
     }
-    static func connect(address: String, code: NativePairingCode, port: UInt16 = 45900) throws -> NativeTransport {
+    /// Listener only: a new one-time code's secret, replacing any unused one.
+    func newPairingSecret() throws -> Data {
+        var secret = [UInt8](repeating: 0, count: 32)
+        defer { for index in secret.indices { secret[index] = 0 } }
+        try Self.check(ml_listener_pairing_secret(id, &secret))
+        return Data(secret)
+    }
+    /// How a connection proved this Mac.
+    enum Mode: UInt8 {
+        /// The old code, to a sharing Mac from before per-device keys.
+        case legacy = 0
+        /// A one-time code approved this Mac's key.
+        case pair = 1
+        /// An approved key.
+        case device = 2
+        /// The old code approved this Mac's key, once.
+        case migrate = 3
+        /// The sharing Mac approved this Mac's key; save the device pairing.
+        var approvedKey: Bool { self == .pair || self == .migrate }
+    }
+    /// Connects with a pasted code or saved pairing, proving this Mac's key.
+    static func connect(address: String, code: NativePairingCode, deviceKey: NativeDeviceKey,
+                        deviceName: String = NativeDeviceKey.computerName, port: UInt16 = 45900) throws -> (NativeTransport, Mode) {
+        guard deviceKey.privateKey.count == 32 else { throw NativeSessionError(message: "This Mac's device key is invalid. Pair the Macs again.") }
         var handle: UInt64 = 0
+        var mode: UInt8 = 0
         var raw = code.raw
-        let status = withUnsafeBytes(of: &raw.public_key) { publicBytes in
-            withUnsafeBytes(of: &raw.secret) { secretBytes in
-                ml_session_connect(address, port,
-                                   publicBytes.bindMemory(to: UInt8.self).baseAddress!,
-                                   secretBytes.bindMemory(to: UInt8.self).baseAddress!, 5_000, &handle)
-            }
+        let status = deviceKey.privateKey.withUnsafeBytes { keyBytes in
+            ml_session_connect_paired(address, port, &raw, keyBytes.bindMemory(to: UInt8.self).baseAddress!, deviceName,
+                                      5_000, &handle, &mode)
         }
         if status == ML_SESSION_INVALID { throw NativeSessionError(message: "Enter a hostname or IP address, without a port or URL.") }
         try check(status)
-        return NativeTransport(handle, receivesVideo: true)
+        guard let used = Mode(rawValue: mode) else { _ = ml_session_close(handle); throw NativeSessionError(message: "Internal error") }
+        return (NativeTransport(handle, receivesVideo: true), used)
     }
     var listeningPort: UInt16 { ml_session_listener_port(id) }
     /// 4 or 5; capabilities are exchanged only in protocol 5.
@@ -79,6 +104,12 @@ final class NativeTransport: @unchecked Sendable {
     func sendQueue() -> MLSendQueue? {
         var queue = MLSendQueue()
         return ml_session_send_queue(id, &queue) == ML_SESSION_OK ? queue : nil
+    }
+    /// Host: the approved Mac on the other end, "" for one using the old
+    /// code, or nil once closed.
+    var peerDevice: String? {
+        var out = [CChar](repeating: 0, count: Int(ML_PEER_ID_CAPACITY))
+        return ml_session_peer_device(id, &out) == ML_SESSION_OK ? nativeString(out) : nil
     }
     /// What the peer announced; zero until its Hello arrives.
     var peerCapabilities: UInt64 { var value: UInt64 = 0; _ = ml_session_peer_capabilities(id, &value); return value }

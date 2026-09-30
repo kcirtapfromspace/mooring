@@ -11,7 +11,9 @@ use crate::audio::{self, AudioHeader, AudioPacket, MAX_AUDIO};
 use crate::clipboard::{self, ClipboardKind, ClipboardPacket, MAX_CLIPBOARD};
 use crate::control::ControlMessage;
 use crate::cursor::{self, CursorPacket, CursorShape, MAX_CURSOR};
+use crate::devices::{DeviceStore, Via};
 use crate::input::InputEvent;
+use crate::pairing::{CodeKind, PairingCode, local_name, validate_name};
 use crate::policy::{
     AUDIO, Admission, CAPABILITY_AUDIO, CAPABILITY_CURSOR, CAPABILITY_GESTURES,
     CAPABILITY_HEVC_444, CAPABILITY_LATENCY, CAPABILITY_REMOTE_UPDATE, CAPABILITY_VERSION,
@@ -33,6 +35,56 @@ use zeroize::{Zeroize, Zeroizing};
 
 pub(crate) const PATTERN: &str = "Noise_NKpsk0_25519_ChaChaPoly_BLAKE2s";
 pub(crate) const PROLOGUE: &[u8] = b"MacLink direct session v1";
+/// Per-device keys: a returning Mac proves its own static key (IK); a new or
+/// moving Mac also proves a one-time or old pairing secret, mixed into the
+/// first message so a wrong one is refused before the host answers (IKpsk1).
+pub(crate) const DEVICE_PATTERN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
+pub(crate) const PAIRING_PATTERN: &str = "Noise_IKpsk1_25519_ChaChaPoly_BLAKE2s";
+const PROLOGUE_V2: &[u8] = b"MacLink direct session v2";
+/// Sent in plain text before the first Noise message of a per-device
+/// handshake: this label and the mode, 16 bytes. The mode is also bound into
+/// the prologue, so it can't be changed in transit. A host from before
+/// per-device keys reads it as a malformed first message and closes, and the
+/// viewer falls back to the old handshake.
+const MODE_LABEL: &[u8; 15] = b"maclink-mode/2 ";
+/// A one-time pairing code works for this long after it is made.
+pub(crate) const PAIRING_LIFETIME: Duration = Duration::from_secs(600);
+
+/// How a viewer authenticates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum Mode {
+    /// The old long-lived pairing secret alone (NKpsk0).
+    Legacy = 0,
+    /// A one-time code, which approves this Mac's device key.
+    Pair = 1,
+    /// An approved device key.
+    Device = 2,
+    /// The old pairing secret, once, to approve this Mac's device key.
+    Migrate = 3,
+}
+pub(crate) fn mode_hello(mode: Mode) -> [u8; 16] {
+    let mut record = [0_u8; 16];
+    record[..15].copy_from_slice(MODE_LABEL);
+    record[15] = mode as u8;
+    record
+}
+fn parse_mode_hello(record: &[u8]) -> Option<Mode> {
+    match record {
+        [label @ .., 1] if label == MODE_LABEL => Some(Mode::Pair),
+        [label @ .., 2] if label == MODE_LABEL => Some(Mode::Device),
+        [label @ .., 3] if label == MODE_LABEL => Some(Mode::Migrate),
+        _ => None,
+    }
+}
+pub(crate) fn mode_prologue(mode: Mode) -> Vec<u8> {
+    [PROLOGUE_V2, &[mode as u8]].concat()
+}
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
 /// Names the application message formats; mismatched builds fail the handshake.
 /// What this build offers: `maclink-session/N` for the highest version.
 #[cfg(test)]
@@ -206,7 +258,8 @@ pub(crate) fn builder<'a>() -> Result<Builder<'a>> {
 /// Returns the transport keys and the negotiated protocol version. The
 /// initiator offers `offer`; the responder answers with the lower of that and
 /// the highest it speaks, or with exactly `exact` when set (as builds before
-/// protocol 5 did, for tests).
+/// protocol 5 did, for tests). A responder that already read the first
+/// message, to tell the old handshake from a per-device one, passes it.
 fn handshake(
     mut noise: HandshakeState,
     stream: &TcpStream,
@@ -214,12 +267,14 @@ fn handshake(
     end: Instant,
     offer: u32,
     exact: Option<u32>,
+    first: Option<&[u8]>,
 ) -> Result<(StatelessTransportState, u32)> {
     stream.set_nodelay(true).map_err(io_error)?;
     let mut incoming = [0_u8; 1024];
     let mut outgoing = [0_u8; 1024];
     let mut payload = [0_u8; 1024];
     let mut version = offer;
+    let mut first = first;
     for send in [initiator, !initiator] {
         if send {
             let size = noise
@@ -227,9 +282,15 @@ fn handshake(
                 .map_err(|_| Error::Auth)?;
             write_record(stream, &outgoing[..size], end)?;
         } else {
-            let size = read_record(stream, &mut incoming, end, &mut 0)?;
+            let message = match first.take() {
+                Some(message) => message,
+                None => {
+                    let size = read_record(stream, &mut incoming, end, &mut 0)?;
+                    &incoming[..size]
+                }
+            };
             let count = noise
-                .read_message(&incoming[..size], &mut payload)
+                .read_message(message, &mut payload)
                 .map_err(|_| Error::Auth)?;
             let peer = handshake_version(&payload[..count]).ok_or(Error::Protocol)?;
             version = match (initiator, exact) {
@@ -246,35 +307,159 @@ fn handshake(
     let crypto = noise
         .into_stateless_transport_mode()
         .map_err(|_| Error::Auth)?;
-    // Confirm fresh transport keys in both directions before exposing a handle.
-    // Replaying a valid first Noise message cannot start a host session.
-    for send in [initiator, !initiator] {
-        if send {
-            let label: &[u8] = if initiator {
-                b"client-ready/1"
-            } else {
-                b"server-ready/1"
-            };
-            let size = crypto
-                .write_message(0, label, &mut outgoing)
-                .map_err(|_| Error::Auth)?;
-            write_record(stream, &outgoing[..size], end)?;
-        } else {
-            let label: &[u8] = if initiator {
-                b"server-ready/1"
-            } else {
-                b"client-ready/1"
-            };
-            let size = read_record(stream, &mut incoming, end, &mut 0)?;
-            let count = crypto
-                .read_message(0, &incoming[..size], &mut payload)
-                .map_err(|_| Error::Auth)?;
-            if &payload[..count] != label {
-                return Err(Error::Auth);
-            }
-        }
-    }
+    confirm_ready(&crypto, stream, initiator, end, || Ok(()))?;
     Ok((crypto, version))
+}
+
+/// Confirm fresh transport keys in both directions before exposing a handle.
+/// Replaying a valid first Noise message cannot start a host session. The
+/// host runs `commit` after the viewer proves its keys and before answering,
+/// so a viewer that sees the answer knows the host recorded whatever the
+/// handshake approved.
+fn confirm_ready<T>(
+    crypto: &StatelessTransportState,
+    stream: &TcpStream,
+    initiator: bool,
+    end: Instant,
+    commit: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let send = |label: &[u8]| -> Result<()> {
+        let mut outgoing = [0_u8; 1024];
+        let size = crypto
+            .write_message(0, label, &mut outgoing)
+            .map_err(|_| Error::Auth)?;
+        write_record(stream, &outgoing[..size], end)
+    };
+    let receive = |label: &[u8]| -> Result<()> {
+        let mut incoming = [0_u8; 1024];
+        let mut payload = [0_u8; 1024];
+        let size = read_record(stream, &mut incoming, end, &mut 0)?;
+        let count = crypto
+            .read_message(0, &incoming[..size], &mut payload)
+            .map_err(|_| Error::Auth)?;
+        if &payload[..count] == label {
+            Ok(())
+        } else {
+            Err(Error::Auth)
+        }
+    };
+    if initiator {
+        send(b"client-ready/1")?;
+        receive(b"server-ready/1")?;
+        commit()
+    } else {
+        receive(b"client-ready/1")?;
+        let value = commit()?;
+        send(b"server-ready/1")?;
+        Ok(value)
+    }
+}
+
+/// The viewer's first message in a per-device handshake: the protocol
+/// offer, a NUL, and this Mac's display name.
+fn device_payload(version: u32, name: &str) -> Vec<u8> {
+    [
+        handshake_payload(version),
+        vec![0],
+        name.as_bytes().to_vec(),
+    ]
+    .concat()
+}
+fn parse_device_payload(payload: &[u8]) -> Option<(u32, String)> {
+    let split = payload.iter().position(|byte| *byte == 0)?;
+    let version = handshake_version(&payload[..split])?;
+    let name = std::str::from_utf8(&payload[split + 1..]).ok()?;
+    validate_name(name).ok()?;
+    Some((version, name.to_owned()))
+}
+
+/// A per-device handshake (IK or IKpsk1), viewer side: offers `offer` and
+/// sends this Mac's name. Returns the transport keys and protocol version.
+fn device_initiate(
+    mut noise: HandshakeState,
+    stream: &TcpStream,
+    end: Instant,
+    offer: u32,
+    name: &str,
+) -> std::result::Result<(StatelessTransportState, u32), (Reached, Error)> {
+    let unanswered = |error| (Reached::Unanswered, error);
+    stream
+        .set_nodelay(true)
+        .map_err(|error| unanswered(io_error(error)))?;
+    let mut incoming = [0_u8; 1024];
+    let mut outgoing = [0_u8; 1024];
+    let mut payload = [0_u8; 1024];
+    let size = noise
+        .write_message(&device_payload(offer, name), &mut outgoing)
+        .map_err(|_| unanswered(Error::Auth))?;
+    write_record(stream, &outgoing[..size], end).map_err(unanswered)?;
+    // The host answers only a Mac it accepts; closing instead is its refusal.
+    let size = read_record(stream, &mut incoming, end, &mut 0).map_err(|error| match error {
+        Error::Closed => unanswered(Error::Auth),
+        other => unanswered(other),
+    })?;
+    let answered = |error| (Reached::Answered, error);
+    let count = noise
+        .read_message(&incoming[..size], &mut payload)
+        .map_err(|_| answered(Error::Auth))?;
+    let version = handshake_version(&payload[..count])
+        .filter(|peer| (PROTOCOL_MIN..=offer).contains(peer))
+        .ok_or(answered(Error::Protocol))?;
+    if !noise.is_handshake_finished() {
+        return Err(answered(Error::Auth));
+    }
+    let crypto = noise
+        .into_stateless_transport_mode()
+        .map_err(|_| answered(Error::Auth))?;
+    confirm_ready(&crypto, stream, true, end, || Ok(())).map_err(answered)?;
+    Ok((crypto, version))
+}
+
+/// Host side. The first message carries the viewer's static key and name:
+/// `admit` may refuse them before anything is sent back, and `commit`
+/// records the approval once the viewer has proved fresh keys, before the
+/// host's last answer. Returns the transport keys, the protocol version, and
+/// what `commit` returned.
+fn device_respond<A, C>(
+    mut noise: HandshakeState,
+    stream: &TcpStream,
+    end: Instant,
+    offer: u32,
+    admit: impl FnOnce(&[u8; 32], &str) -> Result<A>,
+    commit: impl FnOnce(A, &[u8; 32], &str) -> Result<C>,
+) -> Result<(StatelessTransportState, u32, C)> {
+    stream.set_nodelay(true).map_err(io_error)?;
+    let mut incoming = [0_u8; 1024];
+    let mut outgoing = [0_u8; 1024];
+    let mut payload = [0_u8; 1024];
+    let size = read_record(stream, &mut incoming, end, &mut 0)?;
+    let count = noise
+        .read_message(&incoming[..size], &mut payload)
+        .map_err(|_| Error::Auth)?;
+    let (peer, name) = parse_device_payload(&payload[..count]).ok_or(Error::Protocol)?;
+    let remote: [u8; 32] = noise
+        .get_remote_static()
+        .and_then(|key| key.try_into().ok())
+        .ok_or(Error::Auth)?;
+    let admitted = admit(&remote, &name)?;
+    let version = peer.min(offer);
+    if version < PROTOCOL_MIN {
+        return Err(Error::Protocol);
+    }
+    let size = noise
+        .write_message(&handshake_payload(version), &mut outgoing)
+        .map_err(|_| Error::Auth)?;
+    write_record(stream, &outgoing[..size], end)?;
+    if !noise.is_handshake_finished() {
+        return Err(Error::Auth);
+    }
+    let crypto = noise
+        .into_stateless_transport_mode()
+        .map_err(|_| Error::Auth)?;
+    let committed = confirm_ready(&crypto, stream, false, end, || {
+        commit(admitted, &remote, &name)
+    })?;
+    Ok((crypto, version, committed))
 }
 
 pub(crate) enum Outgoing<'a> {
@@ -332,6 +517,8 @@ pub(crate) struct Session {
     pub(crate) local_capabilities: u64,
     /// What the peer announced in its Hello; zero before it and in protocol 4.
     pub(crate) peer_capabilities: AtomicU64,
+    /// Host: the approved device on the other end; None for the old code.
+    pub(crate) peer_device: Option<String>,
     send: Mutex<Counter>,
     pub(crate) receive: Mutex<Inbound>,
     pub(crate) closed: AtomicBool,
@@ -423,6 +610,7 @@ impl Session {
             version,
             local_capabilities,
             peer_capabilities: AtomicU64::new(0),
+            peer_device: None,
             send: Mutex::new(Counter::default()),
             receive: Mutex::new(Inbound {
                 counter: Counter::default(),
@@ -450,16 +638,24 @@ impl Session {
     }
 
     /// Protocol 5 sessions start with each side's Hello.
+    fn with_peer_device(mut self, device: Option<String>) -> Self {
+        self.peer_device = device;
+        self
+    }
     fn established(self, end: Instant) -> Result<Arc<Self>> {
         let session = Arc::new(self);
-        if session.version >= 5 {
-            let hello = ControlMessage::Hello(session.local_capabilities);
-            session.send_message(
+        session.hello(end)?;
+        Ok(session)
+    }
+    fn hello(&self, end: Instant) -> Result<()> {
+        if self.version >= 5 {
+            let hello = ControlMessage::Hello(self.local_capabilities);
+            self.send_message(
                 &Outgoing::Control(hello),
                 end.max(Instant::now() + HANDSHAKE_GRACE),
             )?;
         }
-        Ok(session)
+        Ok(())
     }
 
     /// Invalid or misdirected messages fail before any byte is written and do
@@ -773,12 +969,18 @@ impl Session {
 pub(crate) struct Listener {
     pub(crate) socket: TcpListener,
     private: Zeroizing<[u8; 32]>,
+    /// The old long-lived pairing secret.
     psk: Zeroizing<[u8; 32]>,
     pub(crate) closed: AtomicBool,
     accepting: Mutex<()>,
     pending: Mutex<Option<TcpStream>>,
     /// Nonzero: accept only this protocol version, as builds before 5 did.
     pub(crate) exact_version: AtomicU32,
+    /// Approved devices. None: only the old handshake, as builds before
+    /// per-device keys; tests use it to stand in for such a host.
+    devices: Option<DeviceStore>,
+    /// The current one-time code's secret, in memory only, and its expiry.
+    pairing: Mutex<Option<(Zeroizing<[u8; 32]>, Instant)>>,
 }
 impl Listener {
     pub(crate) fn bind(
@@ -796,7 +998,140 @@ impl Listener {
             accepting: Mutex::new(()),
             pending: Mutex::new(None),
             exact_version: AtomicU32::new(0),
+            devices: None,
+            pairing: Mutex::new(None),
         })
+    }
+    /// A listener that approves devices from `devices`.
+    pub(crate) fn with_devices(mut self, devices: DeviceStore) -> Self {
+        self.devices = Some(devices);
+        self
+    }
+    /// A new one-time code's secret, replacing any earlier one; it works once,
+    /// within PAIRING_LIFETIME.
+    pub(crate) fn new_pairing_secret(&self) -> Result<Zeroizing<[u8; 32]>> {
+        if self.devices.is_none() {
+            return Err(Error::Invalid);
+        }
+        let mut secret = Zeroizing::new([0_u8; 32]);
+        getrandom::fill(&mut *secret).map_err(|_| Error::Internal)?;
+        *lock(&self.pairing)? = Some((secret.clone(), Instant::now() + PAIRING_LIFETIME));
+        Ok(secret)
+    }
+    #[cfg(test)]
+    pub(crate) fn expire_pairing(&self) {
+        if let Some((_, expires)) = self.pairing.lock().unwrap().as_mut() {
+            *expires = Instant::now();
+        }
+    }
+    /// The old handshake: allowed while this Mac still accepts its old code.
+    fn accept_legacy(
+        &self,
+        socket: &TcpStream,
+        first: &[u8],
+        end: Instant,
+    ) -> Result<(StatelessTransportState, u32)> {
+        let now = unix_now();
+        if let Some(devices) = &self.devices
+            && !devices.load()?.legacy.is_open(now)
+        {
+            return Err(Error::Auth);
+        }
+        let noise = builder()?
+            .local_private_key(&*self.private)
+            .map_err(|_| Error::Auth)?
+            .psk(0, &self.psk)
+            .map_err(|_| Error::Auth)?
+            .prologue(PROLOGUE)
+            .map_err(|_| Error::Auth)?
+            .build_responder()
+            .map_err(|_| Error::Auth)?;
+        let exact = match self.exact_version.load(Ordering::Acquire) {
+            0 => None,
+            only => Some(only),
+        };
+        let result = handshake(noise, socket, false, end, PROTOCOL_MAX, exact, Some(first))?;
+        if let Some(devices) = &self.devices {
+            // Bookkeeping for Settings; a full disk doesn't refuse the Mac.
+            let _ = devices.old_code_used(now);
+        }
+        Ok(result)
+    }
+    /// A per-device handshake. Nothing is approved or used up until the
+    /// viewer has proved fresh keys, and that happens before the host's last
+    /// answer: a viewer that finished the handshake was approved.
+    fn accept_device(
+        &self,
+        socket: &TcpStream,
+        mode: Mode,
+        end: Instant,
+    ) -> Result<(StatelessTransportState, u32, String)> {
+        let devices = self.devices.as_ref().ok_or(Error::Auth)?;
+        let now = unix_now();
+        let psk: Option<Zeroizing<[u8; 32]>> = match mode {
+            Mode::Pair => {
+                let pairing = lock(&self.pairing)?;
+                let (secret, expires) = pairing.as_ref().ok_or(Error::Auth)?;
+                if Instant::now() >= *expires {
+                    return Err(Error::Auth);
+                }
+                Some(secret.clone())
+            }
+            Mode::Migrate if devices.load()?.legacy.is_open(now) => Some(self.psk.clone()),
+            Mode::Device => None,
+            Mode::Migrate | Mode::Legacy => return Err(Error::Auth),
+        };
+        let pattern = if psk.is_some() {
+            PAIRING_PATTERN
+        } else {
+            DEVICE_PATTERN
+        };
+        let prologue = mode_prologue(mode);
+        let mut builder = Builder::new(pattern.parse().map_err(|_| Error::Internal)?)
+            .local_private_key(&*self.private)
+            .map_err(|_| Error::Auth)?
+            .prologue(&prologue)
+            .map_err(|_| Error::Auth)?;
+        if let Some(psk) = &psk {
+            builder = builder.psk(1, psk).map_err(|_| Error::Auth)?;
+        }
+        let noise = builder.build_responder().map_err(|_| Error::Auth)?;
+        let (crypto, version, id) = device_respond(
+            noise,
+            socket,
+            end,
+            PROTOCOL_MAX,
+            |key, _| match mode {
+                // A returning Mac must be approved before the host answers.
+                Mode::Device => Ok(Some(devices.approved(key)?.ok_or(Error::Auth)?)),
+                _ => Ok(None),
+            },
+            |approved, key, name| match (mode, approved) {
+                (Mode::Pair, _) => {
+                    let id = devices.approve(key, name, Via::Code, now)?;
+                    // Used: the code approves one Mac. A newer code stays.
+                    let mut pairing = lock(&self.pairing)?;
+                    if pairing
+                        .as_ref()
+                        .zip(psk.as_ref())
+                        .is_some_and(|((current, _), used)| **current == **used)
+                    {
+                        *pairing = None;
+                    }
+                    Ok(id)
+                }
+                (Mode::Migrate, _) => devices.approve(key, name, Via::Migrated, now),
+                (_, Some(device)) => {
+                    // Removed meanwhile: refused. Noting the visit is only
+                    // bookkeeping, so a full disk doesn't refuse the Mac.
+                    devices.approved(key)?.ok_or(Error::Auth)?;
+                    let _ = devices.seen(&device.id, name, now);
+                    Ok(device.id)
+                }
+                _ => Err(Error::Auth),
+            },
+        )?;
+        Ok((crypto, version, id))
     }
     fn close(&self) {
         self.closed.store(true, Ordering::Release);
@@ -828,24 +1163,30 @@ impl Listener {
             if self.closed.load(Ordering::Acquire) {
                 return Err(Error::Closed);
             }
-            let noise = builder()?
-                .local_private_key(&*self.private)
-                .map_err(|_| Error::Auth)?
-                .psk(0, &self.psk)
-                .map_err(|_| Error::Auth)?
-                .prologue(PROLOGUE)
-                .map_err(|_| Error::Auth)?
-                .build_responder()
-                .map_err(|_| Error::Auth)?;
-            let exact = match self.exact_version.load(Ordering::Acquire) {
-                0 => None,
-                only => Some(only),
+            // The first record is either a per-device mode or the old
+            // handshake's first message.
+            let mut first = [0_u8; 1024];
+            let size = read_record(&socket, &mut first, end, &mut 0)?;
+            let mode = self
+                .devices
+                .as_ref()
+                .and_then(|_| parse_mode_hello(&first[..size]));
+            let (crypto, version, device) = match mode {
+                Some(mode) => {
+                    let (crypto, version, id) = self.accept_device(&socket, mode, end)?;
+                    (crypto, version, Some(id))
+                }
+                None => {
+                    let (crypto, version) = self.accept_legacy(&socket, &first[..size], end)?;
+                    (crypto, version, None)
+                }
             };
-            let (crypto, version) = handshake(noise, &socket, false, end, PROTOCOL_MAX, exact)?;
             if self.closed.load(Ordering::Acquire) {
                 return Err(Error::Closed);
             }
-            Session::new(socket, crypto, Role::Host, version).established(end)
+            Session::new(socket, crypto, Role::Host, version)
+                .with_peer_device(device)
+                .established(end)
         })();
         lock(&self.pending)?.take();
         result
@@ -964,6 +1305,139 @@ pub(crate) fn connect(
     }
 }
 
+/// Connects with a saved pairing or a pasted code, using this Mac's device
+/// key and name:
+/// - a one-time code approves the device key (pair);
+/// - a device pairing proves it (device);
+/// - an old pairing moves over once (migrate), or, with a sharing Mac from
+///   before per-device keys, which closes on the mode record, uses the old
+///   handshake (legacy).
+///
+/// A host that refuses this Mac closes without answering, reported as Auth.
+/// `name` is this computer's name; it is made valid rather than refused.
+///
+/// Returns the session and the mode that succeeded, so the caller can save a
+/// device pairing after pair or migrate.
+pub(crate) fn connect_paired(
+    host: &str,
+    port: u16,
+    code: &PairingCode,
+    device_private: &[u8; 32],
+    name: &str,
+    end: Instant,
+) -> Result<(Arc<Session>, Mode)> {
+    let name = local_name(name);
+    let (mode, psk) = match code.kind {
+        CodeKind::OneTime => (Mode::Pair, Some(&code.secret)),
+        CodeKind::Device => (Mode::Device, None),
+        CodeKind::Legacy => (Mode::Migrate, Some(&code.secret)),
+    };
+    match connect_mode(
+        host,
+        port,
+        &code.public_key,
+        mode,
+        psk,
+        device_private,
+        &name,
+        end,
+    ) {
+        Ok(session) => Ok((session, mode)),
+        // A host from before per-device keys closes on the mode record. One
+        // that answered is new: no fallback, so a dropped connection can't
+        // turn a move-over into the old handshake.
+        Err((Reached::Unanswered, Error::Auth | Error::Closed | Error::Protocol))
+            if mode == Mode::Migrate =>
+        {
+            // Either host refuses the old handshake by closing: an old one for
+            // a wrong code, a new one once the old code stopped.
+            connect(host, port, &code.public_key, &code.secret, end)
+                .map(|session| (session, Mode::Legacy))
+                .map_err(|error| match error {
+                    Error::Closed => Error::Auth,
+                    other => other,
+                })
+        }
+        Err((_, error)) => Err(error),
+    }
+}
+
+/// How far a per-device attempt got before it failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reached {
+    /// No connection.
+    Nothing,
+    /// Connected, but the host never answered the first message.
+    Unanswered,
+    /// The host answered.
+    Answered,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn connect_mode(
+    host: &str,
+    port: u16,
+    public: &[u8; 32],
+    mode: Mode,
+    psk: Option<&[u8; 32]>,
+    device_private: &[u8; 32],
+    name: &str,
+    end: Instant,
+) -> std::result::Result<Arc<Session>, (Reached, Error)> {
+    #[cfg(test)]
+    let offer = TEST_OFFER.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    let offer = PROTOCOL_MAX;
+    if port == 0 {
+        return Err((Reached::Nothing, Error::Invalid));
+    }
+    let mut last = Error::Io;
+    for address in resolve(host, port, end).map_err(|error| (Reached::Nothing, error))? {
+        let socket = match TcpStream::connect_timeout(
+            &address,
+            remaining(end).map_err(|error| (Reached::Nothing, error))?,
+        ) {
+            Ok(socket) => socket,
+            Err(error) => {
+                last = io_error(error);
+                continue;
+            }
+        };
+        let prologue = mode_prologue(mode);
+        let noise = (|| -> Result<HandshakeState> {
+            let pattern = if psk.is_some() {
+                PAIRING_PATTERN
+            } else {
+                DEVICE_PATTERN
+            };
+            let mut builder = Builder::new(pattern.parse().map_err(|_| Error::Internal)?)
+                .local_private_key(device_private)
+                .map_err(|_| Error::Auth)?
+                .remote_public_key(public)
+                .map_err(|_| Error::Auth)?
+                .prologue(&prologue)
+                .map_err(|_| Error::Auth)?;
+            if let Some(psk) = psk {
+                builder = builder.psk(1, psk).map_err(|_| Error::Auth)?;
+            }
+            builder.build_initiator().map_err(|_| Error::Auth)
+        })()
+        .map_err(|error| (Reached::Nothing, error))?;
+        write_record(&socket, &mode_hello(mode), end)
+            .map_err(|error| (Reached::Unanswered, error))?;
+        let (crypto, version) = device_initiate(noise, &socket, end, offer, name)?;
+        // The host recorded any approval before its last answer, so the
+        // session is returned even if it drops now: the caller then saves
+        // what was approved and finds it closed.
+        let session = Arc::new(Session::new(socket, crypto, Role::Viewer, version));
+        if session.hello(end).is_err() {
+            session.close();
+        }
+        return Ok(session);
+    }
+    Err((Reached::Nothing, last))
+}
+
 /// On failure, also says whether a TCP connection reached the handshake.
 pub(crate) fn connect_offering(
     host: &str,
@@ -1000,8 +1474,8 @@ pub(crate) fn connect_offering(
                 .map_err(|_| Error::Auth)
         })()
         .map_err(|error| (false, error))?;
-        let (crypto, version) =
-            handshake(noise, &socket, true, end, offer, None).map_err(|error| (true, error))?;
+        let (crypto, version) = handshake(noise, &socket, true, end, offer, None, None)
+            .map_err(|error| (true, error))?;
         return Session::new(socket, crypto, Role::Viewer, version)
             .established(end)
             .map_err(|error| (true, error));

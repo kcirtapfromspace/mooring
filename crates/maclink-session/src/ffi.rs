@@ -5,8 +5,9 @@
 
 use crate::clipboard::{self, ClipboardKind, MAX_CLIPBOARD, MAX_CLIPBOARD_BYTES, MAX_ITEMS};
 use crate::control::{ControlMessage, DisplayGeometry};
+use crate::devices::{DeviceStore, LegacyAction, Via};
 use crate::input::{InputEvent, InputReducer, MAX_RELEASES, keeps_local};
-use crate::pairing::{PairingCode, normalize_address};
+use crate::pairing::{CodeKind, PairingCode, normalize_address};
 use crate::peers::{MAX_PEERS, Peer, PeerStore};
 use crate::policy::{RECONNECT_DELAYS, RECONNECT_STABLE, reconnect_delay};
 use crate::telemetry::{
@@ -272,6 +273,29 @@ pub struct MLPairingCode {
     pub peer_id: [c_char; ML_PEER_ID_CAPACITY],
     pub public_key: [u8; 32],
     pub secret: [u8; 32],
+    /// ML_PAIRING_* : old code, one-time code or device pairing.
+    pub kind: u8,
+}
+/// A Mac approved to connect to this one: its ID (hex SHA-256 of its device
+/// key), name, when it paired and last connected (Unix seconds), and how it
+/// was approved (ML_DEVICE_VIA_*).
+#[repr(C)]
+pub struct MLDevice {
+    pub paired: u64,
+    pub last_seen: u64,
+    pub id: [c_char; ML_PEER_ID_CAPACITY],
+    pub name: [c_char; ML_TEXT_CAPACITY],
+    pub via: u8,
+}
+/// Whether Macs paired before per-device keys may still connect, until when
+/// (0: no end set) and when one last did (0: never).
+#[repr(C)]
+#[derive(Default)]
+pub struct MLLegacyState {
+    pub accepted: u8,
+    pub reserved: [u8; 7],
+    pub closes_at: u64,
+    pub last_used: u64,
 }
 #[repr(C)]
 pub struct MLPeer {
@@ -348,12 +372,19 @@ const _: () = {
     assert!(offset_of!(MLSessionMessage, video) == 8);
     assert!(offset_of!(MLSessionMessage, input) == 104);
     assert!(offset_of!(MLSessionMessage, control) == 152);
-    assert!(size_of::<MLPairingCode>() == 641);
+    assert!(size_of::<MLPairingCode>() == 642);
+    assert!(offset_of!(MLPairingCode, kind) == 641);
     assert!(offset_of!(MLPairingCode, name) == 256);
     assert!(offset_of!(MLPairingCode, peer_id) == 512);
     assert!(offset_of!(MLPairingCode, public_key) == 577);
     assert!(offset_of!(MLPairingCode, secret) == 609);
     assert!(size_of::<MLPeer>() == 577);
+    assert!(
+        size_of::<MLDevice>() == 344
+            && offset_of!(MLDevice, id) == 16
+            && offset_of!(MLDevice, via) == 337
+    );
+    assert!(size_of::<MLLegacyState>() == 24 && offset_of!(MLLegacyState, closes_at) == 8);
     assert!(offset_of!(MLPeer, name) == 65);
     assert!(offset_of!(MLPeer, address) == 321);
 };
@@ -365,6 +396,7 @@ impl MLPairingCode {
         peer_id: [0; ML_PEER_ID_CAPACITY],
         public_key: [0; 32],
         secret: [0; 32],
+        kind: 0,
     };
 }
 impl MLPeer {
@@ -584,16 +616,18 @@ fn code_out(code: &PairingCode, out: &mut MLPairingCode) -> Result<()> {
     write_text(&mut out.peer_id, &code.peer_id())?;
     out.public_key = code.public_key;
     out.secret = code.secret;
+    out.kind = code.kind as u8;
     Ok(())
 }
 /// Strictly re-validates a code that crossed the boundary; its peer ID is
 /// always recomputed from the public key.
 fn code_in(raw: &MLPairingCode) -> Result<PairingCode> {
-    PairingCode::new(
+    PairingCode::of_kind(
         &read_text(&raw.address)?,
         &read_text(&raw.name)?,
         raw.public_key,
         raw.secret,
+        CodeKind::from_raw(raw.kind)?,
     )
 }
 fn peer_out(peer: &Peer, out: &mut MLPeer) -> Result<()> {
@@ -649,6 +683,113 @@ unsafe fn text(pointer: *const c_char) -> Result<String> {
 }
 /// # Safety
 /// As for `text`; null selects the default MacLink support directory.
+unsafe fn device_store(directory: *const c_char) -> Result<DeviceStore> {
+    if directory.is_null() {
+        return DeviceStore::default_location();
+    }
+    let path = unsafe { text(directory)? };
+    if path.is_empty() {
+        return Err(Error::Invalid);
+    }
+    Ok(DeviceStore::new(PathBuf::from(path)))
+}
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+// Approved devices on the sharing Mac. A null directory selects MACLINK_HOME
+// or Application Support.
+
+/// Creates the device list if missing. `accept_old_code` is 1 for a Mac that
+/// already shared before per-device keys, so its paired Macs can move over.
+/// # Safety
+/// `directory` null or NUL terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_devices_init(directory: *const c_char, accept_old_code: u8) -> i32 {
+    ffi(|| unsafe { device_store(directory)? }.init(accept_old_code == 1))
+}
+/// Capacity must be at least ML_DEVICES_MAX.
+/// # Safety
+/// `directory` null or NUL terminated; `out` writable for `capacity` devices;
+/// `count` and `legacy` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_devices_load(
+    directory: *const c_char,
+    out: *mut MLDevice,
+    capacity: usize,
+    count: *mut usize,
+    legacy: *mut MLLegacyState,
+) -> i32 {
+    ffi(|| {
+        let count = unsafe { output(count)? };
+        let legacy = unsafe { output(legacy)? };
+        *count = 0;
+        *legacy = MLLegacyState::default();
+        if out.is_null() || capacity < ML_DEVICES_MAX {
+            return Err(Error::Invalid);
+        }
+        let state = unsafe { device_store(directory)? }.load()?;
+        // SAFETY: caller promises `capacity` writable devices.
+        let slots = unsafe { std::slice::from_raw_parts_mut(out, capacity) };
+        for (slot, device) in slots.iter_mut().zip(&state.devices) {
+            *slot = MLDevice {
+                paired: device.paired,
+                last_seen: device.last_seen,
+                id: [0; ML_PEER_ID_CAPACITY],
+                name: [0; ML_TEXT_CAPACITY],
+                via: match device.via {
+                    Via::Code => 1,
+                    Via::Migrated => 2,
+                },
+            };
+            write_text(&mut slot.id, &device.id)?;
+            write_text(&mut slot.name, &device.name)?;
+        }
+        *count = state.devices.len();
+        *legacy = MLLegacyState {
+            accepted: u8::from(state.legacy.accepted),
+            reserved: [0; 7],
+            closes_at: state.legacy.closes_at.unwrap_or(0),
+            last_used: state.legacy.last_used.unwrap_or(0),
+        };
+        Ok(())
+    })
+}
+/// Removes an approved Mac; the caller also ends its session if connected.
+/// # Safety
+/// Strings null (directory) or NUL terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_devices_remove(
+    directory: *const c_char,
+    device_id: *const c_char,
+) -> i32 {
+    ffi(|| {
+        unsafe { device_store(directory)? }.remove(&unsafe { text(device_id)? })?;
+        Ok(())
+    })
+}
+/// ML_LEGACY_STOP_NOW, or ML_LEGACY_ANOTHER_WEEK before the old code has stopped.
+/// # Safety
+/// `directory` null or NUL terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_devices_legacy_action(directory: *const c_char, action: u8) -> i32 {
+    ffi(|| {
+        let action = match action {
+            1 => LegacyAction::StopNow,
+            2 => LegacyAction::AnotherWeek,
+            _ => return Err(Error::Invalid),
+        };
+        unsafe { device_store(directory)? }.legacy_action(action, unix_seconds())
+    })
+}
+/// Reset Pairing: no Mac is approved and the old code is not accepted.
+/// # Safety
+/// `directory` null or NUL terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_devices_reset(directory: *const c_char) -> i32 {
+    ffi(|| unsafe { device_store(directory)? }.reset())
+}
 unsafe fn store(directory: *const c_char) -> Result<PeerStore> {
     if directory.is_null() {
         return PeerStore::default_location();
@@ -746,6 +887,106 @@ pub extern "C" fn ml_session_listener_port(id: u64) -> u16 {
     .ok()
     .flatten()
     .unwrap_or(0)
+}
+/// As ml_session_listen, approving devices from `directory` (null: MACLINK_HOME
+/// or Application Support). Viewers may pair with a one-time code, connect with
+/// an approved device key, or use the old code while it is still accepted.
+/// # Safety
+/// As ml_session_listen; `directory` null or NUL terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_session_listen_devices(
+    bind_host: *const c_char,
+    port: u16,
+    private: *const u8,
+    psk: *const u8,
+    directory: *const c_char,
+    out: *mut u64,
+) -> i32 {
+    ffi(|| {
+        let out = unsafe { output(out)? };
+        *out = 0;
+        let devices = unsafe { device_store(directory)? };
+        let ip = unsafe { text(bind_host)? }
+            .parse::<IpAddr>()
+            .map_err(|_| Error::Invalid)?;
+        let listener = Listener::bind(
+            SocketAddr::new(ip, port),
+            unsafe { key(private)? },
+            unsafe { key(psk)? },
+        )?
+        .with_devices(devices);
+        *out = transport::insert(Handle::Listener(Arc::new(listener)), None)?;
+        Ok(())
+    })
+}
+/// A new one-time code's secret for this listener, replacing any earlier one.
+/// It approves one Mac within ML_PAIRING_LIFETIME_SECONDS and is never saved.
+/// # Safety
+/// `out` must be writable for 32 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_listener_pairing_secret(id: u64, out: *mut u8) -> i32 {
+    ffi(|| {
+        if out.is_null() {
+            return Err(Error::Invalid);
+        }
+        // SAFETY: caller promises 32 writable bytes.
+        let target = unsafe { std::slice::from_raw_parts_mut(out, 32) };
+        target.fill(0);
+        let secret = transport::listener(id)?.new_pairing_secret()?;
+        target.copy_from_slice(&*secret);
+        Ok(())
+    })
+}
+/// Connects with a pasted code or saved pairing (see transport::connect_paired),
+/// proving this Mac's device key. `mode_out` says how (ML_MODE_*): after PAIR
+/// or MIGRATE, save the device pairing from ml_pairing_device.
+/// # Safety
+/// Strings NUL terminated; `code` readable; `device_private` readable for 32
+/// bytes; `out` and `mode_out` writable.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ml_session_connect_paired(
+    address: *const c_char,
+    port: u16,
+    code: *const MLPairingCode,
+    device_private: *const u8,
+    device_name: *const c_char,
+    timeout_ms: u32,
+    out: *mut u64,
+    mode_out: *mut u8,
+) -> i32 {
+    ffi(|| {
+        let out = unsafe { output(out)? };
+        let mode_out = unsafe { output(mode_out)? };
+        *out = 0;
+        *mode_out = 0;
+        let end = deadline(timeout_ms)?;
+        let host = normalize_address(&unsafe { text(address)? })?;
+        let code = code_in(unsafe { input_ref(code)? })?;
+        let private = unsafe { key(device_private)? };
+        let name = unsafe { text(device_name)? };
+        let (session, mode) = transport::connect_paired(&host, port, &code, &private, &name, end)?;
+        *out = transport::insert(Handle::Session(session), None)?;
+        *mode_out = mode as u8;
+        Ok(())
+    })
+}
+/// Host: the approved device on the other end, or an empty string for a Mac
+/// using the old code.
+/// # Safety
+/// `out` must be writable for ML_PEER_ID_CAPACITY bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_session_peer_device(id: u64, out: *mut c_char) -> i32 {
+    ffi(|| {
+        if out.is_null() {
+            return Err(Error::Invalid);
+        }
+        // SAFETY: caller promises ML_PEER_ID_CAPACITY writable bytes.
+        let target = unsafe { &mut *(out as *mut [c_char; ML_PEER_ID_CAPACITY]) };
+        target.fill(0);
+        let session = transport::session(id)?;
+        write_text(target, session.peer_device.as_deref().unwrap_or(""))
+    })
 }
 /// Accept and authenticate one peer before publishing a host session handle.
 /// # Safety
@@ -1249,6 +1490,9 @@ pub const ML_CAPABILITY_CURSOR: u64 = crate::policy::CAPABILITY_CURSOR;
 pub const ML_CAPABILITY_GESTURES: u64 = crate::policy::CAPABILITY_GESTURES;
 pub const ML_CAPABILITY_AUDIO: u64 = crate::policy::CAPABILITY_AUDIO;
 pub const ML_CAPABILITY_LATENCY: u64 = crate::policy::CAPABILITY_LATENCY;
+pub const ML_DEVICES_MAX: usize = crate::devices::MAX_DEVICES;
+pub const ML_PAIRING_LIFETIME_SECONDS: u64 = transport::PAIRING_LIFETIME.as_secs();
+pub const ML_LEGACY_GRACE_SECONDS: u64 = crate::devices::LEGACY_GRACE_SECONDS;
 pub const ML_CAPABILITY_VERSION: u64 = crate::policy::CAPABILITY_VERSION;
 pub const ML_CAPABILITY_REMOTE_UPDATE: u64 = crate::policy::CAPABILITY_REMOTE_UPDATE;
 pub const ML_RELEASE_CAPACITY: usize = 64;
@@ -1458,7 +1702,8 @@ pub unsafe extern "C" fn ml_address_normalize(
         write_text(target, &normalize_address(&unsafe { text(address)? })?)
     })
 }
-/// The sharing Mac's own code. The computer name is normalized, never rejected.
+/// The sharing Mac's own code, of `kind` ML_PAIRING_LEGACY or
+/// ML_PAIRING_ONE_TIME. The computer name is normalized, never rejected.
 /// # Safety
 /// Strings are NUL terminated, keys readable for 32 bytes, `out` writable.
 #[unsafe(no_mangle)]
@@ -1467,6 +1712,7 @@ pub unsafe extern "C" fn ml_pairing_code_for_host(
     computer_name: *const c_char,
     public_key: *const u8,
     secret: *const u8,
+    kind: u8,
     out: *mut MLPairingCode,
 ) -> i32 {
     ffi(|| {
@@ -1477,11 +1723,29 @@ pub unsafe extern "C" fn ml_pairing_code_for_host(
             &unsafe { text(computer_name)? },
             *unsafe { key(public_key)? },
             *unsafe { key(secret)? },
+            CodeKind::from_raw(kind)?,
         )?;
         code_out(&code, out)
     })
 }
-/// Writes the NUL-terminated `MLP1.` text. Capacity must be at least 2049.
+/// The saved pairing once this Mac is approved: the same sharing Mac,
+/// without a secret.
+/// # Safety
+/// `code` readable; `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_pairing_device(
+    code: *const MLPairingCode,
+    out: *mut MLPairingCode,
+) -> i32 {
+    ffi(|| {
+        let out = unsafe { output(out)? };
+        *out = MLPairingCode::EMPTY;
+        let device = code_in(unsafe { input_ref(code)? })?.device();
+        code_out(&device, out)
+    })
+}
+/// Writes the NUL-terminated `MLP1.` or `MLP2.` text. Capacity must be at
+/// least 2049; a device pairing is not a code.
 /// # Safety
 /// `code` readable; `out` writable for `capacity` bytes.
 #[unsafe(no_mangle)]
@@ -1497,7 +1761,7 @@ pub unsafe extern "C" fn ml_pairing_code_encode(
         // SAFETY: caller promises `capacity` writable bytes.
         let target = unsafe { &mut *(out as *mut [c_char; ML_PAIRING_CODE_CAPACITY]) };
         target.fill(0);
-        let encoded = code_in(unsafe { input_ref(code)? })?.encode();
+        let encoded = code_in(unsafe { input_ref(code)? })?.encode()?;
         write_text(target, &encoded)
     })
 }
@@ -1533,7 +1797,7 @@ pub unsafe extern "C" fn ml_pairing_credential_encode(
         if out.is_null() || capacity < ML_CREDENTIAL_CAPACITY {
             return Err(Error::Invalid);
         }
-        let bytes = code_in(unsafe { input_ref(code)? })?.credential();
+        let bytes = code_in(unsafe { input_ref(code)? })?.credential()?;
         if bytes.len() > capacity {
             return Err(Error::Internal);
         }

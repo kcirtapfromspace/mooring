@@ -1,14 +1,16 @@
 //! Experimental authenticated duplex session for the MacLink LAN prototype.
 //!
-//! Noise NKpsk0 pins the responder identity and requires an out-of-band random
-//! 32-byte pairing secret. `snow` is MIT OR Apache-2.0 and explicitly reports no
+//! Noise IK pins the responder identity and proves each viewer's own key, which
+//! the host approves once with a one-time secret (IKpsk1). Hosts that shared
+//! before per-device keys also accept, for a while, the older NKpsk0 handshake
+//! with its long-lived 32-byte pairing secret. `snow` is MIT OR Apache-2.0 and explicitly reports no
 //! formal audit: https://github.com/mcginty/snow. This crate is not an audited
 //! transport. No cryptographic primitives are implemented here.
 //!
 //! Rust owns the session protocol: sockets, framing, deadlines, typed wire
 //! formats and their validation, per-role direction and rate policy, the host's
-//! held-input state, shared-clipboard validation, pairing codes, and saved peer
-//! metadata. Swift owns Apple media/input/pasteboard APIs, Keychain storage,
+//! held-input state, shared-clipboard validation, pairing codes, saved peer
+//! metadata, and the host's approved devices. Swift owns Apple media/input/pasteboard APIs, Keychain storage,
 //! caller buffers and the UI. Nothing listens automatically.
 
 mod audio;
@@ -16,7 +18,9 @@ mod clipboard;
 mod clock;
 mod control;
 mod cursor;
+mod devices;
 pub mod ffi;
+mod files;
 mod flow;
 mod input;
 mod pairing;

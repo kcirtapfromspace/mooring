@@ -6,6 +6,12 @@ struct MacLinkSettingsState {
     var sharesAutomatically = false
     var sharesClipboard = true
     var keyboardAndMouseAllowed = false
+    /// Macs approved to connect to this one, nil if the list couldn't be
+    /// read; the one viewing now ("" when it used the old code); and whether
+    /// the old pairing code still works.
+    var devices: [NativeDevice]? = []
+    var connectedDeviceID: String?
+    var legacy = NativeLegacyState()
     var matchesScreen = true
     var playsSound = true
     var lowersDisplayLatency = false
@@ -34,6 +40,9 @@ private final class FlippedView: NSView {
 final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
     var onChange: ((MacLinkSetting, Bool) -> Void)?
     var onRemovePeer: ((NativePeer) -> Void)?
+    var onRemoveDevice: ((NativeDevice) -> Void)?
+    var onStopOldCode: (() -> Void)?
+    var onExtendOldCode: (() -> Void)?
     var onShareThisMac: (() -> Void)?
     var onAllowKeyboardAndMouse: (() -> Void)?
     var onCheckForUpdates: (() -> Void)?
@@ -51,6 +60,11 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
     private let playsSound = NSButton(checkboxWithTitle: "Play sound from the shared Mac", target: nil, action: nil)
     private let lowersDisplayLatency = NSButton(checkboxWithTitle: "Lower display latency (may tear)", target: nil, action: nil)
     private let peerList = stack([], spacing: 8)
+    private let deviceList = stack([], spacing: 8)
+    private let legacyNote = label("", size: 12, color: .secondaryLabelColor)
+    private let stopOldCode = NSButton(title: "Stop Now…", target: nil, action: nil)
+    private let extendOldCode = NSButton(title: "Another Week", target: nil, action: nil)
+    private lazy var legacyRow = stack([legacyNote, stack([stopOldCode, extendOldCode], orientation: .horizontal, spacing: 8)], spacing: 6)
     private let launchesAtLogin = NSButton(checkboxWithTitle: "Launch MacLink at login", target: nil, action: nil)
     private let loginNote = label("Approve MacLink in System Settings → General → Login Items.", size: 12, color: .secondaryLabelColor)
     private let version = label("", size: 13)
@@ -81,7 +95,11 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
             button.identifier = NSUserInterfaceItemIdentifier("\(setting)")
             button.setAccessibilityLabel(button.title)
         }
-        for button in [allowKeyboardAndMouse, updateButton] { button.bezelStyle = .rounded; button.target = self }
+        for button in [allowKeyboardAndMouse, updateButton, stopOldCode, extendOldCode] { button.bezelStyle = .rounded; button.target = self }
+        for button in [stopOldCode, extendOldCode] { button.controlSize = .small }
+        stopOldCode.action = #selector(stopOld)
+        extendOldCode.action = #selector(extendOld)
+        extendOldCode.toolTip = "Keep accepting the old code for seven days from now."
         allowKeyboardAndMouse.action = #selector(allowKeys)
         updateButton.action = #selector(updates)
     }
@@ -113,6 +131,9 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
             option(sharesAutomatically, "Starts when MacLink opens and resumes after sleep or lock."),
             option(sharesClipboard, "Items that password managers mark as private are never shared."),
             stack([keyboardAndMouse, allowKeyboardAndMouse], spacing: 6),
+            label("Macs that can connect to this Mac", size: 12, weight: .medium),
+            deviceList,
+            legacyRow,
             share
         ])
         let viewing = section("Viewing another Mac", nil, [
@@ -188,6 +209,64 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
             updateButton.isHidden = false; updateButton.title = "Install Now & Relaunch"
         }
         rebuildPeers()
+        rebuildDevices()
+    }
+
+    private static let dates: DateFormatter = {
+        let formatter = DateFormatter(); formatter.dateStyle = .medium; formatter.timeStyle = .short; return formatter
+    }()
+    private static let days: DateFormatter = {
+        let formatter = DateFormatter(); formatter.dateStyle = .medium; formatter.timeStyle = .none; return formatter
+    }()
+    private static func ago(_ date: Date) -> String {
+        date > Date().addingTimeInterval(-60) ? "just now" : RelativeDateTimeFormatter().localizedString(for: date, relativeTo: Date())
+    }
+
+    private func rebuildDevices() {
+        deviceList.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        guard let devices = state.devices else {
+            deviceList.addArrangedSubview(hint("The list of approved Macs couldn't be read. No Mac can connect until it can."))
+            legacyRow.isHidden = true
+            return
+        }
+        if devices.isEmpty {
+            deviceList.addArrangedSubview(hint("None yet. Copy a pairing code in Share This Mac, then paste it into Connect with MacLink on the other Mac."))
+        }
+        for device in devices {
+            let connected = device.id == state.connectedDeviceID
+            let name = label(String(device.name.prefix(60)) + (connected ? " · connected now" : ""), size: 13)
+            var detail = "Paired \(Self.days.string(from: device.paired))"
+            if device.migrated { detail += " from the old code" }
+            if !connected { detail += " · last connected \(Self.ago(device.lastSeen))" }
+            let remove = NSButton(title: "Remove…", target: self, action: #selector(removeDevice(_:)))
+            remove.bezelStyle = .rounded; remove.controlSize = .small
+            remove.identifier = NSUserInterfaceItemIdentifier(device.id)
+            remove.toolTip = "Stop this Mac from connecting until it pairs again."
+            let row = stack([stack([name, label(detail, size: 11, color: .secondaryLabelColor)], spacing: 2), NSView(), remove],
+                            orientation: .horizontal, spacing: 10)
+            deviceList.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: deviceList.widthAnchor).isActive = true
+        }
+        let legacy = state.legacy
+        legacyRow.isHidden = !legacy.accepted
+        guard legacy.accepted else { return }
+        var note: String
+        switch legacy.closesAt {
+        case nil:
+            note = "Macs paired with an earlier MacLink still connect with the old pairing code. Each gets its own key the next time "
+                + "it connects, and the old code stops a week after the first one does."
+        case let closes? where legacy.isOpen:
+            note = "Macs paired with an earlier MacLink can use the old pairing code until \(Self.dates.string(from: closes)). "
+                + "Each gets its own key the next time it connects. Check that every Mac above is yours."
+        case let closes?:
+            note = "The old pairing code stopped working \(Self.dates.string(from: closes)). "
+                + "A Mac that didn't get its own key by then needs a new code."
+        }
+        if let used = legacy.lastUsed { note += " Last used \(Self.ago(used))." }
+        legacyNote.stringValue = note
+        stopOldCode.isHidden = !legacy.isOpen
+        // Without an end date there's nothing to extend, and once past it, it stays stopped.
+        extendOldCode.isHidden = legacy.closesAt == nil || !legacy.isOpen
     }
 
     private func rebuildPeers() {
@@ -230,6 +309,32 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
             if response == .alertFirstButtonReturn { self?.onRemovePeer?(peer) }
         }
     }
+    @objc private func removeDevice(_ sender: NSButton) {
+        guard let window, let device = state.devices?.first(where: { $0.id == sender.identifier?.rawValue }) else { return }
+        let connected = device.id == state.connectedDeviceID
+        let alert = NSAlert()
+        alert.messageText = "Remove \(device.name)?"
+        alert.informativeText = (connected ? "It disconnects now. " : "")
+            + "It can't connect to this Mac again until you pair it with a new code."
+        alert.addButton(withTitle: "Remove"); alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            if response == .alertFirstButtonReturn { self?.onRemoveDevice?(device) }
+        }
+    }
+    @objc private func stopOld() {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Stop accepting the old pairing code?"
+        alert.informativeText = "Macs that haven't connected since you updated will need a new pairing code. "
+            + (state.connectedDeviceID == "" ? "The Mac using it now disconnects. " : "") + "This can't be undone."
+        alert.addButton(withTitle: "Stop Now"); alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            if response == .alertFirstButtonReturn { self?.onStopOldCode?() }
+        }
+    }
+    @objc private func extendOld() { onExtendOldCode?() }
     func windowDidBecomeKey(_ notification: Notification) { onAppear?() }
     @objc private func allowKeys() { onAllowKeyboardAndMouse?() }
     @objc private func shareThisMac() { onShareThisMac?() }

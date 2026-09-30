@@ -364,6 +364,47 @@ For `v0.3.0-preview.19`, each Mac tells the other its MacLink version, and a vie
 
 Between two Macs, the update request needs preview 19 or later on both, and is first useful when preview 20 is published.
 
+## Per-Mac pairing keys
+
+For `v0.3.0-preview.20`, each viewing Mac has its own Noise static key, and the sharing Mac approves keys rather than sharing one secret.
+
+- **Handshakes.** A 16-byte plain-text mode record precedes the first Noise message. The mode is also bound into the prologue (`MacLink direct session v2` plus the mode byte):
+  - pair: `Noise_IKpsk1_25519_ChaChaPoly_BLAKE2s` with a one-time secret;
+  - device: `Noise_IK_25519_ChaChaPoly_BLAKE2s` with an approved key;
+  - migrate: IKpsk1 with the old long-lived secret, while the sharing Mac still accepts it.
+
+  Anything else is read as the old `Noise_NKpsk0` first message. A sharing Mac from before this version reads the mode record that way, fails, and closes; the viewer then uses the old handshake with the old code.
+- **Refusal.** An unknown key, or a wrong, used, replaced or expired code, is refused on the first message, before the sharing Mac sends anything. The viewer reports such a close as an authentication failure, which stops reconnecting.
+- **Approval.** The sharing Mac records an approval or uses up a code only after the viewer's key confirmation, and before its own. A viewer that finished the handshake was approved, and an unfinished one approves no one.
+- **One-time codes.** Held only in the listener's memory, zeroized. They work for 10 minutes, once; a newer code replaces an unused one. The code text is `MLP2.` and is never saved: the viewer saves a device pairing with the sharing Mac's public key and no secret.
+- **The old code.** It is accepted only on a sharing Mac whose identity existed before this version. It closes a week after the first Mac moves over, or at once with **Stop Now**, which also ends a session using it. A new identity, or **Reset Pairing**, never accepts it. Reset clears the approved list before making the new identity.
+- **The list.** `native-devices.json` holds IDs (SHA-256 of the public key), public keys, names and times, at most 32 entries. It follows the peer list's rules: owner-only, bounded, strict, atomic, locked, never overwritten when unreadable. An unreadable list refuses every per-device and old-code connection.
+- **Local checks.**
+  - The Rust suite runs the full matrix over loopback:
+    - an old viewer while the old code is accepted, then after it stops;
+    - moving over once, then connecting as a device;
+    - falling back to a sharing Mac without a list;
+    - one-time codes that are used, replaced, guessed or expired;
+    - a copied device pairing on another key;
+    - removal and reset;
+    - a mode changed in transit between pair and migrate, and an unknown mode.
+
+    Three mutations were each caught:
+    - a prologue without the mode;
+    - codes that never expire;
+    - falling back after the host answered.
+  - The Swift session suite pairs, reconnects and is refused after removal over loopback, with a temporary list.
+- **Security review.** A focused review found nothing critical or high. Fixed before release:
+  - A Migrate that failed after the sharing Mac answered fell back to the old handshake, so a reset in the network path could discard an approval already recorded. It now falls back only when the host never answered. A session whose connection drops after the last answer is returned closed, so the viewer saves what was approved. The test fills the old code's approvals so the host refuses after answering; allowing the fallback fails it.
+  - A session committed in Rust but not yet started in the app survived **Remove** and **Stop Now**. The app now re-checks the list before each session starts. `approve` refuses a move-over, under the lock, once the old code has stopped.
+  - A lost list reopened the old code for an existing identity. The Keychain identity now notes that it keeps a list, so a lost list starts closed.
+  - The old code could approve all 32 slots. It now approves at most 8.
+  - **Another Week** could revive an expired old code; it now requires the code to still be open. Settings reports raw acceptance and the end date, so it can say when the code stopped.
+  - A failed last-seen write refused an approved Mac. Removal is now checked by a read, and the write is bookkeeping.
+  - Two FFI calls now clear their outputs before anything can fail.
+- **Known limit.** The viewer can't tell a refusal from a close injected in the network path before the first answer. Either one stops automatic reconnecting, with a message to pair again; **Reconnect** tries again. Nothing is deleted.
+- **Between two Macs.** Moving over, removal ending a live session, and pairing with a one-time code are checked by hand (TESTING.md step 8).
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

@@ -13,10 +13,21 @@ time on both sides of the boundary.
 
 ## Pairing
 
-Pairing supplies a pinned responder public key and an independent 32-byte random
-PSK out of band. A code is `MLP1.` followed by strict padded base64 of a JSON object
-with exactly `version` (1), `address`, `name`, `publicKey` and `secret`. Keychain
-credentials hold the same JSON, so pairings saved by earlier builds remain readable.
+Each viewing Mac has its own Noise static key; the sharing Mac approves keys. A
+one-time code supplies the sharing Mac's public key and a 32-byte random secret
+that approves one key, once, within ten minutes. It is `MLP2.` followed by strict
+padded base64 of a JSON object with exactly `version` (2), `address`, `name`,
+`publicKey` and `secret`. The secret lives only in the listener's memory, and a newer
+code replaces an unused one. After approval the viewer saves a device pairing: the
+same fields at `version` 3 with no secret. Codes from before per-device keys are
+`MLP1.` at `version` 1 with the sharing Mac's long-lived secret. Keychain credentials
+hold the same JSON, so pairings saved by earlier builds remain readable.
+
+The sharing Mac's approved devices (`native-devices.json`) hold each key's ID,
+public key, name, and when it paired and last connected, at most 32, with the peer
+list's file conventions. The same file says whether the long-lived secret is still
+accepted: only on a sharing Mac whose identity existed before per-device keys, and
+until a week after the first Mac moves over, or until stopped. Reset clears it.
 Addresses use the project's single host rule (`maclink_platform::validate_host`) and
 are normalized. Names are 1–160 UTF-8 bytes without control or format characters;
 the sharing Mac's own computer name is normalized rather than rejected. A peer ID is
@@ -31,7 +42,21 @@ earlier preference list is imported once.
 
 ## Transport
 
-The protocol is `Noise_NKpsk0_25519_ChaChaPoly_BLAKE2s` with prologue
+A per-device connection starts with a 16-byte plain-text record,
+`maclink-mode/2 ` and a mode byte: 1 pairs with a one-time code
+(`Noise_IKpsk1_25519_ChaChaPoly_BLAKE2s`, the secret at position 1), 2 connects
+with an approved key (`Noise_IK_25519_ChaChaPoly_BLAKE2s`), and 3 moves a
+long-lived pairing over (IKpsk1 with the old secret). The prologue is
+`MacLink direct session v2` followed by the mode byte, so the mode can't change in
+transit. The viewer's first payload is its protocol offer, a NUL and its computer
+name. The sharing Mac refuses an unknown key, or a wrong secret, before it answers.
+It records an approval, or uses up a code, after the viewer's `client-ready/1` and
+before its own `server-ready/1`. It closes without a reason, which the viewer
+reports as an authentication failure. A sharing Mac from before per-device keys
+closes on the mode record, and a viewer holding an old pairing then uses the old
+handshake.
+
+The old handshake is `Noise_NKpsk0_25519_ChaChaPoly_BLAKE2s` with prologue
 `MacLink direct session v1`. Each handshake payload is `maclink-session/3`, which
 names the application message formats; mismatched builds fail the handshake. Both
 peers then confirm fresh transport keys with encrypted `client-ready/1` and

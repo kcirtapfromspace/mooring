@@ -1085,6 +1085,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
                 do { try self.native.forget(peerID: peer.id) } catch { self.showSettingsError(error.localizedDescription) }
                 self.refreshSettings()
             }
+            controller.onRemoveDevice = { [weak self] device in
+                guard let self else { return }
+                do { try self.native.removeDevice(device.id) } catch { self.showSettingsError(error.localizedDescription) }
+                self.refreshSettings()
+            }
+            controller.onStopOldCode = { [weak self] in
+                guard let self else { return }
+                do { try self.native.stopOldCode() } catch { self.showSettingsError(error.localizedDescription) }
+                self.refreshSettings()
+            }
+            controller.onExtendOldCode = { [weak self] in
+                guard let self else { return }
+                do { try self.native.extendOldCode() } catch { self.showSettingsError(error.localizedDescription) }
+                self.refreshSettings()
+            }
             controller.onShareThisMac = { [weak self] in self?.native.showShare() }
             controller.onAllowKeyboardAndMouse = { [weak self] in self?.native.allowKeyboardAndMouse() }
             controller.onCheckForUpdates = { [weak self] in self?.updater.checkForUpdates() }
@@ -1114,6 +1129,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         state.sharesAutomatically = native.sharesAutomatically
         state.sharesClipboard = native.sharesClipboard
         state.keyboardAndMouseAllowed = native.keyboardAndMouseAllowed
+        let approved = native.approvedDevices()
+        state.devices = approved?.devices
+        state.legacy = approved?.legacy ?? NativeLegacyState()
+        state.connectedDeviceID = native.connectedDeviceID
         state.matchesScreen = native.matchesScreen
         state.playsSound = native.playsSound
         state.lowersDisplayLatency = native.lowersDisplayLatency

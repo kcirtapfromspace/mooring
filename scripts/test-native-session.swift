@@ -1,8 +1,9 @@
 // Swift session-boundary checks. Pairing, address, control and peer-store rules
 // are Rust's (cargo test -p maclink-session); these cover the Swift wrappers.
-// No Keychain access, accepted peer, packet traffic, live capture, input
-// injection, or permission request. A loopback-only ephemeral listener is closed
-// immediately to test channel queue state safely; peers use a temporary folder.
+// No Keychain access, live capture, input injection, or permission request.
+// Pairing runs over a loopback-only ephemeral listener with a temporary device
+// list; another is closed immediately to test channel queue state safely;
+// peers use a temporary folder.
 // Clipboard checks use a private, uniquely named pasteboard, never the user's.
 // Built and run by scripts/test-native.sh, which links the arm64 Rust static library.
 import AppKit
@@ -41,6 +42,75 @@ enum NativeSessionTests {
         while delivered.value == 0 && ProcessInfo.processInfo.systemUptime < deadline {
             RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
         }
+    }
+    final class Slot<T>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: T?
+        var value: T? {
+            get { lock.lock(); defer { lock.unlock() }; return stored }
+            set { lock.lock(); stored = newValue; lock.unlock() }
+        }
+    }
+    /// Connects while the listener accepts once: the viewer's result and the
+    /// host's session, nil when the host refused.
+    static func connectOnce(_ listener: NativeTransport, _ code: NativePairingCode, _ key: NativeDeviceKey)
+        -> (Result<(NativeTransport, NativeTransport.Mode), Error>, NativeTransport?) {
+        let host = Slot<NativeTransport>()
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { host.value = try? listener.accept(); done.signal() }
+        let viewer = Result { try NativeTransport.connect(address: "127.0.0.1", code: code, deviceKey: key,
+                                                          deviceName: "MacBook Pro", port: listener.listeningPort) }
+        done.wait()
+        return (viewer, host.value)
+    }
+    static func refused(_ result: Result<(NativeTransport, NativeTransport.Mode), Error>) -> Bool {
+        if case .failure(let error) = result { return (error as? NativeSessionError)?.isAuthenticationFailure == true }
+        return false
+    }
+    /// A one-time code approves this Mac's key, the saved pairing connects by
+    /// it, and a removed Mac is refused. Loopback and a temporary list only.
+    static func testDevicePairing() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("maclink-devices-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let devices = NativeDeviceStore(directory: folder.path)
+        try devices.prepare(acceptOldCode: false)
+        let identity = try NativeHostIdentity.create()
+        let listener = try NativeTransport.listen(identity: identity, devices: devices, bindAddress: "127.0.0.1", port: 0)
+        defer { listener.close() }
+        let code = try NativePairingCode.forHost(address: "127.0.0.1", computerName: "Studio", identity: identity,
+                                                 oneTimeSecret: listener.newPairingSecret())
+        let key = try NativeDeviceKey.create()
+
+        let (paired, host) = connectOnce(listener, code, key)
+        let (viewer, mode) = try paired.get()
+        let id = host?.peerDevice ?? ""
+        try require(mode == .pair && mode.approvedKey && id.count == 64, "A one-time code approves this Mac's key")
+        let approved = try devices.load()
+        try require(approved.devices.map(\.id) == [id] && approved.devices.first?.name == "MacBook Pro"
+                    && approved.devices.first?.migrated == false && !approved.legacy.accepted,
+                    "The sharing Mac lists the approved Mac by name")
+        viewer.close(); host?.close()
+        let (reused, reusedHost) = connectOnce(listener, code, try NativeDeviceKey.create())
+        try require(refused(reused) && reusedHost == nil && (try devices.load().devices.count) == 1, "A used code is refused")
+
+        let saved = try code.device()
+        let (returning, returningHost) = connectOnce(listener, saved, key)
+        let (again, againMode) = try returning.get()
+        try require(againMode == .device && !againMode.approvedKey && returningHost?.peerDevice == id,
+                    "The saved pairing connects as the approved Mac")
+        again.close(); returningHost?.close()
+        try require(returningHost?.peerDevice == nil, "A closed session names no Mac")
+
+        let file = try String(contentsOf: folder.appendingPathComponent("native-devices.json"), encoding: .utf8)
+        for sensitive in [key.privateKey, identity.privateKey, identity.secret, code.secret] {
+            try require(!file.contains(sensitive.base64EncodedString()), "The device list holds no private key or secret")
+        }
+        try devices.remove(id)
+        let (removed, removedHost) = connectOnce(listener, saved, key)
+        try require(refused(removed) && removedHost == nil, "A removed Mac is refused")
+        try devices.reset()
+        try require(try devices.load().devices.isEmpty, "Reset approves no one")
     }
     /// Clock placement and latency arithmetic; no session or display.
     static func testLatency() throws {
@@ -105,7 +175,7 @@ enum NativeSessionTests {
     static func main() {
         do {
             try run()
-            print("Native session tests passed: \(checks) checks; Rust pairing, peer store, control and display boundaries, cancellation, bounded delivery, diagnostics and the shared clipboard. Loopback listener only; no packets, Keychain, capture, or input access.")
+            print("Native session tests passed: \(checks) checks; Rust pairing, per-Mac keys over loopback, peer store, control and display boundaries, cancellation, bounded delivery, diagnostics and the shared clipboard. Loopback only; no Keychain, capture, or input access.")
         } catch {
             fputs("Native session tests failed: \(error.localizedDescription)\n", stderr)
             exit(1)
@@ -116,22 +186,31 @@ enum NativeSessionTests {
         let secret = Data((0..<32).map { UInt8($0 + 101) })
         let privateKey = Data((0..<32).map { UInt8($0 + 201) })
         let identity = NativeHostIdentity(privateKey: privateKey, publicKey: publicKey, secret: secret)
-        let code = try NativePairingCode.forHost(address: "Studio.local", computerName: " Studio\u{200D} Mac\n", identity: identity)
+        let code = try NativePairingCode.forHost(address: "Studio.local", computerName: " Studio\u{200D} Mac\n", identity: identity,
+                                                 oneTimeSecret: secret)
         try require(code.address == "studio.local" && code.name == "Studio Mac", "Rust normalizes this Mac's address and name")
-        try require(code.publicKey == publicKey && code.secret == secret, "Pairing code carries exact credentials")
+        try require(code.publicKey == publicKey && code.secret == secret && code.kind == .oneTime, "Pairing code carries exact credentials")
         try require(code.peerID.count == 64 && code.peerID.allSatisfy { "0123456789abcdef".contains($0) },
                     "Peer ID is a fixed lowercase public-key fingerprint")
         let encoded = try code.encoded()
         let decoded = try NativePairingCode.parse(" \n\t" + encoded + "\r\n ")
-        try require(decoded.address == code.address && decoded.name == code.name && decoded.peerID == code.peerID
-                     && decoded.secret == secret, "Pairing text round-trips through Rust")
-        let restored = try NativePairingCode.fromCredential(code.credential())
-        try require(restored.peerID == code.peerID && restored.secret == secret, "Keychain credentials round-trip through Rust")
+        try require(encoded.hasPrefix("MLP2.") && decoded.address == code.address && decoded.name == code.name
+                     && decoded.peerID == code.peerID && decoded.secret == secret && decoded.kind == .oneTime,
+                    "Pairing text round-trips through Rust")
+        try rejects("A one-time code is never saved") { _ = try code.credential() }
+        let device = try code.device()
+        try require(device.kind == .device && device.secret == Data(count: 32) && device.peerID == code.peerID,
+                    "The saved pairing keeps the sharing Mac's key and no secret")
+        try rejects("A saved pairing is no code to share") { _ = try device.encoded() }
+        let restored = try NativePairingCode.fromCredential(device.credential())
+        try require(restored.peerID == code.peerID && restored.kind == .device, "Keychain credentials round-trip through Rust")
         let legacyObject: [String: Any] = ["version": 1, "address": "studio.local", "name": "Studio Mac",
                                            "publicKey": publicKey.base64EncodedString(), "secret": secret.base64EncodedString()]
         let legacy = try NativePairingCode.fromCredential(JSONEncoder().encode(LegacyCredential(object: legacyObject)))
-        try require(legacy.peerID == code.peerID, "Credentials saved by the earlier Swift encoder remain readable")
-        for malformed in ["", "MLP1.not base64!", String(encoded.dropFirst(5)), "MLP2." + String(encoded.dropFirst(5))] {
+        try require(legacy.peerID == code.peerID && legacy.kind == .legacy && legacy.secret == secret,
+                    "Credentials saved by the earlier Swift encoder remain readable")
+        for malformed in ["", "MLP1.not base64!", String(encoded.dropFirst(5)), "MLP1." + String(encoded.dropFirst(5)),
+                          "MLP3." + String(encoded.dropFirst(5))] {
             try rejects("Pairing parser rejects malformed text") { _ = try NativePairingCode.parse(malformed) }
         }
         try rejects("Credential decoder rejects malformed data") { _ = try NativePairingCode.fromCredential(Data("{}".utf8)) }
@@ -150,6 +229,9 @@ enum NativeSessionTests {
         try generated.validate()
         try require(generated.privateKey != generated.publicKey && generated.privateKey != generated.secret,
                     "Identity material is not reused across roles")
+        let earlier = try JSONDecoder().decode(NativeHostIdentity.self, from: JSONEncoder().encode(identity))
+        try require(earlier.listsDevices == nil && generated.listsDevices == true,
+                    "An identity saved by an earlier version may accept its old code; a new one never does")
 
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("maclink-peers-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -184,6 +266,7 @@ enum NativeSessionTests {
 
         try testTelemetry()
         try testClipboard()
+        try testDevicePairing()
 
         let token = NativeRunToken()
         try require(token.isActive, "Run token begins active")
@@ -194,7 +277,8 @@ enum NativeSessionTests {
 
         // A closed local listener gives us a transport wrapper without opening a
         // remote session. Main-queue admission does not use the underlying I/O.
-        let closedTransport = try NativeTransport.listen(identity: generated, bindAddress: "127.0.0.1", port: 0)
+        let closedTransport = try NativeTransport.listen(identity: generated, devices: NativeDeviceStore(directory: folder.path),
+                                                         bindAddress: "127.0.0.1", port: 0)
         try require(closedTransport.listeningPort > 0, "Queue fixture binds only an ephemeral loopback listener")
         closedTransport.close()
         let healthyChannel = NativeSessionChannel(closedTransport)

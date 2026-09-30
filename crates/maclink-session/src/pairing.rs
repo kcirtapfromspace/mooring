@@ -1,10 +1,16 @@
-//! Out-of-band pairing codes and saved peer credentials.
+//! Out-of-band pairing codes and saved peer credentials, in three kinds.
 //!
-//! A code is `MLP1.` + standard padded base64 of a JSON object with exactly
-//! `version` (1), `address`, `name`, `publicKey` and `secret` (both base64 of
-//! 32 bytes). Keychain credentials hold the same JSON without the envelope, so
-//! pairings saved by earlier builds remain readable. The secret is the long-lived
-//! pairing PSK: intermediate copies are zeroized and Debug output omits it.
+//! - An old code, `MLP1.` + standard padded base64 of a JSON object with
+//!   exactly `version` (1), `address`, `name`, `publicKey` and `secret` (both
+//!   base64 of 32 bytes). The secret is the sharing Mac's long-lived pairing
+//!   PSK. Keychain credentials from before per-device keys hold the same JSON
+//!   without the envelope, so they remain readable.
+//! - A one-time code, `MLP2.` and the same fields with `version` 2. Its secret
+//!   approves one new Mac within minutes; it is never saved.
+//! - A saved pairing for an approved Mac: `version` 3 without a secret. The
+//!   viewer's own device key proves who it is.
+//!
+//! Intermediate copies of a secret are zeroized and Debug output omits it.
 
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -13,6 +19,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 pub(crate) const MAX_NAME_BYTES: usize = 160;
 const PREFIX: &str = "MLP1.";
+const ONE_TIME_PREFIX: &str = "MLP2.";
 const MAX_CODE_TEXT: usize = 2048;
 const MAX_CODE_JSON: usize = 1024;
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -58,7 +65,7 @@ pub(crate) fn normalize_address(address: &str) -> Result<String> {
     maclink_platform::validate_host(address).map_err(|_| Error::Invalid)
 }
 
-fn base64_encode(bytes: &[u8]) -> String {
+pub(crate) fn base64_encode(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let value = chunk
@@ -79,7 +86,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 }
 
 /// Strict standard base64: required padding and zero unused bits.
-fn base64_decode(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn base64_decode(text: &str) -> Option<Vec<u8>> {
     let bytes = text.as_bytes();
     if !bytes.len().is_multiple_of(4) {
         return None;
@@ -120,11 +127,36 @@ struct Wire {
     name: String,
     #[serde(rename = "publicKey")]
     public_key: String,
-    secret: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secret: Option<String>,
 }
 impl Drop for Wire {
     fn drop(&mut self) {
-        self.secret.zeroize();
+        if let Some(secret) = self.secret.as_mut() {
+            secret.zeroize();
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum CodeKind {
+    /// From before per-device keys: the secret is the sharing Mac's
+    /// long-lived pairing secret.
+    Legacy = 1,
+    /// Approves one new Mac, briefly; never saved.
+    OneTime = 2,
+    /// A saved pairing for an approved Mac, without a secret.
+    Device = 3,
+}
+impl CodeKind {
+    pub(crate) fn from_raw(value: u8) -> Result<Self> {
+        match value {
+            1 => Ok(Self::Legacy),
+            2 => Ok(Self::OneTime),
+            3 => Ok(Self::Device),
+            _ => Err(Error::Invalid),
+        }
     }
 }
 
@@ -133,7 +165,9 @@ pub(crate) struct PairingCode {
     pub address: String,
     pub name: String,
     pub public_key: [u8; 32],
+    /// All zero for a device pairing.
     pub secret: [u8; 32],
+    pub kind: CodeKind,
 }
 impl Drop for PairingCode {
     fn drop(&mut self) {
@@ -147,25 +181,52 @@ impl std::fmt::Debug for PairingCode {
             .field("address", &self.address)
             .field("name", &self.name)
             .field("peer_id", &self.peer_id())
+            .field("kind", &self.kind)
             .finish_non_exhaustive()
     }
 }
 
 impl PairingCode {
-    /// Strict: every received or saved code must already satisfy these rules.
+    /// An old code or credential, for tests.
+    #[cfg(test)]
     pub(crate) fn new(
         address: &str,
         name: &str,
         public_key: [u8; 32],
         secret: [u8; 32],
     ) -> Result<Self> {
+        Self::of_kind(address, name, public_key, secret, CodeKind::Legacy)
+    }
+    /// A device pairing carries no secret: all zero.
+    pub(crate) fn of_kind(
+        address: &str,
+        name: &str,
+        public_key: [u8; 32],
+        secret: [u8; 32],
+        kind: CodeKind,
+    ) -> Result<Self> {
         validate_name(name)?;
+        if (kind == CodeKind::Device) != (secret == [0; 32]) {
+            return Err(Error::Invalid);
+        }
         Ok(Self {
             address: normalize_address(address)?,
             name: name.to_owned(),
             public_key,
             secret,
+            kind,
         })
+    }
+    /// The saved pairing once this Mac's device key is approved: the same
+    /// sharing Mac, without a secret.
+    pub(crate) fn device(&self) -> Self {
+        Self {
+            address: self.address.clone(),
+            name: self.name.clone(),
+            public_key: self.public_key,
+            secret: [0; 32],
+            kind: CodeKind::Device,
+        }
     }
 
     /// For the sharing Mac's own code: the computer name is normalized.
@@ -174,8 +235,18 @@ impl PairingCode {
         computer_name: &str,
         public_key: [u8; 32],
         secret: [u8; 32],
+        kind: CodeKind,
     ) -> Result<Self> {
-        Self::new(address, &local_name(computer_name), public_key, secret)
+        if kind == CodeKind::Device {
+            return Err(Error::Invalid);
+        }
+        Self::of_kind(
+            address,
+            &local_name(computer_name),
+            public_key,
+            secret,
+            kind,
+        )
     }
 
     /// Lowercase hex SHA-256 of the public key: no secret, name or address.
@@ -186,39 +257,66 @@ impl PairingCode {
             .collect()
     }
 
-    /// The JSON stored in Keychain; also the payload inside a pairing code.
-    pub(crate) fn credential(&self) -> Zeroizing<Vec<u8>> {
+    fn json(&self, version: u32) -> Zeroizing<Vec<u8>> {
         let wire = Wire {
-            version: 1,
+            version,
             address: self.address.clone(),
             name: self.name.clone(),
             public_key: base64_encode(&self.public_key),
-            secret: base64_encode(&self.secret),
+            secret: (self.kind != CodeKind::Device).then(|| base64_encode(&self.secret)),
         };
         Zeroizing::new(
             serde_json::to_vec(&wire).expect("pairing JSON has only string and integer fields"),
         )
     }
-
-    pub(crate) fn from_credential(bytes: &[u8]) -> Result<Self> {
+    /// Parses JSON of exactly `version` into a code of `kind`.
+    fn from_json(bytes: &[u8], version: u32, kind: CodeKind) -> Result<Self> {
         if bytes.len() > MAX_CODE_JSON {
             return Err(Error::Invalid);
         }
         let wire: Wire = serde_json::from_slice(bytes).map_err(|_| Error::Invalid)?;
-        if wire.version != 1 {
+        if wire.version != version {
             return Err(Error::Invalid);
         }
-        Self::new(
+        let secret = match (kind, wire.secret.as_deref()) {
+            (CodeKind::Device, None) => [0; 32],
+            (CodeKind::Legacy | CodeKind::OneTime, Some(secret)) => key(secret)?,
+            _ => return Err(Error::Invalid),
+        };
+        Self::of_kind(
             &wire.address,
             &wire.name,
             key(&wire.public_key)?,
-            key(&wire.secret)?,
+            secret,
+            kind,
         )
     }
 
-    pub(crate) fn encode(&self) -> Zeroizing<String> {
-        let payload = Zeroizing::new(base64_encode(&self.credential()));
-        Zeroizing::new(PREFIX.to_owned() + &payload)
+    /// The JSON stored in Keychain: version 1 for an old pairing, 3 for a
+    /// device pairing. A one-time code is never stored.
+    pub(crate) fn credential(&self) -> Result<Zeroizing<Vec<u8>>> {
+        match self.kind {
+            CodeKind::Legacy => Ok(self.json(1)),
+            CodeKind::Device => Ok(self.json(3)),
+            CodeKind::OneTime => Err(Error::Invalid),
+        }
+    }
+
+    pub(crate) fn from_credential(bytes: &[u8]) -> Result<Self> {
+        Self::from_json(bytes, 1, CodeKind::Legacy)
+            .or_else(|_| Self::from_json(bytes, 3, CodeKind::Device))
+    }
+
+    /// The text a person copies: `MLP1.` for an old code, `MLP2.` for a
+    /// one-time code. A device pairing is not a code.
+    pub(crate) fn encode(&self) -> Result<Zeroizing<String>> {
+        let (prefix, version) = match self.kind {
+            CodeKind::Legacy => (PREFIX, 1),
+            CodeKind::OneTime => (ONE_TIME_PREFIX, 2),
+            CodeKind::Device => return Err(Error::Invalid),
+        };
+        let payload = Zeroizing::new(base64_encode(&self.json(version)));
+        Ok(Zeroizing::new(prefix.to_owned() + &payload))
     }
 
     pub(crate) fn parse(text: &str) -> Result<Self> {
@@ -226,9 +324,15 @@ impl PairingCode {
         if text.len() > MAX_CODE_TEXT {
             return Err(Error::Invalid);
         }
-        let payload = text.strip_prefix(PREFIX).ok_or(Error::Invalid)?;
+        let (payload, version, kind) = if let Some(payload) = text.strip_prefix(PREFIX) {
+            (payload, 1, CodeKind::Legacy)
+        } else if let Some(payload) = text.strip_prefix(ONE_TIME_PREFIX) {
+            (payload, 2, CodeKind::OneTime)
+        } else {
+            return Err(Error::Invalid);
+        };
         let json = Zeroizing::new(base64_decode(payload).ok_or(Error::Invalid)?);
-        Self::from_credential(&json)
+        Self::from_json(&json, version, kind)
     }
 }
 
@@ -282,11 +386,14 @@ pub(crate) mod tests {
     #[test]
     fn codes_round_trip_and_identify_only_the_public_key() {
         let original = code();
-        let parsed =
-            PairingCode::parse(&format!(" \n\t{}\r\n ", original.encode().as_str())).unwrap();
+        let parsed = PairingCode::parse(&format!(
+            " \n\t{}\r\n ",
+            original.encode().unwrap().as_str()
+        ))
+        .unwrap();
         assert_eq!(parsed, original);
         assert_eq!(
-            PairingCode::from_credential(&original.credential()).unwrap(),
+            PairingCode::from_credential(&original.credential().unwrap()).unwrap(),
             original
         );
         let id = original.peer_id();
@@ -325,6 +432,77 @@ pub(crate) mod tests {
             PairingCode::from_credential(legacy.as_bytes()).unwrap(),
             original
         );
+    }
+
+    #[test]
+    fn one_time_codes_and_device_pairings_have_their_own_forms() {
+        let host = code();
+        let once = PairingCode::for_host(
+            "studio.local",
+            "Studio Mac",
+            host.public_key,
+            [9; 32],
+            CodeKind::OneTime,
+        )
+        .unwrap();
+        let text = once.encode().unwrap();
+        assert!(text.starts_with("MLP2."));
+        assert_eq!(PairingCode::parse(&text).unwrap(), once);
+        assert_eq!(
+            once.credential(),
+            Err(Error::Invalid),
+            "a one-time code is never saved"
+        );
+        // Once approved, the saved pairing has no secret and is not a code.
+        let device = once.device();
+        assert_eq!(
+            (device.kind, device.secret, device.peer_id()),
+            (CodeKind::Device, [0; 32], once.peer_id())
+        );
+        let saved = device.credential().unwrap();
+        let json: Value = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(json["version"], 3);
+        assert!(json.get("secret").is_none());
+        assert_eq!(PairingCode::from_credential(&saved).unwrap(), device);
+        assert_eq!(device.encode(), Err(Error::Invalid));
+        // Old credentials still read as old pairings.
+        assert_eq!(
+            PairingCode::from_credential(&host.credential().unwrap())
+                .unwrap()
+                .kind,
+            CodeKind::Legacy
+        );
+        // Kinds and secrets must agree, and envelopes and versions must match.
+        assert_eq!(
+            PairingCode::of_kind("studio.local", "Mac", [1; 32], [0; 32], CodeKind::OneTime),
+            Err(Error::Invalid)
+        );
+        assert_eq!(
+            PairingCode::of_kind("studio.local", "Mac", [1; 32], [5; 32], CodeKind::Device),
+            Err(Error::Invalid)
+        );
+        assert_eq!(
+            PairingCode::for_host("studio.local", "Mac", [1; 32], [0; 32], CodeKind::Device),
+            Err(Error::Invalid)
+        );
+        let mut object: Value = serde_json::from_slice(&host.credential().unwrap()).unwrap();
+        object["version"] = json!(2);
+        assert!(
+            PairingCode::parse(&envelope(&object)).is_err(),
+            "MLP1 carries version 1 only"
+        );
+        assert!(
+            PairingCode::from_credential(&serde_json::to_vec(&object).unwrap()).is_err(),
+            "a one-time code is never a credential"
+        );
+        let mut device_json = json.clone();
+        device_json["secret"] = json!(base64_encode(&[5; 32]));
+        assert!(
+            PairingCode::from_credential(&serde_json::to_vec(&device_json).unwrap()).is_err(),
+            "a device pairing has no secret"
+        );
+        let one_time_payload = &text["MLP2.".len()..];
+        assert!(PairingCode::parse(&format!("MLP1.{one_time_payload}")).is_err());
     }
 
     #[test]
@@ -390,7 +568,10 @@ pub(crate) mod tests {
         let maximum = "é".repeat(80);
         assert_eq!(maximum.len(), MAX_NAME_BYTES);
         let long = PairingCode::new("studio.local", &maximum, [1; 32], [2; 32]).unwrap();
-        assert_eq!(PairingCode::parse(&long.encode()).unwrap().name, maximum);
+        assert_eq!(
+            PairingCode::parse(&long.encode().unwrap()).unwrap().name,
+            maximum
+        );
         for name in [
             "",
             "Mac\nInjected",
@@ -411,13 +592,22 @@ pub(crate) mod tests {
             (truncated.len(), truncated.chars().count()),
             (MAX_NAME_BYTES, 80)
         );
-        assert!(PairingCode::for_host("studio.local", "A\u{200d}B", [1; 32], [2; 32]).is_ok());
+        assert!(
+            PairingCode::for_host(
+                "studio.local",
+                "A\u{200d}B",
+                [1; 32],
+                [2; 32],
+                CodeKind::Legacy
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn parser_rejects_every_invalid_field_and_envelope() {
         let original = code();
-        let object: Value = serde_json::from_slice(&original.credential()).unwrap();
+        let object: Value = serde_json::from_slice(&original.credential().unwrap()).unwrap();
         let replacements = [
             ("version", json!(0)),
             ("version", json!(2)),
@@ -459,13 +649,13 @@ pub(crate) mod tests {
         );
         let duplicate = format!(
             "{{\"version\":1,{}",
-            &String::from_utf8(original.credential().to_vec()).unwrap()[1..]
+            &String::from_utf8(original.credential().unwrap().to_vec()).unwrap()[1..]
         );
         assert!(
             PairingCode::from_credential(duplicate.as_bytes()).is_err(),
             "duplicate fields"
         );
-        let encoded = original.encode();
+        let encoded = original.encode().unwrap();
         for malformed in [
             String::new(),
             format!("MLP2.{}", &encoded[5..]),

@@ -49,6 +49,8 @@ final class NativeSessionCoordinator {
     private let defaults: UserDefaults
     private let keychain = NativeKeychain()
     private let peerStore = NativePeerStore()
+    /// Macs approved to connect to this one.
+    private let deviceStore = NativeDeviceStore()
     private var shareWindow: NativeShareWindow?
     private var pairWindow: NativePairWindow?
     private var viewerWindow: NativeViewerWindow?
@@ -377,10 +379,22 @@ final class NativeSessionCoordinator {
             return
         }
         do {
-            let identity: NativeHostIdentity
+            var identity: NativeHostIdentity
             if let saved = try keychain.hostIdentity() { try saved.validate(); identity = saved }
-            else { identity = try NativeHostIdentity.create(); try keychain.saveHostIdentity(identity) }
-            let listener = try NativeTransport.listen(identity: identity)
+            else {
+                // A new identity approves no Mac: clear any list left from an earlier one first.
+                try deviceStore.reset()
+                identity = try NativeHostIdentity.create(); try keychain.saveHostIdentity(identity)
+            }
+            // A Mac that shared before per-device keys keeps accepting its old
+            // code, so its paired Macs can move over; a new identity never does.
+            try deviceStore.prepare(acceptOldCode: identity.listsDevices != true)
+            if identity.listsDevices != true {
+                var marked = identity; marked.listsDevices = true
+                do { try keychain.saveHostIdentity(marked); identity = marked }
+                catch { NativeLog.session.error("couldn't note the approved-Mac list with this Mac's identity") }
+            }
+            let listener = try NativeTransport.listen(identity: identity, devices: deviceStore)
             let token = NativeRunToken()
             self.listener = listener; sharingToken = token; hostIdentity = identity
             NativeLog.session.notice("sharing started \(automatic ? "automatically" : "by the user", privacy: .public)")
@@ -416,6 +430,13 @@ final class NativeSessionCoordinator {
                     guard let transport = try listener.accept() else { continue }
                     DispatchQueue.main.async {
                         guard let self, token.isActive, self.sharingToken === token, self.hostChannel == nil else { transport.close(); return }
+                        // Removed, or the old code stopped, while it was connecting.
+                        guard self.stillAllowed(transport) else {
+                            transport.close()
+                            NativeLog.session.notice("a connection was withdrawn before it started")
+                            self.acceptNext(listener: listener, token: token)
+                            return
+                        }
                         self.beginHost(transport, sharingToken: token)
                     }
                     return
@@ -439,7 +460,8 @@ final class NativeSessionCoordinator {
         retiredEncoderCounters = NativeEncoderCounters(); hostInputGate.invalidate()
         flowKbps = UInt32(hostTuning.bitrate / 1000); flowState = MLFlowState(); flowLimit.reset()
         let version = channel.transport.protocolVersion
-        NativeLog.session.notice("host session started, protocol \(version)")
+        let proof = transport.peerDevice.map { $0.isEmpty ? "the old pairing code" : "an approved Mac" } ?? "closed"
+        NativeLog.session.notice("host session started, protocol \(version), \(proof, privacy: .public)")
         if !isConnected { clipboard.start(includeCurrent: false) }
         let injector = NativeInputInjector(); hostInjector = injector
         hostAudioGate = NativeAudioSendGate()
@@ -811,29 +833,66 @@ final class NativeSessionCoordinator {
         NativeLog.session.notice("\(role, privacy: .public) session ended: \(reason, privacy: .public)")
     }
 
+    /// A one-time code: it approves one Mac within ten minutes while this
+    /// listener runs, and a newer code replaces it.
     private func pairingCode() throws -> NativePairingCode {
-        guard let identity = hostIdentity, isSharing else { throw NativeSessionError(message: "Start sharing before copying a pairing code.") }
+        guard let identity = hostIdentity, let listener, isSharing else {
+            throw NativeSessionError(message: "Start sharing before copying a pairing code.")
+        }
         let localName = SCDynamicStoreCopyLocalHostName(nil) as String? ?? "localhost"
-        return try NativePairingCode.forHost(address: localName + ".local", computerName: Host.current().localizedName ?? "Mac", identity: identity)
+        return try NativePairingCode.forHost(address: localName + ".local", computerName: NativeDeviceKey.computerName, identity: identity,
+                                             oneTimeSecret: listener.newPairingSecret())
     }
     private func copyPairingCode() {
         do {
             let code = try pairingCode().encoded()
-            // The code carries the long-lived pairing secret. The nspasteboard.org
+            // The code carries a one-time pairing secret. The nspasteboard.org
             // concealed marker asks clipboard managers not to record or display it.
             let item = NSPasteboardItem()
             item.setString(code, forType: .string)
             item.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
             NSPasteboard.general.clearContents(); NSPasteboard.general.writeObjects([item])
-            shareWindow?.detail.stringValue = "Pairing code copied. Paste it into Connect with MacLink on your other Mac."
+            shareWindow?.detail.stringValue = "Pairing code copied. Paste it into Connect with MacLink on your other Mac within 10 minutes, "
+                + "while sharing stays on. It pairs one Mac, once; copying another code replaces it."
         } catch { refreshShare(error.localizedDescription) }
     }
     private func resetPairing() {
         stopSharing(reason: "Pairing reset requested.")
-        do { let identity = try NativeHostIdentity.create(); try keychain.saveHostIdentity(identity); hostIdentity = identity
-            refreshShare("Previous codes no longer work. Start sharing and copy a new code to pair again.")
+        do {
+            // Approvals first: if they can't be cleared, the old identity stays.
+            try deviceStore.reset()
+            let identity = try NativeHostIdentity.create(); try keychain.saveHostIdentity(identity); hostIdentity = identity
+            refreshShare("No Mac can connect until it pairs again. Start sharing and copy a new code.")
         } catch { refreshShare(error.localizedDescription) }
     }
+
+    /// Whether the Mac on `transport` may still connect: its key is still
+    /// listed, or it used the old code and that still works.
+    private func stillAllowed(_ transport: NativeTransport) -> Bool {
+        guard let device = transport.peerDevice, let state = try? deviceStore.load() else { return false }
+        return device.isEmpty ? state.legacy.isOpen : state.devices.contains { $0.id == device }
+    }
+    /// Macs approved to connect to this one, and whether the old code still works.
+    func approvedDevices() -> (devices: [NativeDevice], legacy: NativeLegacyState)? { try? deviceStore.load() }
+    /// The approved Mac viewing this one now; "" when it used the old code.
+    var connectedDeviceID: String? { hostChannel?.transport.peerDevice }
+    /// It can't connect again without a new code, and a live session ends now.
+    func removeDevice(_ id: String) throws {
+        try deviceStore.remove(id)
+        NativeLog.session.notice("an approved Mac was removed")
+        if let channel = hostChannel, channel.transport.peerDevice == id { endHost(reason: "The viewing Mac was removed in Settings.") }
+        refreshShare()
+    }
+    /// The old pairing code stops now, and a Mac using it now is disconnected.
+    func stopOldCode() throws {
+        try deviceStore.stopOldCode()
+        NativeLog.session.notice("the old pairing code was stopped")
+        if let channel = hostChannel, channel.transport.peerDevice == "" {
+            endHost(reason: "This Mac stopped accepting its old pairing code.")
+        }
+        refreshShare()
+    }
+    func extendOldCode() throws { try deviceStore.extendOldCode(); refreshShare() }
 
     func showConnect() {
         if let viewerWindow, isConnected { viewerWindow.showWindow(nil); NSApp.activate(ignoringOtherApps: true); return }
@@ -891,6 +950,8 @@ final class NativeSessionCoordinator {
             endReconnecting(reason: lastViewerEnd.isEmpty ? "Reconnecting stopped for a new pairing." : lastViewerEnd)
         }
         guard let address = NativePairingCode.normalizedAddress(address) else { pairWindow?.error.stringValue = "Enter a hostname or IP address without a port."; return }
+        let deviceKey: NativeDeviceKey
+        do { deviceKey = try keychain.deviceKey() } catch { connectFailed(error, peerID: code.peerID, pairing: pairing); return }
         let attempt = NativeRunToken(), peerID = code.peerID
         connecting = (attempt, peerID, pairing)
         if pairing { pairWindow?.setBusy(true); pairWindow?.error.stringValue = "" }
@@ -900,41 +961,64 @@ final class NativeSessionCoordinator {
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                let transport = try NativeTransport.connect(address: address, code: code)
+                let (transport, mode) = try NativeTransport.connect(address: address, code: code, deviceKey: deviceKey)
                 DispatchQueue.main.async {
                     guard let self, attempt.isActive, self.connecting?.token === attempt else { transport.close(); return }
                     self.connecting = nil
                     if pairing { self.pairWindow?.setBusy(false) }
-                    // A saved pairing is already stored; only a new pairing writes.
+                    NativeLog.session.notice("viewer connected with \(String(describing: mode), privacy: .public)")
+                    // Once the sharing Mac approved this Mac's key, the device
+                    // pairing replaces the code: a one-time code is used up, and
+                    // the old code stops a week after the first Mac moves over.
+                    let saved = mode.approvedKey ? try? code.device() : code
                     guard pairing else {
+                        if mode.approvedKey {
+                            // The next connect moves over again if this can't be saved.
+                            do {
+                                guard let saved else { throw NativeSessionError(message: "Internal error") }
+                                try self.keychain.savePeerCode(saved)
+                            } catch { NativeLog.session.error("the device pairing couldn't be saved; the next connection moves over again") }
+                        }
                         let peer = self.peers.first(where: { $0.id == peerID }) ?? NativePeer(code: code, address: address)
                         self.beginViewer(transport, peer: peer, activate: !automatic)
                         return
                     }
                     do {
+                        guard let saved else { throw NativeSessionError(message: "Internal error") }
                         // Keychain is required to reconnect later. The menu list is a
                         // convenience: an unwritable peer file must not block this session.
-                        try self.keychain.savePeerCode(code)
+                        try self.keychain.savePeerCode(saved)
                         let peer = (try? self.peerStore.remember(code, address: address)) ?? NativePeer(code: code, address: address)
                         self.peers = (try? self.peerStore.load()) ?? self.peers
                         self.pairWindow?.code.stringValue = ""; self.pairWindow?.close()
                         self.beginViewer(transport, peer: peer, activate: true, pairing: true)
-                    } catch { transport.close(); self.connectFailed(error, peerID: peerID, pairing: true) }
+                    } catch {
+                        transport.close()
+                        let used = mode == .pair ? " The code was used; copy a new one on the sharing Mac." : ""
+                        self.connectFailed(NativeSessionError(message: error.localizedDescription + used), peerID: peerID, pairing: true)
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
                     guard let self, attempt.isActive, self.connecting?.token === attempt else { return }
                     self.connecting = nil
                     if pairing { self.pairWindow?.setBusy(false) }
-                    self.connectFailed(error, peerID: peerID, pairing: pairing)
+                    self.connectFailed(error, peerID: peerID, pairing: pairing, kind: code.kind)
                 }
             }
         }
     }
     /// Pairing reports in its form. A window already showing this Mac reports
     /// in place and retries within the budget; a first connect shows an alert.
-    private func connectFailed(_ error: Error, peerID: String, pairing: Bool = false) {
+    private func connectFailed(_ error: Error, peerID: String, pairing: Bool = false, kind: NativePairingCode.Kind? = nil) {
         var message = error.localizedDescription
+        let refused = (error as? NativeSessionError)?.isAuthenticationFailure == true
+        if refused && pairing {
+            message = kind == .oneTime
+                ? "The sharing Mac didn't accept this code. A code works once, on one Mac, within 10 minutes, and a newer code "
+                    + "replaces it. Copy a new code on that Mac and try again."
+                : "The sharing Mac no longer accepts this older code. Copy a new code on that Mac and try again."
+        }
         // Different versions end the handshake without a reason on the other side.
         if [Int32(ML_SESSION_CLOSED), Int32(ML_SESSION_PROTOCOL)].contains((error as? NativeSessionError)?.status ?? 0) {
             message += " If the other Mac runs a different MacLink version, update both Macs."
@@ -947,9 +1031,10 @@ final class NativeSessionCoordinator {
         guard let window = openViewerWindow(for: peerID) else { showError(message); return }
         NativeLog.session.notice("viewer connect failed: \(message, privacy: .public)")
         window.status.stringValue = message
-        if (error as? NativeSessionError)?.isAuthenticationFailure == true {
+        if refused {
             stopReconnecting()
-            window.showEnded(reason: "The sharing Mac did not accept this pairing. Pair again with a new code from that Mac.")
+            window.showEnded(reason: "The sharing Mac no longer accepts this Mac: it was removed there, or its pairing was reset. "
+                             + "Pair again with a new code from that Mac.")
             return
         }
         let reason = lastViewerEnd.isEmpty ? message : lastViewerEnd

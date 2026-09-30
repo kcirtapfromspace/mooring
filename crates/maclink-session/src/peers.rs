@@ -3,22 +3,19 @@
 //! conventions: bounded size, strict validation, owner-only permissions, atomic
 //! replacement, a cross-process lock, and never overwriting a file it cannot read.
 
+use crate::files;
 use crate::pairing::{PairingCode, normalize_address, validate_name};
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
-use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{Read, Write};
+use std::fs::File;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
 
 pub(crate) const MAX_PEERS: usize = 32;
 const FILE_NAME: &str = "native-peers.json";
 const LOCK_NAME: &str = "native-peers.lock";
 const MAX_FILE_BYTES: u64 = 64 * 1024;
-static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,18 +69,9 @@ impl PeerStore {
 
     /// Most recently connected first. A missing file is an empty list.
     pub(crate) fn load(&self) -> Result<Vec<Peer>> {
-        let file = match File::open(self.path()) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-            Err(_) => return Err(Error::Storage),
+        let Some(bytes) = files::read_bounded(&self.path(), MAX_FILE_BYTES)? else {
+            return Ok(vec![]);
         };
-        let mut bytes = Vec::new();
-        file.take(MAX_FILE_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| Error::Storage)?;
-        if bytes.len() as u64 > MAX_FILE_BYTES {
-            return Err(Error::Storage);
-        }
         let document: Document = serde_json::from_slice(&bytes).map_err(|_| Error::Storage)?;
         if document.version != 1 || document.peers.len() > MAX_PEERS {
             return Err(Error::Storage);
@@ -159,63 +147,22 @@ impl PeerStore {
     }
 
     fn lock(&self) -> Result<File> {
-        fs::create_dir_all(&self.directory).map_err(|_| Error::Storage)?;
-        let mut options = OpenOptions::new();
-        options.create(true).truncate(false).read(true).write(true);
-        private_mode(&mut options);
-        let file = options
-            .open(self.directory.join(LOCK_NAME))
-            .map_err(|_| Error::Storage)?;
-        let start = Instant::now();
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(file),
-                Err(TryLockError::WouldBlock) if start.elapsed() < Duration::from_secs(3) => {
-                    std::thread::sleep(Duration::from_millis(20))
-                }
-                Err(TryLockError::WouldBlock) => return Err(Error::Busy),
-                Err(TryLockError::Error(_)) => return Err(Error::Storage),
-            }
-        }
+        files::lock(&self.directory, LOCK_NAME)
     }
 
     fn save(&self, peers: Vec<Peer>) -> Result<()> {
         let mut bytes = serde_json::to_vec_pretty(&Document { version: 1, peers })
             .map_err(|_| Error::Internal)?;
         bytes.push(b'\n');
-        let temporary = self.directory.join(format!(
-            ".native-peers-{}-{}.tmp",
-            std::process::id(),
-            SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        let mut options = OpenOptions::new();
-        options.create_new(true).write(true);
-        private_mode(&mut options);
-        let result = (|| -> std::io::Result<()> {
-            let mut file = options.open(&temporary)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            fs::rename(&temporary, self.path())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result.map_err(|_| Error::Storage)?;
-        // Rename is the commit point; directory sync failure does not undo it.
-        let _ = File::open(&self.directory).and_then(|directory| directory.sync_all());
-        Ok(())
+        files::write_atomic(&self.directory, FILE_NAME, &bytes)
     }
-}
-
-fn private_mode(options: &mut OpenOptions) {
-    use std::os::unix::fs::OpenOptionsExt;
-    options.mode(0o600);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pairing::tests::code;
+    use std::fs;
 
     pub(crate) struct Directory(pub PathBuf);
     impl Directory {
@@ -223,7 +170,7 @@ mod tests {
             let path = std::env::temp_dir().join(format!(
                 "maclink-peers-{}-{}",
                 std::process::id(),
-                SEQUENCE.fetch_add(1, Ordering::Relaxed)
+                files::next_sequence()
             ));
             fs::create_dir(&path).unwrap();
             Self(path)
@@ -292,7 +239,7 @@ mod tests {
         let saved = code();
         directory.store().remember(&saved, "studio.local").unwrap();
         let text = fs::read_to_string(&path).unwrap();
-        let credential = String::from_utf8(saved.credential().to_vec()).unwrap();
+        let credential = String::from_utf8(saved.credential().unwrap().to_vec()).unwrap();
         let object: Value = serde_json::from_str(&credential).unwrap();
         for sensitive in [
             object["secret"].as_str().unwrap(),
