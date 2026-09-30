@@ -13,6 +13,13 @@ final class NativeSharedDisplay {
     /// Points and scale of the display in use; nil when sharing the Mac's own.
     private(set) var size: (width: Int, height: Int, scale: Int)?
 
+    /// True when applying this request would change the display macOS shows.
+    func changes(width: Int, height: Int, scale: Int) -> Bool {
+        guard width > 0, height > 0 else { return virtual != nil }
+        guard let size else { return true }
+        return size != (width, height, scale)
+    }
+
     /// Creates or resizes the virtual display, or releases it for an all-zero
     /// request. Calls `completion` on main once macOS has applied it.
     func apply(width: Int, height: Int, scale: Int, completion: @escaping (Bool) -> Void) {
@@ -37,14 +44,15 @@ final class NativeSharedDisplay {
     /// only, so macOS undoes them if MacLink quits.
     private func configure(width: Int, height: Int, scale: Int, attempt: Int, generation: UInt64,
                            completion: @escaping (Bool) -> Void) {
-        guard generation == self.generation, let id = virtual?.displayID, id != kCGNullDirectDisplay else { return }
-        let modes = CGDisplayCopyAllDisplayModes(id, [kCGDisplayShowDuplicateLowResolutionModes: true] as CFDictionary)
-            as? [CGDisplayMode] ?? []
+        guard generation == self.generation, let virtual else { return }
+        let id = virtual.displayID
+        let modes = id == kCGNullDirectDisplay ? []
+            : CGDisplayCopyAllDisplayModes(id, [kCGDisplayShowDuplicateLowResolutionModes: true] as CFDictionary) as? [CGDisplayMode] ?? []
         let pixelWidth = width * scale, pixelHeight = height * scale
         let wanted = modes.first { (mode: CGDisplayMode) -> Bool in
             mode.width == width && mode.height == height && mode.pixelWidth == pixelWidth && mode.pixelHeight == pixelHeight
         }
-        guard CGDisplayIsOnline(id) != 0, let wanted else {
+        guard id != kCGNullDirectDisplay, CGDisplayIsOnline(id) != 0, let wanted else {
             guard attempt < 30 else { completion(false); return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                 self?.configure(width: width, height: height, scale: scale, attempt: attempt + 1, generation: generation, completion: completion)

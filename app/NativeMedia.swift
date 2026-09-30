@@ -634,7 +634,12 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         encoderLock.lock(); let display = captureDisplay; encoderLock.unlock()
         takeEncoder()?.stop()
         // The captured display went away, as when a virtual display replaces it.
-        if let display, CGMainDisplayID() != display || CGDisplayIsOnline(display) == 0, reportDisplayChange() { return }
+        // ScreenCaptureKit can report that before CoreGraphics shows the change.
+        let nsError = error as NSError
+        let nothingToCapture = nsError.domain == SCStreamErrorDomain && [SCStreamError.Code.noWindowList, .noDisplayList, .noCaptureSource]
+            .map(\.rawValue).contains(nsError.code)
+        if let display, nothingToCapture || CGMainDisplayID() != display || CGDisplayIsOnline(display) == 0,
+           reportDisplayChange() { return }
         onError?("Screen capture stopped: \(error.localizedDescription)")
     }
     /// True if the owner takes display changes; reported at most once per capture.

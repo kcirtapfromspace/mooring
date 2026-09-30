@@ -1,6 +1,6 @@
 # Testing the preview on another Mac
 
-Download `MacLink-v0.3.0-preview.12-macos-arm64.zip` and `SHA256SUMS.txt` from the release while signed in to the GitHub account with repository access. MacLink supports Apple silicon only and requires macOS 14 or later. Apple's High Performance mode additionally requires compatible Macs at both ends. The experimental native session requires this preview on both Macs.
+Download `MacLink-v0.3.0-preview.13-macos-arm64.zip` and `SHA256SUMS.txt` from the release while signed in to the GitHub account with repository access. MacLink supports Apple silicon only and requires macOS 14 or later. Apple's High Performance mode additionally requires compatible Macs at both ends. The experimental native session requires this preview on both Macs.
 
 1. In the download directory, verify the ZIP with `shasum -a 256 -c SHA256SUMS.txt`.
 2. Quit older MacLink copies. Extract the ZIP and replace `MacLink.app` in Applications. Saved Macs and existing configured preferences are preserved.
@@ -29,7 +29,7 @@ Download `MacLink-v0.3.0-preview.12-macos-arm64.zip` and `SHA256SUMS.txt` from t
 12. Updates: the menu bar shows **Check for Updates…**. When the next release is published, leave both Macs idle, with no session connected; within about four hours each should relaunch on the new version by itself. Choosing **Check for Updates…** checks immediately. Report whether an update ever interrupted a session.
 13. **Save Diagnostics…** in the Share window and **Diagnostics…** in the viewer save measurements only. Attach them, or a few telemetry lines, to your report.
 
-The distribution is Developer ID signed, notarized and stapled. macOS may still show its normal first-launch downloaded-app confirmation. If **Apple could not verify MacLink.app** appears, confirm that you opened the extracted 0.3.0 preview 12 app rather than an older copy; do not change Gatekeeper settings. Local development builds are ad hoc by default.
+The distribution is Developer ID signed, notarized and stapled. macOS may still show its normal first-launch downloaded-app confirmation. If **Apple could not verify MacLink.app** appears, confirm that you opened the extracted 0.3.0 preview 13 app rather than an older copy; do not change Gatekeeper settings. Local development builds are ad hoc by default.
 
 ## What to report
 
@@ -50,7 +50,7 @@ All compilation, tests, linting, signing, archive creation and Gatekeeper valida
 ./scripts/ci-local.sh
 MACLINK_CODESIGN_IDENTITY='Developer ID Application: YOUR NAME (TEAM_ID)' \
   MACLINK_NOTARY_PROFILE=MacLink \
-  ./scripts/notarize-release.sh 0.3.0-preview.12
+  ./scripts/notarize-release.sh 0.3.0-preview.13
 ```
 
 The local suite includes 178 Rust tests (10 CLI, 41 core, 18 platform, 109 session), 73 Swift session-parser checks, the defaults/home-state regressions, loopback CLI integration, and the native Swift checks: input boundary, gesture events read back through AppKit and Command key-up dispatch (107 checks), Opus sound encode, decode, playout buffer and send bound, privacy classification, hardware H.264 encode/decode with recovery and the two-frame in-flight bound, session boundary, and an encrypted 1080p loopback stream. Published assets include validation output and checksums.

@@ -236,6 +236,19 @@ The encrypted loopback carries 100 ms of Opus from host to viewer in order after
 
 Capture of real system sound, playback, output device changes and lip sync are checked only between two Macs.
 
+## Viewer-sized display between two Macs
+
+The first real two-Mac run of the viewer-sized display (preview 12 on both Macs) failed. Each session ended about 3 s after it started with "Screen capture stopped: Failed to find any displays or windows to capture", and the viewer reconnected in a loop. ScreenCaptureKit stopped the stream when the virtual display replaced the headless placeholder, before CoreGraphics reported the new main display, so MacLink treated it as fatal.
+
+For `v0.3.0-preview.13`:
+
+- the sharing Mac stops capture itself before changing the display, and captures the display in use once macOS has it ready;
+- ScreenCaptureKit's "no display, window or capture source" errors count as a display change, which restarts capture instead of ending the session;
+- a display that has no ID yet is waited for within the existing 3 s bound;
+- if capture has not resumed 5 s after a change, it resumes on the current main display.
+
+The fix is verified on the two Macs, not by the local suite, which does not change displays.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

@@ -503,15 +503,27 @@ final class NativeSessionCoordinator {
             return
         }
         displayRestartScheduled = true
-        retireCapture()
         // No input lands on a display whose geometry the viewer has not seen.
-        hostGeometryLock.lock(); hostGeometry = nil; hostGeometryLock.unlock()
-        hostInjector?.releaseAll()
+        pauseCaptureForDisplayChange()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self, weak channel] in
             guard let self else { return }
             self.displayRestartScheduled = false
             guard let channel, self.hostChannel === channel, channel.token.isActive, self.capture == nil else { return }
             NativeLog.session.notice("display changed; capturing the new main display")
+            self.startCapture(for: channel)
+        }
+    }
+
+    /// Retires capture and holds input until the viewer has the new geometry.
+    /// Whoever paused resumes capture; if nothing has after 5 s, this does.
+    private func pauseCaptureForDisplayChange() {
+        retireCapture()
+        hostGeometryLock.lock(); hostGeometry = nil; hostGeometryLock.unlock()
+        hostInjector?.releaseAll()
+        guard let channel = hostChannel else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self, weak channel] in
+            guard let self, let channel, self.hostChannel === channel, channel.token.isActive, self.capture == nil else { return }
+            NativeLog.session.notice("display change did not finish; capturing the current main display")
             self.startCapture(for: channel)
         }
     }
@@ -526,13 +538,21 @@ final class NativeSessionCoordinator {
             self.displayRequestScheduled = false
             guard let channel, self.hostChannel === channel, channel.token.isActive, let request = self.pendingDisplayRequest else { return }
             self.pendingDisplayRequest = nil
-            self.sharedDisplay.apply(width: request.width, height: request.height, scale: request.scale) { applied in
+            guard self.sharedDisplay.changes(width: request.width, height: request.height, scale: request.scale) else { return }
+            // Stop capture before the display changes, rather than wait for
+            // ScreenCaptureKit to fail, and capture whichever display is in
+            // use once macOS has it ready.
+            self.pauseCaptureForDisplayChange()
+            self.sharedDisplay.apply(width: request.width, height: request.height, scale: request.scale) { [weak self, weak channel] applied in
+                guard let self else { return }
                 if request.width == 0 {
                     NativeLog.session.notice("sharing this Mac's own display again")
                 } else {
                     NativeLog.session.notice("viewer-sized display \(request.width)×\(request.height) points at \(request.scale)x: \(applied ? "active" : "refused, sharing this Mac's own display", privacy: .public)")
                 }
                 if !applied { self.sharedDisplay.release() }
+                guard let channel, self.hostChannel === channel, channel.token.isActive, self.capture == nil else { return }
+                self.startCapture(for: channel)
             }
         }
     }
