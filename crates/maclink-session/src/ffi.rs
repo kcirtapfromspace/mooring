@@ -136,6 +136,22 @@ pub struct MLCursorMessage {
     pub png_offset: usize,
     pub png_length: usize,
 }
+/// One clock reply: the viewer's send and receive times for the ping, and the
+/// host's time in its reply, all in microseconds of CoreMedia host time.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MLClockSample {
+    pub sent_us: u64,
+    pub received_us: u64,
+    pub host_us: u64,
+}
+/// Host time minus viewer time, and its error bound, in microseconds.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MLClockEstimate {
+    pub offset_us: i64,
+    pub error_us: u64,
+}
 /// A received Opus packet at `payload_offset` in the caller's buffer, with
 /// its sequence number and duration in 48 kHz frames.
 #[repr(C)]
@@ -294,6 +310,8 @@ const _: () = {
     assert!(offset_of!(MLVideoPacket, avcc_length) == 72);
     assert!(offset_of!(MLVideoPacket, vps_offset) == 80);
     assert!(size_of::<MLSessionMessage>() == 872);
+    assert!(size_of::<MLClockSample>() == 24 && offset_of!(MLClockSample, host_us) == 16);
+    assert!(size_of::<MLClockEstimate>() == 16 && offset_of!(MLClockEstimate, error_us) == 8);
     assert!(offset_of!(MLSessionMessage, audio) == 848);
     assert!(size_of::<MLAudioMessage>() == 24);
     assert!(offset_of!(MLAudioMessage, frames) == 4);
@@ -946,6 +964,38 @@ pub unsafe extern "C" fn ml_audio_playout(
         Ok(())
     })
 }
+/// The best clock offset from up to 32 recent samples; INVALID when none is usable.
+/// # Safety
+/// `samples` must be readable for `count` entries and `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_clock_estimate(
+    samples: *const MLClockSample,
+    count: usize,
+    out: *mut MLClockEstimate,
+) -> i32 {
+    ffi(|| {
+        let out = unsafe { output(out)? };
+        if samples.is_null() || count > crate::clock::MAX_SAMPLES {
+            return Err(Error::Invalid);
+        }
+        // SAFETY: caller promises `count` readable samples.
+        let raw = unsafe { std::slice::from_raw_parts(samples, count) };
+        let values: Vec<crate::clock::ClockSample> = raw
+            .iter()
+            .map(|sample| crate::clock::ClockSample {
+                sent_us: sample.sent_us,
+                received_us: sample.received_us,
+                host_us: sample.host_us,
+            })
+            .collect();
+        let estimate = crate::clock::estimate(&values)?;
+        *out = MLClockEstimate {
+            offset_us: estimate.offset_us,
+            error_us: estimate.error_us,
+        };
+        Ok(())
+    })
+}
 /// # Safety
 /// As for `clipboard_items`.
 #[unsafe(no_mangle)]
@@ -1096,6 +1146,7 @@ pub const ML_CAPABILITY_VIRTUAL_DISPLAY: u64 = crate::policy::CAPABILITY_VIRTUAL
 pub const ML_CAPABILITY_CURSOR: u64 = crate::policy::CAPABILITY_CURSOR;
 pub const ML_CAPABILITY_GESTURES: u64 = crate::policy::CAPABILITY_GESTURES;
 pub const ML_CAPABILITY_AUDIO: u64 = crate::policy::CAPABILITY_AUDIO;
+pub const ML_CAPABILITY_LATENCY: u64 = crate::policy::CAPABILITY_LATENCY;
 pub const ML_AUDIO_MAX_PAYLOAD: usize = crate::audio::MAX_AUDIO_PAYLOAD;
 pub const ML_AUDIO_SAMPLE_RATE: u32 = crate::audio::SAMPLE_RATE;
 pub const ML_CODEC_H264: u8 = 1;

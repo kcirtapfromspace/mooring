@@ -38,6 +38,7 @@ Sharing Mac:
 | `sent_mbps`, `frame_kib` | Video sent and average frame size. |
 | `in_flight` | Frames encoding or sending right now (at most `in_flight` tuning). |
 | `bitrate_mbps`, `fps_cap`, `pixel_width`, `pixel_height` | Settings in effect and the capture size. |
+| `capture_ms` | Average time from a screen change reaching this Mac's display to ScreenCaptureKit delivering it (preview 14 and later). |
 
 Viewing Mac:
 
@@ -47,6 +48,10 @@ Viewing Mac:
 | `decode_ms`, `decode_ms_max`, `decoded_fps` | Hardware decode time and rate. |
 | `presented_fps` | Frames that reached the display. |
 | `rtt_ms` | Ping round trip, including the sharing Mac's send queue. Not display latency. |
+| `latency_ms`, `latency_ms_p95` | Median and 95th percentile time from a screen change on the sharing Mac to that frame appearing on this Mac's display, over the last second with frames. Needs preview 14 on both Macs. |
+| `to_viewer_ms` | Median part of that until this Mac starts decoding: capture, encode, sending and the network. |
+| `display_wait_ms` | Median time from decoded to on screen: queueing for the next display refresh and drawing. |
+| `clock_error_ms` | How far off the two Macs' clocks could be placed, half the fastest recent ping round trip. Latency figures are accurate to about this much. |
 | `keyframe_requests`, `decoder_overflows` | Recovery requests, and packets discarded because decoding fell behind. |
 
 ## Session log

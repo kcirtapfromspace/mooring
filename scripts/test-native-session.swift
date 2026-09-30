@@ -42,6 +42,34 @@ enum NativeSessionTests {
             RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01))
         }
     }
+    /// Clock placement and latency arithmetic; no session or display.
+    static func testLatency() throws {
+        let sync = NativeClockSync()
+        let frame = NativeFrameTiming(hostUs: 5_100_000, decodeStartUs: 112_000, decodedUs: 116_000, presentedUs: 130_000)
+        try require(sync.latency(frame) == nil, "No latency before the clocks are placed")
+        // The sharing Mac's clock is 5 s ahead; the queued 40 ms reply is not used.
+        sync.add(sentUs: 0, receivedUs: 40_000, hostUs: 5_030_000)
+        sync.add(sentUs: 50_000, receivedUs: 52_000, hostUs: 5_051_000)
+        try require(sync.estimate?.offsetUs == 5_000_000 && sync.estimate?.errorUs == 1_000, "The fastest round trip places the clocks")
+        let latency = sync.latency(frame)
+        try require(latency?.total == 30 && latency?.toViewer == 12 && latency?.displayWait == 14,
+                    "Latency runs from the host's screen change to this display")
+        try require(sync.latency(NativeFrameTiming(hostUs: 5_200_000, decodeStartUs: 112_000, decodedUs: 116_000, presentedUs: 130_000)) == nil,
+                    "A frame shown before its capture time is not counted")
+        for index in 0..<40 { sync.add(sentUs: UInt64(index) * 1_000_000, receivedUs: UInt64(index) * 1_000_000 + 9_000, hostUs: 0) }
+        try require(sync.estimate?.errorUs == 4_500, "Only the latest 16 replies count")
+        sync.reset()
+        try require(sync.estimate == nil, "A new session starts unplaced")
+        var window = NativeLatencyWindow()
+        try require(window.summary == nil, "No summary without frames")
+        for value in 1...100 { window.add((Double(value), Double(value) / 2, 1)) }
+        let summary = window.summary
+        try require(summary?.p50 == 51 && summary?.p95 == 95 && summary?.toViewer == 25.5 && summary?.displayWait == 1,
+                    "Median and 95th percentile")
+        for _ in 0..<(NativeLatencyWindow.capacity * 2) { window.add((1, 1, 1)) }
+        try require(window.totals.count == NativeLatencyWindow.capacity, "The window is bounded")
+    }
+
     static func main() {
         do {
             try run()
@@ -112,9 +140,10 @@ enum NativeSessionTests {
             try require(!invalid.isValid, "Display bounds come from Rust")
         }
         for message: NativeControlMessage in [.geometry(display, inputEnabled: true), .inputState(enabled: false),
-                                              .ping(0), .pong(UInt64.max), .keyframe] {
+                                              .ping(0), .pong(UInt64.max), .keyframe, .clock(7, hostUs: 0x0123_4567_89AB_CDEF)] {
             try require(try NativeControlMessage(validated: message.raw) == message, "Every control message round-trips the C ABI")
         }
+        try testLatency()
         var unknown = MLControlMessage(); unknown.kind = 9
         try rejects("Unknown control kinds are rejected") { _ = try NativeControlMessage(validated: unknown) }
 

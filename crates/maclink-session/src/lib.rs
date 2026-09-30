@@ -13,6 +13,7 @@
 
 mod audio;
 mod clipboard;
+mod clock;
 mod control;
 mod cursor;
 pub mod ffi;

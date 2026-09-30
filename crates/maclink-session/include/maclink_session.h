@@ -48,6 +48,7 @@ enum {
     ML_METRIC_PIXEL_WIDTH = 15,
     ML_METRIC_PIXEL_HEIGHT = 16,
     ML_METRIC_FPS_CAP = 17,
+    ML_METRIC_CAPTURE_MS = 18, /* host: screen update to the encoder */
     ML_METRIC_RECEIVED_FPS = 32,
     ML_METRIC_RECEIVED_MBPS = 33,
     ML_METRIC_DECODE_MS = 34,
@@ -56,7 +57,14 @@ enum {
     ML_METRIC_PRESENTED_FPS = 37,
     ML_METRIC_RTT_MS = 38,
     ML_METRIC_KEYFRAME_REQUESTS = 39,
-    ML_METRIC_DECODER_OVERFLOWS = 40
+    ML_METRIC_DECODER_OVERFLOWS = 40,
+    /* Viewer, with ML_CAPABILITY_LATENCY: host screen update to this Mac's
+     * display, the part until decoding starts, and waiting to be shown. */
+    ML_METRIC_LATENCY_MS = 41,
+    ML_METRIC_LATENCY_MS_P95 = 42,
+    ML_METRIC_TO_VIEWER_MS = 43,
+    ML_METRIC_DISPLAY_WAIT_MS = 44,
+    ML_METRIC_CLOCK_ERROR_MS = 45
 };
 enum {
     ML_CONTROL_GEOMETRY = 1, ML_CONTROL_INPUT_STATE = 2, ML_CONTROL_PING = 3,
@@ -65,7 +73,11 @@ enum {
     /* Protocol 5, viewer to host: share a display of geometry.width x height
      * points and pixel_width x pixel_height pixels (scale 1 or 2); all zero
      * means the host's own display. Needs ML_CAPABILITY_VIRTUAL_DISPLAY. */
-    ML_CONTROL_DISPLAY_REQUEST = 7
+    ML_CONTROL_DISPLAY_REQUEST = 7,
+    /* protocol 5, host to a viewer with ML_CAPABILITY_LATENCY: a pong carrying
+     * ping_id and the host's time in microseconds of CoreMedia host time, as
+     * geometry.pixel_width (high 32 bits) and pixel_height (low 32 bits). */
+    ML_CONTROL_CLOCK = 8
 };
 enum {
     ML_INPUT_KEY_DOWN = 1, ML_INPUT_KEY_UP = 2, ML_INPUT_POINTER_MOVE = 3,
@@ -105,6 +117,7 @@ enum { ML_CODEC_H264 = 1, ML_CODEC_HEVC = 2 };
 #define ML_CAPABILITY_CURSOR 4ull /* the viewer draws the host's pointer shape */
 #define ML_CAPABILITY_GESTURES 8ull /* the host injects trackpad gestures */
 #define ML_CAPABILITY_AUDIO 16ull /* this Mac encodes and decodes Opus; a viewer plays the host's sound */
+#define ML_CAPABILITY_LATENCY 32ull /* clock replies and latency metrics; peers without it never receive them */
 #define ML_AUDIO_MAX_PAYLOAD 1500u /* bytes in one Opus packet */
 #define ML_AUDIO_SAMPLE_RATE 48000u
 #define ML_RECONNECT_STABLE_SECONDS 20u
@@ -226,6 +239,17 @@ typedef struct {
     size_t png_offset, png_length;
 } MLCursorMessage;
 
+/* One clock reply, in microseconds of CoreMedia host time: when this viewer
+ * sent the ping and received the reply, and the host's time in the reply. */
+typedef struct {
+    uint64_t sent_us, received_us, host_us;
+} MLClockSample;
+/* Host time minus viewer time, and its error bound, in microseconds. */
+typedef struct {
+    int64_t offset_us;
+    uint64_t error_us;
+} MLClockEstimate;
+
 /* A received Opus packet (codec 1) at payload_offset in the caller's buffer:
  * its sequence number, duration in 48 kHz frames (240, 480 or 960) and
  * channel count (1 or 2). */
@@ -311,6 +335,8 @@ _Static_assert(sizeof(MLVideoPacket) == 96 && offsetof(MLVideoPacket, vps_offset
 _Static_assert(offsetof(MLVideoPacket, sps_offset) == 32, "MLVideoPacket.sps_offset layout");
 _Static_assert(offsetof(MLVideoPacket, avcc_length) == 72, "MLVideoPacket.avcc_length layout");
 _Static_assert(sizeof(MLSessionMessage) == 872, "MLSessionMessage layout");
+_Static_assert(sizeof(MLClockSample) == 24 && offsetof(MLClockSample, host_us) == 16, "MLClockSample layout");
+_Static_assert(sizeof(MLClockEstimate) == 16 && offsetof(MLClockEstimate, error_us) == 8, "MLClockEstimate layout");
 _Static_assert(offsetof(MLSessionMessage, audio) == 848, "MLSessionMessage.audio layout");
 _Static_assert(sizeof(MLAudioMessage) == 24 && offsetof(MLAudioMessage, frames) == 4
                && offsetof(MLAudioMessage, codec) == 7 && offsetof(MLAudioMessage, payload_offset) == 8, "MLAudioMessage layout");
@@ -383,6 +409,10 @@ int32_t ml_session_send_audio(uint64_t session, uint32_t sequence, uint16_t fram
  * starts at 40 ms buffered; beyond 150 ms, drop_out oldest frames bring it
  * back to 40 ms. The player sets playing to 0 itself when it runs dry. */
 int32_t ml_audio_playout(uint32_t buffered_frames, uint8_t playing, uint8_t *playing_out, uint32_t *drop_out);
+/* The best host-minus-viewer clock offset from up to 32 recent clock replies:
+ * the shortest round trip wins, and its half is the error bound. INVALID when
+ * no sample is usable (round trips over 1 s are ignored). */
+int32_t ml_clock_estimate(const MLClockSample *samples, size_t count, MLClockEstimate *out);
 /* Pass an ML_SESSION_MAX_VIDEO buffer: video, pointers and sound (to viewers)
  * and clipboard (to either side) arrive in it. TIMEOUT is retryable when no message bytes were
  * read; the deadline bounds only the wait for a new message, and a message

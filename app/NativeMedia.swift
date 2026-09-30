@@ -58,6 +58,40 @@ struct NativeEncodedFrame {
     var sequence: UInt64 { packet.sequence }
 }
 
+/// CoreMedia host time, the clock of capture timestamps and display
+/// presentation times on every Mac, in microseconds.
+enum NativeClock {
+    static var nowUs: UInt64 { microseconds(CMClockGetTime(CMClockGetHostTimeClock()).seconds) }
+    static func microseconds(_ seconds: Double) -> UInt64 {
+        seconds.isFinite && seconds > 0 && seconds < 1e12 ? UInt64(seconds * 1_000_000) : 0
+    }
+}
+
+/// One frame's path: when the screen changed on the sharing Mac (its clock),
+/// and when this Mac started decoding it, finished, and showed it (this
+/// Mac's clock), in microseconds.
+struct NativeFrameTiming: Equatable {
+    let hostUs: UInt64
+    let decodeStartUs: UInt64
+    let decodedUs: UInt64
+    let presentedUs: UInt64
+    fileprivate static let hostKey = "MacLinkHostTimeUs" as CFString
+    fileprivate static let decodeStartKey = "MacLinkDecodeStartUs" as CFString
+    fileprivate static let decodedKey = "MacLinkDecodedUs" as CFString
+    static func attach(_ buffer: CVPixelBuffer, hostUs: UInt64, decodeStartUs: UInt64, decodedUs: UInt64) {
+        for (key, value) in [(hostKey, hostUs), (decodeStartKey, decodeStartUs), (decodedKey, decodedUs)] {
+            CVBufferSetAttachment(buffer, key, NSNumber(value: value), .shouldNotPropagate)
+        }
+    }
+    static func read(_ buffer: CVPixelBuffer) -> (UInt64, UInt64, UInt64)? {
+        func value(_ key: CFString) -> UInt64? {
+            (CVBufferCopyAttachment(buffer, key, nil) as? NSNumber)?.uint64Value
+        }
+        guard let host = value(hostKey), let start = value(decodeStartKey), let decoded = value(decodedKey) else { return nil }
+        return (host, start, decoded)
+    }
+}
+
 struct NativeMediaError: LocalizedError {
     let message: String
     var errorDescription: String? { message }
@@ -495,8 +529,9 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let requestedCodec: NativeVideoCodec
     /// The codec actually in use once capture has started.
     private(set) var codec: NativeVideoCodec = .h264
-    /// Called on the capture queue for each complete captured frame.
-    var onCapturedFrame: (() -> Void)?
+    /// Called on the capture queue for each complete captured frame, with the
+    /// milliseconds from the screen change to its delivery here.
+    var onCapturedFrame: ((Double) -> Void)?
     /// When set, a change of main display or its geometry calls this (once)
     /// instead of onError, so the owner can restart capture on the new display.
     var onDisplayChanged: (() -> Void)?
@@ -678,8 +713,13 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             if !reportDisplayChange() { onError?("Display geometry changed. Reconnect to restore accurate remote input.") }
             return
         }
-        onCapturedFrame?()
-        _ = current.encode(image, presentationTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+        // The display time is when the change reached this Mac's screen; frames
+        // carry it so the viewer can measure the whole path to its display.
+        let displayed = (attachments.first?[.displayTime] as? UInt64).map(CMClockMakeHostTimeFromSystemUnits)
+        let presentationTime = displayed ?? CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let delay = Double(NativeClock.nowUs) / 1000 - Double(NativeClock.microseconds(presentationTime.seconds)) / 1000
+        onCapturedFrame?(max(0, delay))
+        _ = current.encode(image, presentationTime: presentationTime)
     }
 }
 
@@ -807,7 +847,7 @@ final class NativeVideoDecoder {
             var output: CVPixelBuffer?, outputStatus: OSStatus = noErr
             // Both async/temporal flags are clear: Apple guarantees the callback
             // finishes before this call returns. No asynchronous output backlog.
-            let began = ProcessInfo.processInfo.systemUptime
+            let began = ProcessInfo.processInfo.systemUptime, decodeStartUs = NativeClock.nowUs
             result = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: [], infoFlagsOut: nil) { status, flags, image, _, _ in
                 outputStatus = status
                 if !flags.contains(.frameDropped) { output = image }
@@ -817,6 +857,7 @@ final class NativeVideoDecoder {
                 throw NativeMediaError("Hardware video decode failed (\(result)/\(outputStatus)).")
             }
             lastSequence = packet.sequence
+            NativeFrameTiming.attach(output, hostUs: packet.timestamp, decodeStartUs: decodeStartUs, decodedUs: NativeClock.nowUs)
             lock.lock(); let deliver = self.active && !discontinuity; if deliver { consecutiveFailures = 0 }; lock.unlock()
             if deliver { onDecoded?((ProcessInfo.processInfo.systemUptime - began) * 1000); onFrame?(output) }
         } catch { notifyRecovery(error.localizedDescription) }
@@ -877,6 +918,8 @@ class NativeVideoView: MTKView, MTKViewDelegate {
         }
     }
     var onPresented: (() -> Void)?
+    /// Main thread, for each decoded frame once it is on screen.
+    var onFrameTiming: ((NativeFrameTiming) -> Void)?
     static let maxQueued = 2
     static let maxInFlight = 2
     private let frameLock = NSLock()
@@ -953,12 +996,17 @@ class NativeVideoView: MTKView, MTKViewDelegate {
                                        width: width / drawableSize.width * bounds.width, height: height / drawableSize.height * bounds.height)
         } else { displayedVideoRect = .zero }
         context.render(output, to: drawable.texture, commandBuffer: command, bounds: canvas, colorSpace: colorSpace)
-        if next != nil && currentImage != nil {
-            let epoch = presentationEpoch
-            drawable.addPresentedHandler { [weak self] _ in
+        if let next, currentImage != nil {
+            let epoch = presentationEpoch, timing = NativeFrameTiming.read(next)
+            drawable.addPresentedHandler { [weak self] drawable in
+                let presentedUs = NativeClock.microseconds(drawable.presentedTime)
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.presentationEpoch == epoch else { return }
                     self.onPresented?()
+                    if let timing, presentedUs > 0 {
+                        self.onFrameTiming?(NativeFrameTiming(hostUs: timing.0, decodeStartUs: timing.1, decodedUs: timing.2,
+                                                              presentedUs: presentedUs))
+                    }
                 }
             }
         }

@@ -1559,6 +1559,7 @@ const TEST_CAPABILITIES: u64 = ML_CAPABILITY_HEVC_444
     | ML_CAPABILITY_CURSOR
     | ML_CAPABILITY_GESTURES
     | ML_CAPABILITY_AUDIO
+    | ML_CAPABILITY_LATENCY
     | 1 << 40; // plus a bit no build knows
 fn hello(id: u64) -> u64 {
     let mut buffer = vec![0; 4096];
@@ -1957,6 +1958,102 @@ fn playout_rule_crosses_the_c_abi() {
     assert_eq!((playing, drop), (1, 7201 - 1920));
     assert_eq!(
         unsafe { ml_audio_playout(0, 0, std::ptr::null_mut(), &mut drop) },
+        Error::Invalid as i32
+    );
+}
+
+#[test]
+fn clock_replies_and_latency_metrics_reach_only_peers_that_measure() {
+    let clock = MLControlMessage {
+        geometry: MLDisplayGeometry {
+            pixel_width: 267,
+            pixel_height: 3_766_992_022,
+            ..Default::default()
+        },
+        ..control(8, 5)
+    };
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let (viewer, host) = pair_version(5);
+    hello(host.0);
+    assert_eq!(
+        hello(viewer.0) & ML_CAPABILITY_LATENCY,
+        ML_CAPABILITY_LATENCY
+    );
+    assert_eq!(
+        send_control(viewer.0, &clock),
+        Error::Invalid as i32,
+        "viewers never send clock replies"
+    );
+    assert_eq!(send_control(host.0, &clock), 0);
+    let latency = stats_message(&[(1, 60.0), (18, 4.5)]);
+    assert_eq!(
+        unsafe { ml_session_send_telemetry(host.0, &latency, 1000) },
+        0
+    );
+    let mut buffer = vec![0; 4096];
+    let (status, message) = typed(viewer.0, &mut buffer, 2000);
+    let reply = message.control;
+    assert_eq!(
+        (status, message.kind, reply.kind, reply.ping_id),
+        (0, CONTROL, 8, 5)
+    );
+    assert_eq!(
+        u64::from(reply.geometry.pixel_width) << 32 | u64::from(reply.geometry.pixel_height),
+        1_150_523_260_054
+    );
+    let (status, message) = typed(viewer.0, &mut buffer, 2000);
+    assert_eq!(
+        (status, message.telemetry.count),
+        (0, 2),
+        "a peer that measures gets latency metrics"
+    );
+    // Protocol 4 peers announce nothing: no clock replies, and latency metrics
+    // are left out rather than ending the session on an unknown ID.
+    let (old_viewer, old_host) = pair_version(4);
+    assert_eq!(send_control(old_host.0, &clock), Error::Invalid as i32);
+    assert_eq!(
+        unsafe { ml_session_send_telemetry(old_host.0, &latency, 1000) },
+        0
+    );
+    let (status, message) = typed(old_viewer.0, &mut buffer, 2000);
+    assert_eq!(
+        (
+            status,
+            message.kind,
+            message.telemetry.count,
+            message.telemetry.metrics[0].metric
+        ),
+        (0, TELEMETRY, 1, 1)
+    );
+    assert!(!is_closed(old_host.0) && !is_closed(old_viewer.0));
+}
+
+#[test]
+fn clock_estimate_crosses_the_c_abi() {
+    let samples = [
+        MLClockSample {
+            sent_us: 1_000_000,
+            received_us: 1_040_000,
+            host_us: 6_001_000,
+        },
+        MLClockSample {
+            sent_us: 2_000_000,
+            received_us: 2_002_000,
+            host_us: 7_001_000,
+        },
+    ];
+    let mut estimate = MLClockEstimate::default();
+    assert_eq!(
+        unsafe { ml_clock_estimate(samples.as_ptr(), samples.len(), &mut estimate) },
+        0
+    );
+    assert_eq!((estimate.offset_us, estimate.error_us), (5_000_000, 1_000));
+    assert_eq!(
+        unsafe { ml_clock_estimate(samples.as_ptr(), 0, &mut estimate) },
+        Error::Invalid as i32
+    );
+    assert_eq!(
+        unsafe { ml_clock_estimate(samples.as_ptr(), 33, &mut estimate) },
         Error::Invalid as i32
     );
 }

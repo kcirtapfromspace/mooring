@@ -1,7 +1,9 @@
 //! Session control messages. Version 1 wire format, 52 bytes, big-endian:
 //! version:u8 (=1), kind:u8, input_enabled:u8 (0/1), reserved:u8 (=0),
 //! ping_id:u64, x:f64, y:f64, width:f64, height:f64, pixel_width:u32,
-//! pixel_height:u32. Fields a kind does not use must be zero.
+//! pixel_height:u32. Fields a kind does not use must be zero. A clock reply
+//! carries the host's time in microseconds as pixel_width (high 32 bits) and
+//! pixel_height (low 32 bits).
 
 use crate::video::valid_dimensions;
 use crate::{Error, Result};
@@ -52,6 +54,9 @@ pub(crate) enum ControlKind {
     Hello = 6,
     /// Protocol 5, viewer to host: share a display of this size.
     DisplayRequest = 7,
+    /// Protocol 5, host to a viewer that measures latency: a pong that also
+    /// carries the host's clock.
+    Clock = 8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -72,6 +77,13 @@ pub(crate) enum ControlMessage {
     /// carried in the geometry size and pixel fields. All zero asks the host
     /// to share its own display again.
     DisplayRequest(DisplayRequest),
+    /// Answers a ping with the host's clock (CoreMedia host time, in
+    /// microseconds) when it received it, so the viewer can place the host's
+    /// capture timestamps on its own clock.
+    Clock {
+        ping_id: u64,
+        host_us: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -146,6 +158,15 @@ impl ControlMessage {
             7 if !enabled && ping_id == 0 => Self::DisplayRequest(
                 DisplayRequest::from_geometry(&geometry).ok_or(Error::Invalid)?,
             ),
+            8 if !enabled
+                && [geometry.x, geometry.y, geometry.width, geometry.height] == [0.0; 4] =>
+            {
+                Self::Clock {
+                    ping_id,
+                    host_us: u64::from(geometry.pixel_width) << 32
+                        | u64::from(geometry.pixel_height),
+                }
+            }
             _ => return Err(Error::Invalid),
         };
         Ok(message)
@@ -160,6 +181,7 @@ impl ControlMessage {
             Self::Keyframe => ControlKind::Keyframe,
             Self::Hello(_) => ControlKind::Hello,
             Self::DisplayRequest(_) => ControlKind::DisplayRequest,
+            Self::Clock { .. } => ControlKind::Clock,
         }
     }
 
@@ -178,6 +200,15 @@ impl ControlMessage {
             }
             Self::Keyframe => (0, 0, DisplayGeometry::default()),
             Self::DisplayRequest(request) => (0, 0, request.geometry()),
+            Self::Clock { ping_id, host_us } => (
+                0,
+                ping_id,
+                DisplayGeometry {
+                    pixel_width: (host_us >> 32) as u32,
+                    pixel_height: host_us as u32,
+                    ..DisplayGeometry::default()
+                },
+            ),
         }
     }
 
@@ -252,6 +283,14 @@ mod tests {
             ControlMessage::Ping(0),
             ControlMessage::Pong(u64::MAX),
             ControlMessage::Keyframe,
+            ControlMessage::Clock {
+                ping_id: 7,
+                host_us: 0x0001_0203_0405_0607,
+            },
+            ControlMessage::Clock {
+                ping_id: u64::MAX,
+                host_us: u64::MAX,
+            },
         ];
         for message in messages {
             assert_eq!(ControlMessage::decode(&message.encode()).unwrap(), message);
@@ -261,6 +300,36 @@ mod tests {
                 message
             );
         }
+    }
+
+    #[test]
+    fn clock_replies_carry_only_an_id_and_the_host_time() {
+        let clock = ControlMessage::Clock {
+            ping_id: 3,
+            host_us: 1_150_523_260_054,
+        };
+        let (_, id, display) = clock.parts();
+        assert_eq!(
+            (id, display.pixel_width, display.pixel_height),
+            (3, 267, 3_766_992_022)
+        );
+        for change in [
+            |g: &mut DisplayGeometry| g.x = 1.0,
+            |g: &mut DisplayGeometry| g.y = f64::NAN,
+            |g: &mut DisplayGeometry| g.width = 1.0,
+            |g: &mut DisplayGeometry| g.height = -1.0,
+        ] {
+            let mut bad = display;
+            change(&mut bad);
+            assert_eq!(
+                ControlMessage::from_parts(8, 0, 3, bad),
+                Err(Error::Invalid)
+            );
+        }
+        assert_eq!(
+            ControlMessage::from_parts(8, 1, 3, display),
+            Err(Error::Invalid)
+        );
     }
 
     #[test]
@@ -352,7 +421,7 @@ mod tests {
             (6, 1, 3, zero), // hello carries only capabilities
             (6, 0, 3, display),
             (0, 0, 0, zero), // unknown kinds
-            (8, 0, 0, zero),
+            (9, 0, 0, zero),
         ] {
             assert!(ControlMessage::from_parts(kind, enabled, id, value).is_err());
         }

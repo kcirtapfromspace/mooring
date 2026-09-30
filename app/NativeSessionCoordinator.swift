@@ -70,6 +70,11 @@ final class NativeSessionCoordinator {
     private var firstFrame = false
     private var pingSequence: UInt64 = 0
     private var pendingPing: (UInt64, TimeInterval)?
+    /// Viewer: the sharing Mac's clock, and screen-change-to-display latency
+    /// for the status bar (each second) and the log (every 10 s).
+    private let clockSync = NativeClockSync()
+    private var latencySecond = NativeLatencyWindow()
+    private var latencyReport = NativeLatencyWindow()
     private var lastPresented: Double = 0
     private var lastStatusTime: TimeInterval = 0
     private var lastViewerMeasurements: NativeSessionMeasurements?
@@ -409,7 +414,10 @@ final class NativeSessionCoordinator {
             channel.measurements.set("capture_pixel_height", Double(geometry.pixelHeight))
             channel.control(.geometry(geometry, inputEnabled: NativeInputInjector.isTrusted))
         }
-        capture.onCapturedFrame = { [weak channel] in if live.isActive { channel?.measurements.add("captured_frames") } }
+        capture.onCapturedFrame = { [weak channel] delay in
+            guard live.isActive, let channel else { return }
+            channel.measurements.add("captured_frames"); channel.measurements.add("capture_ms_total", delay)
+        }
         capture.onEncodedFrame = { [weak channel] frame, release in
             guard live.isActive, let channel, channel.token.isActive else { release(); return }
             // Per-frame values accumulate across capture restarts; the encoder's
@@ -597,7 +605,12 @@ final class NativeSessionCoordinator {
                         guard channel.token.isActive, allowed.trusted, let g = geometry else { injector.releaseAll(); continue }
                         try injector.apply(event, displayBounds: CGRect(x: g.x, y: g.y, width: g.width, height: g.height))
                     case .control(.ping(let id)):
-                        channel.control(.pong(id))
+                        // A viewer that measures latency also gets this Mac's clock.
+                        if channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_LATENCY) != 0 {
+                            channel.control(.clock(id, hostUs: NativeClock.nowUs))
+                        } else {
+                            channel.control(.pong(id))
+                        }
                     case .control(.keyframe):
                         channel.deliverControl { [weak self, weak channel] in
                             guard let self, let channel, self.hostChannel === channel else { return }
@@ -877,6 +890,7 @@ final class NativeSessionCoordinator {
         let channel = NativeSessionChannel(transport), decoder = NativeVideoDecoder()
         viewerChannel = channel; self.decoder = decoder; lastViewerMeasurements = channel.measurements
         firstFrame = false; viewerInputEnabled = false; pendingPing = nil; lastPresented = 0; lastStatusTime = uptime
+        clockSync.reset(); latencySecond = NativeLatencyWindow(); latencyReport = NativeLatencyWindow()
         drawReportTicks = 0; drawReportDecoded = 0
         observedScreenRequest = nil; sentScreenRequest = nil
         viewerStarted = uptime; reconnectWork?.cancel(); reconnectWork = nil
@@ -941,6 +955,10 @@ final class NativeSessionCoordinator {
         }
         window.setSystemKeysAllowed(keys.start())
         let firstPresentationPending = NativeRunToken()
+        window.video.onFrameTiming = { [weak self, weak channel] timing in
+            guard let self, let channel, self.viewerChannel === channel, let latency = self.clockSync.latency(timing) else { return }
+            self.latencySecond.add(latency); self.latencyReport.add(latency)
+        }
         window.video.onPresented = { [weak self, weak channel] in
             guard let channel, channel.token.isActive else { return }
             channel.measurements.add("presented_frames")
@@ -1043,6 +1061,14 @@ final class NativeSessionCoordinator {
                 channel.measurements.set("network_round_trip_ms", (uptime - outstanding.1) * 1000)
                 pendingPing = nil
             }
+        case .clock(let id, let hostUs):
+            let received = NativeClock.nowUs
+            if let outstanding = pendingPing, id == outstanding.0 {
+                channel.measurements.set("network_round_trip_ms", (uptime - outstanding.1) * 1000)
+                clockSync.add(sentUs: NativeClock.microseconds(outstanding.1), receivedUs: received, hostUs: hostUs)
+                if let estimate = clockSync.estimate { channel.measurements.set("clock_error_ms", Double(estimate.errorUs) / 1000) }
+                pendingPing = nil
+            }
         case .ping, .keyframe, .hello, .displayRequest:
             break
         }
@@ -1093,6 +1119,10 @@ final class NativeSessionCoordinator {
                 NativeLog.session.notice("viewer drawing, last 10 s: \(Int(decoded - self.drawReportDecoded)) decoded, \(draw.summary, privacy: .public)")
             }
             drawReportDecoded = decoded
+            if let latency = latencyReport.summary, let clock = clockSync.estimate {
+                NativeLog.session.notice("viewer latency, last 10 s: \(self.latencyReport.totals.count) frames, median \(Int(latency.p50.rounded())) ms, 95th percentile \(Int(latency.p95.rounded())) ms; median \(Int(latency.toViewer.rounded())) ms until decoding starts, \(Int(latency.displayWait.rounded())) ms from decoded to shown; clocks within \(Int((Double(clock.errorUs) / 1000).rounded(.up))) ms")
+            }
+            latencyReport = NativeLatencyWindow()
             if let player = audioPlayer {
                 let sound = player.snapshot(), previous = audioReported
                 audioReported = sound
@@ -1105,7 +1135,16 @@ final class NativeSessionCoordinator {
                 }
             }
         }
-        let rtt = snapshot["network_round_trip_ms"].map { String(format: "%.0f ms RTT", $0) } ?? "checking connection"
+        let latency = latencySecond.summary
+        latencySecond = NativeLatencyWindow()
+        if let latency {
+            channel.measurements.set("latency_ms", latency.p50); channel.measurements.set("latency_ms_p95", latency.p95)
+            channel.measurements.set("to_viewer_ms", latency.toViewer); channel.measurements.set("display_wait_ms", latency.displayWait)
+        }
+        // Screen change on the sharing Mac to this display, when frames are
+        // flowing and the clocks are placed; otherwise the network round trip.
+        let rtt = latency.map { String(format: "%.0f ms latency", $0.p50) }
+            ?? snapshot["network_round_trip_ms"].map { String(format: "%.0f ms RTT", $0) } ?? "checking connection"
         // The sharing Mac sends frames only when its screen changes, so the rate
         // follows activity there; it is not a cap.
         let rate = fps < 0.5 ? "screen unchanged" : String(format: "%.0f fps as the screen changes", fps)
@@ -1246,6 +1285,7 @@ final class NativeSessionCoordinator {
         stats[.frameKib] = interval.average("sent_video_bytes", per: "sent_video_frames").map { $0 / 1024 }
         stats[.pixelWidth] = interval.values["capture_pixel_width"]
         stats[.pixelHeight] = interval.values["capture_pixel_height"]
+        stats[.captureMs] = interval.average("capture_ms_total", per: "captured_frames")
         return stats
     }
     private func viewerStats(_ interval: NativeInterval) -> NativeStats {
@@ -1257,6 +1297,11 @@ final class NativeSessionCoordinator {
         ]
         stats[.decodeMs] = interval.average("decode_ms_total", per: "decoded_frames")
         stats[.rttMs] = interval.values["network_round_trip_ms"]
+        stats[.latencyMs] = interval.values["latency_ms"]
+        stats[.latencyMsP95] = interval.values["latency_ms_p95"]
+        stats[.toViewerMs] = interval.values["to_viewer_ms"]
+        stats[.displayWaitMs] = interval.values["display_wait_ms"]
+        stats[.clockErrorMs] = interval.values["clock_error_ms"]
         return stats
     }
 

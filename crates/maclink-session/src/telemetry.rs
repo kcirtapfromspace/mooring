@@ -67,6 +67,7 @@ metrics! {
     PixelWidth = 15 => "pixel_width",
     PixelHeight = 16 => "pixel_height",
     FpsCap = 17 => "fps_cap",
+    CaptureMs = 18 => "capture_ms",
     ReceivedFps = 32 => "received_fps",
     ReceivedMbps = 33 => "received_mbps",
     DecodeMs = 34 => "decode_ms",
@@ -76,6 +77,26 @@ metrics! {
     RttMs = 38 => "rtt_ms",
     KeyframeRequests = 39 => "keyframe_requests",
     DecoderOverflows = 40 => "decoder_overflows",
+    LatencyMs = 41 => "latency_ms",
+    LatencyMsP95 = 42 => "latency_ms_p95",
+    ToViewerMs = 43 => "to_viewer_ms",
+    DisplayWaitMs = 44 => "display_wait_ms",
+    ClockErrorMs = 45 => "clock_error_ms",
+}
+
+impl Metric {
+    /// Added with the latency capability; older peers reject these IDs.
+    pub(crate) fn needs_latency(self) -> bool {
+        matches!(
+            self,
+            Self::CaptureMs
+                | Self::LatencyMs
+                | Self::LatencyMsP95
+                | Self::ToViewerMs
+                | Self::DisplayWaitMs
+                | Self::ClockErrorMs
+        )
+    }
 }
 
 /// At most 32 distinct metrics with finite values from 0 to 1e9.

@@ -249,6 +249,24 @@ For `v0.3.0-preview.13`:
 
 The fix is verified on the two Macs, not by the local suite, which does not change displays.
 
+## Latency measurement
+
+For `v0.3.0-preview.14`, the viewer measures, per frame, the time from a screen change on the sharing Mac to that frame appearing on its own display.
+
+- Frames carry ScreenCaptureKit's display time, the moment the change reached the sharing Mac's screen.
+- A sharing Mac answers the viewer's once-a-second ping with a clock reply carrying its own time. The viewer places the two clocks with the fastest of its last 16 replies, as NTP does, and the error is at most half that round trip.
+- Both Macs count CoreMedia host time. On the build Mac it agreed with CACurrentMediaTime and the process uptime to within 13 µs.
+
+The Rust suite added:
+
+- the clock reply format, sent only by hosts, only in protocol 5 and only to viewers that announced the latency capability;
+- latency metrics, left out of stats sent to older peers, which would otherwise end the session on an unknown ID;
+- the clock estimate: the fastest round trip wins, and replies slower than 1 s or out of range are ignored.
+
+The native session suite checks the clock placement, the latency arithmetic and the percentiles. The encrypted loopback exchanges real clock replies. The placed offset was zero within its bound, as expected with both ends on one Mac. Thirty HEVC 4:4:4 1080p frames stamped with the capture clock measured a median of about 12 ms from capture timestamp to decoded, covering encode, encryption, transport and decode.
+
+Between two Macs, the figure also includes ScreenCaptureKit's delivery, the network, and waiting for the viewer's display refresh. Two-Mac values are reported, not asserted.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

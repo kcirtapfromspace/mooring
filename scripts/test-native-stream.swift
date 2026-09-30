@@ -33,10 +33,11 @@ struct NativeStreamIntegration {
     }
     /// Protocol 5 end to end: both sides announce HEVC 4:4:4, the host sees the
     /// viewer's Hello and streams HEVC, and the viewer decodes 4:4:4 frames.
-    static func hevcStream() throws -> Int {
+    static func hevcStream() throws -> (frames: Int, medianLatency: Double) {
         try require(NativeCodecSupport.probeHEVC444(), "HEVC 4:4:4 self-test")
         try require(NativeAudioSupport.probeOpus(), "Opus self-test")
-        ml_capabilities_set(UInt64(ML_CAPABILITY_HEVC_444) | UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_AUDIO))
+        ml_capabilities_set(UInt64(ML_CAPABILITY_HEVC_444) | UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_AUDIO)
+                            | UInt64(ML_CAPABILITY_LATENCY))
         defer { ml_capabilities_set(0) }
         let identity = try NativeHostIdentity.create()
         let code = try NativePairingCode.forHost(address: "127.0.0.1", computerName: "Synthetic HEVC test", identity: identity)
@@ -69,6 +70,21 @@ struct NativeStreamIntegration {
               shape.image.size == NSSize(width: 9, height: 18), shape.hotSpot == NSPoint(x: 4, y: 9) else {
             throw NativeSessionError(message: "The viewer did not receive the host's pointer shape")
         }
+        // Clock placement: a ping answered with the host's clock. Both ends are
+        // this Mac, so the offset must be within the error bound of zero.
+        let clock = NativeClockSync()
+        for id in UInt64(1)...3 {
+            // Hosts skip pings less than 250 ms apart.
+            if id > 1 { Thread.sleep(forTimeInterval: 0.26) }
+            let sent = NativeClock.nowUs
+            try client.send(.control(.ping(id)))
+            guard case .control(.ping(id))? = try host.receive() else { throw NativeSessionError(message: "Host expected a ping") }
+            try host.send(.control(.clock(id, hostUs: NativeClock.nowUs)))
+            guard case .control(.clock(id, let hostUs))? = try client.receive() else { throw NativeSessionError(message: "Viewer expected a clock reply") }
+            clock.add(sentUs: sent, receivedUs: NativeClock.nowUs, hostUs: hostUs)
+        }
+        guard let placed = clock.estimate else { throw NativeSessionError(message: "The clocks were not placed") }
+        try require(placed.offsetUs.magnitude <= placed.errorUs + 1_000, "A same-Mac clock offset is within its bound of zero")
         // Sound: 100 ms of a tone, encoded to Opus on the host, decoded and
         // buffered for playout on the viewer. Nothing is played.
         let soundEncoder = try NativeAudioEncoder(), soundDecoder = try NativeAudioDecoder(), gate = NativeAudioSendGate()
@@ -103,7 +119,15 @@ struct NativeStreamIntegration {
         defer { encoder.stop(); decoder.stop() }
         let decoded = DispatchSemaphore(value: 0), sendQueue = DispatchQueue(label: "hevc-writer")
         var failure: String?
-        decoder.onFrame = { _ in decoded.signal() }
+        var latencies: [Double] = []
+        decoder.onFrame = { buffer in
+            // Decoded stands in for shown here: there is no display in this test.
+            if let timing = NativeFrameTiming.read(buffer),
+               let latency = clock.latency(NativeFrameTiming(hostUs: timing.0, decodeStartUs: timing.1, decodedUs: timing.2, presentedUs: timing.2)) {
+                lock.lock(); latencies.append(latency.total); lock.unlock()
+            }
+            decoded.signal()
+        }
         decoder.onError = { message in lock.lock(); failure = message; lock.unlock(); decoded.signal() }
         encoder.onEncodedFrame = { frame, release in
             sendQueue.async { defer { release() }; do { try host.send(.video(frame.packet)) } catch { lock.lock(); failure = error.localizedDescription; lock.unlock() } }
@@ -114,7 +138,8 @@ struct NativeStreamIntegration {
         let total = 30
         for index in 0..<total {
             let pixels = try frame(index, width: 1920, height: 1080)
-            try require(encoder.encode(pixels, presentationTime: CMTime(value: Int64(index), timescale: 60)), "HEVC admission")
+            // Stamped with the capture clock, as ScreenCaptureKit display times are.
+            try require(encoder.encode(pixels, presentationTime: CMClockGetTime(CMClockGetHostTimeClock())), "HEVC admission")
             var packet: NativeVideoPacket?
             while packet == nil { if case .video(let received)? = try client.receive() { packet = received } }
             try require(packet?.codec == .hevc && packet?.chromaFormat == 3, "The viewer receives HEVC 4:4:4")
@@ -123,7 +148,10 @@ struct NativeStreamIntegration {
             lock.lock(); let error = failure; lock.unlock()
             if let error { throw NativeSessionError(message: error) }
         }
-        return total
+        lock.lock(); let measured = latencies; lock.unlock()
+        try require(measured.count == total && measured.allSatisfy { $0 < 500 },
+                    "Every frame reports capture-to-decoded latency across the session")
+        return (total, NativeLatencyWindow.percentile(measured, 0.5) ?? 0)
     }
     static func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw NativeSessionError(message: message) }
@@ -281,7 +309,8 @@ struct NativeStreamIntegration {
         try data.write(to: URL(fileURLWithPath: path), options: .atomic)
         let hevc = try hevcStream()
         print("Native encrypted stream: \(total)/\(total) 1080p frames, return controls, live telemetry and clipboards both ways; " +
-              "then a pointer shape, 100 ms of Opus sound and \(hevc) HEVC 4:4:4 frames after a protocol 5 capability exchange; hardware decode verified. Report: \(path)")
+              "then a pointer shape, 100 ms of Opus sound and \(hevc.frames) HEVC 4:4:4 frames after a protocol 5 capability exchange, " +
+              String(format: "with clocks placed and a %.1f ms median from capture timestamp to decoded; hardware decode verified. Report: %@", hevc.medianLatency, path))
         token.cancel(); client.close(); server.close()
     }
 }

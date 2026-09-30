@@ -14,8 +14,8 @@ use crate::cursor::{self, CursorPacket, CursorShape, MAX_CURSOR};
 use crate::input::InputEvent;
 use crate::policy::{
     AUDIO, Admission, CAPABILITY_AUDIO, CAPABILITY_CURSOR, CAPABILITY_GESTURES,
-    CAPABILITY_HEVC_444, CAPABILITY_VIRTUAL_DISPLAY, CLIPBOARD, CONTROL, CURSOR, INPUT,
-    PROTOCOL_MAX, PROTOCOL_MIN, ReceivePolicy, Role, TELEMETRY, VIDEO,
+    CAPABILITY_HEVC_444, CAPABILITY_LATENCY, CAPABILITY_VIRTUAL_DISPLAY, CLIPBOARD, CONTROL,
+    CURSOR, INPUT, PROTOCOL_MAX, PROTOCOL_MIN, ReceivePolicy, Role, TELEMETRY, VIDEO,
 };
 use crate::telemetry::{MAX_TELEMETRY, TelemetryMessage};
 use crate::video::Codec;
@@ -417,10 +417,29 @@ impl Session {
                 Err(Error::Invalid)
             }
             Outgoing::Input(event) => self.send_bytes(INPUT, &event.encode(), end),
+            // Clock replies only to a viewer that announced it measures latency.
+            Outgoing::Control(ControlMessage::Clock { .. })
+                if self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_LATENCY == 0 =>
+            {
+                Err(Error::Invalid)
+            }
             Outgoing::Control(control) if self.role.may_send_control(control.kind()) => {
                 self.send_bytes(CONTROL, &control.encode(), end)
             }
             Outgoing::Control(_) => Err(Error::Invalid),
+            // An older peer rejects metric IDs it does not know; latency
+            // metrics reach only peers that announced them.
+            Outgoing::Telemetry(TelemetryMessage::Stats(stats))
+                if self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_LATENCY == 0
+                    && stats.iter().any(|(metric, _)| metric.needs_latency()) =>
+            {
+                let known = stats
+                    .iter()
+                    .copied()
+                    .filter(|(metric, _)| !metric.needs_latency())
+                    .collect();
+                self.send_bytes(TELEMETRY, &TelemetryMessage::Stats(known).encode()?, end)
+            }
             Outgoing::Telemetry(telemetry) if self.role.may_send_telemetry(telemetry) => {
                 self.send_bytes(TELEMETRY, &telemetry.encode()?, end)
             }

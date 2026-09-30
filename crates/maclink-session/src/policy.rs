@@ -32,6 +32,9 @@ pub(crate) const CAPABILITY_GESTURES: u64 = 1 << 3;
 /// This Mac passed an Opus encode and decode self-test. A viewer that
 /// announces it plays the host's sound; a host sends sound only to such a viewer.
 pub(crate) const CAPABILITY_AUDIO: u64 = 1 << 4;
+/// This Mac understands clock replies and the latency metrics. Viewers use
+/// them to measure how long a screen change takes to reach their display.
+pub(crate) const CAPABILITY_LATENCY: u64 = 1 << 5;
 /// Hosts send a cursor only when it changes; this stops a flood.
 const CURSORS_PER_WINDOW: u32 = 20;
 /// Four times the rate of 10 ms packets. Sound beyond it, as after a stall, is
@@ -98,6 +101,7 @@ impl Role {
                     | ControlKind::InputState
                     | ControlKind::Pong
                     | ControlKind::Hello
+                    | ControlKind::Clock
             ),
             Self::Viewer => matches!(
                 kind,
@@ -203,6 +207,12 @@ impl ReceivePolicy {
                 return Err(Error::Protocol);
             }
             Incoming::Control(ControlMessage::Hello(_)) => self.hello = true,
+            // Clock replies only reach a viewer that announced it measures latency.
+            Incoming::Control(ControlMessage::Clock { .. })
+                if self.version < 5 || self.local_capabilities & CAPABILITY_LATENCY == 0 =>
+            {
+                return Err(Error::Protocol);
+            }
             // Only a host that announced it makes virtual displays receives requests.
             Incoming::Control(ControlMessage::DisplayRequest(_))
                 if self.version < 5

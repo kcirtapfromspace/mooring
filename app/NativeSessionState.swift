@@ -30,6 +30,9 @@ enum NativeControlMessage: Equatable {
     /// Protocol 5, viewer to host: share a display of this many points at
     /// scale 1 or 2. All zero asks for the host's own display again.
     case displayRequest(width: Int, height: Int, scale: Int)
+    /// Protocol 5, host to a viewer that measures latency: a pong carrying the
+    /// host's clock when it received the ping, in microseconds.
+    case clock(UInt64, hostUs: UInt64)
 
     var raw: MLControlMessage {
         var raw = MLControlMessage()
@@ -45,6 +48,9 @@ enum NativeControlMessage: Equatable {
             raw.kind = UInt8(ML_CONTROL_DISPLAY_REQUEST)
             raw.geometry.width = Double(width); raw.geometry.height = Double(height)
             raw.geometry.pixel_width = UInt32(clamping: width * scale); raw.geometry.pixel_height = UInt32(clamping: height * scale)
+        case .clock(let id, let hostUs):
+            raw.kind = UInt8(ML_CONTROL_CLOCK); raw.ping_id = id
+            raw.geometry.pixel_width = UInt32(truncatingIfNeeded: hostUs >> 32); raw.geometry.pixel_height = UInt32(truncatingIfNeeded: hostUs)
         }
         return raw
     }
@@ -60,6 +66,8 @@ enum NativeControlMessage: Equatable {
         case ML_CONTROL_DISPLAY_REQUEST:
             let width = Int(raw.geometry.width), pixels = Int(raw.geometry.pixel_width)
             self = .displayRequest(width: width, height: Int(raw.geometry.height), scale: width > 0 ? pixels / width : 0)
+        case ML_CONTROL_CLOCK:
+            self = .clock(raw.ping_id, hostUs: UInt64(raw.geometry.pixel_width) << 32 | UInt64(raw.geometry.pixel_height))
         default: throw NativeSessionError(message: "The other Mac sent an unsupported session command.")
         }
     }
@@ -97,6 +105,67 @@ struct NativeMetric: Hashable {
     static let rttMs = Self(ML_METRIC_RTT_MS)
     static let keyframeRequests = Self(ML_METRIC_KEYFRAME_REQUESTS)
     static let decoderOverflows = Self(ML_METRIC_DECODER_OVERFLOWS)
+    static let captureMs = Self(ML_METRIC_CAPTURE_MS)
+    static let latencyMs = Self(ML_METRIC_LATENCY_MS)
+    static let latencyMsP95 = Self(ML_METRIC_LATENCY_MS_P95)
+    static let toViewerMs = Self(ML_METRIC_TO_VIEWER_MS)
+    static let displayWaitMs = Self(ML_METRIC_DISPLAY_WAIT_MS)
+    static let clockErrorMs = Self(ML_METRIC_CLOCK_ERROR_MS)
+}
+
+/// Viewer: the host's clock relative to this Mac's, from recent clock replies.
+/// Rust picks the sample with the shortest round trip. Main thread.
+final class NativeClockSync {
+    static let maxSamples = 16
+    private var samples: [MLClockSample] = []
+    /// Host minus viewer time and its error bound, in microseconds.
+    private(set) var estimate: (offsetUs: Int64, errorUs: UInt64)?
+
+    func add(sentUs: UInt64, receivedUs: UInt64, hostUs: UInt64) {
+        samples.append(MLClockSample(sent_us: sentUs, received_us: receivedUs, host_us: hostUs))
+        if samples.count > Self.maxSamples { samples.removeFirst(samples.count - Self.maxSamples) }
+        var result = MLClockEstimate()
+        estimate = ml_clock_estimate(samples, samples.count, &result) == ML_SESSION_OK ? (result.offset_us, result.error_us) : nil
+    }
+    func reset() { samples.removeAll(); estimate = nil }
+
+    /// Milliseconds from the host's screen change to each stage here, or nil
+    /// before the clocks are placed or for a value outside 0 to 2 s.
+    func latency(_ timing: NativeFrameTiming) -> (total: Double, toViewer: Double, displayWait: Double)? {
+        guard let estimate, timing.hostUs <= UInt64(Int64.max) else { return nil }
+        let hostHere = Int64(timing.hostUs) - estimate.offsetUs
+        func since(_ start: Int64, _ end: UInt64) -> Double? {
+            guard end <= UInt64(Int64.max) else { return nil }
+            let milliseconds = Double(Int64(end) - start) / 1000
+            return (0...2000).contains(milliseconds) ? milliseconds : nil
+        }
+        guard let total = since(hostHere, timing.presentedUs), let toViewer = since(hostHere, timing.decodeStartUs),
+              timing.presentedUs >= timing.decodedUs else { return nil }
+        return (total, toViewer, Double(timing.presentedUs - timing.decodedUs) / 1000)
+    }
+}
+
+/// Bounded latency samples between reports, with their percentiles.
+struct NativeLatencyWindow {
+    static let capacity = 1_200
+    private(set) var totals: [Double] = []
+    private var toViewer: [Double] = []
+    private var displayWait: [Double] = []
+    mutating func add(_ value: (total: Double, toViewer: Double, displayWait: Double)) {
+        guard totals.count < Self.capacity else { return }
+        totals.append(value.total); toViewer.append(value.toViewer); displayWait.append(value.displayWait)
+    }
+    static func percentile(_ values: [Double], _ fraction: Double) -> Double? {
+        guard !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        return sorted[min(sorted.count - 1, Int((Double(sorted.count - 1) * fraction).rounded()))]
+    }
+    /// Median and 95th percentile of the total, and the medians of the stages.
+    var summary: (p50: Double, p95: Double, toViewer: Double, displayWait: Double)? {
+        guard let p50 = Self.percentile(totals, 0.5), let p95 = Self.percentile(totals, 0.95),
+              let toViewer = Self.percentile(toViewer, 0.5), let displayWait = Self.percentile(displayWait, 0.5) else { return nil }
+        return (p50, p95, toViewer, displayWait)
+    }
 }
 typealias NativeStats = [NativeMetric: Double]
 
