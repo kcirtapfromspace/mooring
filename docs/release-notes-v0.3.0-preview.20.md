@@ -49,7 +49,7 @@ Local validation passed with 139 Rust session tests and the native suites. The p
 - The mode can't be changed in transit.
 - Reset Pairing approves no one.
 
-Two mutation checks confirmed the tests catch a mode that isn't bound into the handshake and a code that never expires. The Swift session suite pairs over loopback with a temporary list, never the real one.
+Three mutation checks confirmed the tests catch a mode that isn't bound into the handshake, a code that never expires, and a move-over that falls back after the sharing Mac answered. The Swift session suite pairs over loopback with a temporary list, never the real one.
 
 A security-focused review of the change ran before release. It found nothing critical or high, and these fixes went in:
 
