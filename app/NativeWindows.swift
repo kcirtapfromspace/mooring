@@ -184,6 +184,7 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
     /// When the two Macs run different MacLink versions: what that means and,
     /// when there is one, the next step.
     private let versionNotice = NSButton(title: "", target: nil, action: nil)
+    private let exitFullScreen = NSButton(title: "Exit Full Screen", target: nil, action: nil)
     init(name: String, peerID: String) {
         self.peerID = peerID
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
@@ -204,7 +205,10 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
         allowSystemKeys.isHidden = true
         versionNotice.target = self; versionNotice.action = #selector(versionAction); versionNotice.bezelStyle = .inline
         versionNotice.isHidden = true
-        let bar = stack([status, NSView(), versionNotice, allowSystemKeys, diagnostics], orientation: .horizontal, spacing: 12)
+        exitFullScreen.target = self; exitFullScreen.action = #selector(leaveFullScreen); exitFullScreen.bezelStyle = .inline
+        exitFullScreen.toolTip = "Or press ⌃⌘F. Swiping between Spaces also shows this Mac without leaving full screen."
+        exitFullScreen.isHidden = true
+        let bar = stack([status, NSView(), versionNotice, allowSystemKeys, exitFullScreen, diagnostics], orientation: .horizontal, spacing: 12)
         root.addSubview(bar)
         NSLayoutConstraint.activate([
             video.leadingAnchor.constraint(equalTo: root.leadingAnchor), video.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -272,6 +276,17 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
     @objc private func allowKeys() { onAllowSystemKeys?() }
     @objc private func versionAction() { onVersionAction?() }
     @objc private func closeWindow() { window?.performClose(nil) }
+    @objc private func leaveFullScreen() { window?.toggleFullScreen(nil) }
+    /// While this Mac controls the remote one, full screen hides this Mac's menu
+    /// bar and Dock, so the top edge reaches the remote menu bar instead of
+    /// revealing this window's title bar. Decided on entering full screen; ⌃⌘F
+    /// and Exit Full Screen in the status bar leave it.
+    func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions)
+        -> NSApplication.PresentationOptions {
+        video.forwardsCommandKeys ? [.fullScreen, .hideDock, .hideMenuBar] : proposedOptions
+    }
+    func windowDidEnterFullScreen(_ notification: Notification) { exitFullScreen.isHidden = false }
+    func windowDidExitFullScreen(_ notification: Notification) { exitFullScreen.isHidden = true }
     func windowWillClose(_ notification: Notification) { isClosed = true; onClose?() }
     func windowDidResignKey(_ notification: Notification) { onReleaseInput?() }
     func windowDidMiniaturize(_ notification: Notification) { onReleaseInput?() }

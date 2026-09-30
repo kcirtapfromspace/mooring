@@ -405,6 +405,16 @@ For `v0.3.0-preview.20`, each viewing Mac has its own Noise static key, and the 
 - **Known limit.** The viewer can't tell a refusal from a close injected in the network path before the first answer. Either one stops automatic reconnecting, with a message to pair again; **Reconnect** tries again. Nothing is deleted.
 - **Between two Macs.** Moving over, removal ending a live session, and pairing with a one-time code are checked by hand (TESTING.md step 8).
 
+## Pointer image
+
+From preview 10 to preview 20, the sharing Mac sent its pointer drawn at half size in the bottom-left of its image. The drawing context was made before the bitmap was given its size in points, so it drew at one point per pixel. The hotspot was sent correctly, so on the viewing Mac a click landed well above the visible pointer: about 18 points above the arrow's tip on this Mac Studio. Its display and click mapping were exact (1680×1016 points at 2x, streamed at 3360×2032).
+
+For `v0.3.0-preview.21`, the size is set first and the image is anchored at its top left, where the hotspot is measured from. A session test draws a 2-point square 3 points in and 5 points down, including in a fractional-point image. It checks the square's pixels as sent and after the viewer rebuilds the pointer. With the old order, the test fails.
+
+## Remote menu bar in full screen
+
+For `v0.3.0-preview.21`, a controlling viewer enters full screen with this Mac's menu bar and Dock hidden, so the top edge reaches the sharing Mac's menu bar. An in-process check without a visible window showed that the viewer window does not handle ⌃⌘F itself. Before this release, the chord fell through to the remote view and went to the sharing Mac. The new **View → Enter Full Screen** item takes it. Whether the menu bar and title bar stay hidden at the top edge is checked on the two Macs; the local suite does not enter full screen.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

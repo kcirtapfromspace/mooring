@@ -5,6 +5,7 @@
 // list; another is closed immediately to test channel queue state safely;
 // peers use a temporary folder.
 // Clipboard checks use a private, uniquely named pasteboard, never the user's.
+// Pointer checks draw a synthetic image; they never read the system pointer.
 // Built and run by scripts/test-native.sh, which links the arm64 Rust static library.
 import AppKit
 import CoreGraphics
@@ -112,6 +113,31 @@ enum NativeSessionTests {
         try devices.reset()
         try require(try devices.load().devices.isEmpty, "Reset approves no one")
     }
+    /// The sharing Mac's pointer as sent and as the viewer rebuilds it: a
+    /// 2-point square drawn 3 points right of and 5 points below the top-left
+    /// corner must stay there at 2x, including for a size in fractional points.
+    static func testPointer() throws {
+        func opaqueBox(_ rep: NSBitmapImageRep) -> (Int, Int, Int, Int) {
+            var box = (Int.max, Int.max, -1, -1)
+            for y in 0..<rep.pixelsHigh { for x in 0..<rep.pixelsWide where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.5 {
+                box = (min(box.0, x), min(box.1, y), max(box.2, x), max(box.3, y))
+            } }
+            return box
+        }
+        for size in [NSSize(width: 12, height: 20), NSSize(width: 11.5, height: 19.5)] {
+            let image = NSImage(size: size, flipped: true) { _ in NSColor.black.setFill(); NSRect(x: 3, y: 5, width: 2, height: 2).fill(); return true }
+            guard let rep = NativeCursorWatcher.render(image), let png = rep.representation(using: .png, properties: [:]) else {
+                throw Failure("The pointer did not render")
+            }
+            try require(rep.pixelsWide == 24 && rep.pixelsHigh == 40 && rep.size == NSSize(width: 12, height: 20),
+                        "A pointer renders at 2x, its size in points rounded up")
+            try require(opaqueBox(rep) == (6, 10, 9, 13), "The pointer is drawn full size from the top left, where its hotspot is measured")
+            let pointer = NativeCursorImage(width: 12, height: 20, hotspotX: 3, hotspotY: 5, png: png)
+            guard let cursor = pointer.cursor, let shown = NativeCursorWatcher.render(cursor.image) else { throw Failure("The viewer did not rebuild the pointer") }
+            try require(cursor.hotSpot == NSPoint(x: 3, y: 5) && opaqueBox(shown) == (6, 10, 9, 13),
+                        "The viewer draws the shape at its hotspot, where clicks land")
+        }
+    }
     /// Clock placement and latency arithmetic; no session or display.
     static func testLatency() throws {
         // Every build announces what it always supports; self-tests add the rest.
@@ -175,7 +201,7 @@ enum NativeSessionTests {
     static func main() {
         do {
             try run()
-            print("Native session tests passed: \(checks) checks; Rust pairing, per-Mac keys over loopback, peer store, control and display boundaries, cancellation, bounded delivery, diagnostics and the shared clipboard. Loopback only; no Keychain, capture, or input access.")
+            print("Native session tests passed: \(checks) checks; Rust pairing, per-Mac keys over loopback, peer store, control and display boundaries, the pointer image, cancellation, bounded delivery, diagnostics and the shared clipboard. Loopback only; no Keychain, capture, or input access.")
         } catch {
             fputs("Native session tests failed: \(error.localizedDescription)\n", stderr)
             exit(1)
@@ -261,6 +287,7 @@ enum NativeSessionTests {
             try require(try NativeControlMessage(validated: message.raw) == message, "Every control message round-trips the C ABI")
         }
         try testLatency()
+        try testPointer()
         var unknown = MLControlMessage(); unknown.kind = 12
         try rejects("Unknown control kinds are rejected") { _ = try NativeControlMessage(validated: unknown) }
 

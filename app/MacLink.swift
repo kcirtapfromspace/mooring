@@ -598,6 +598,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             edit.submenu!.addItem(withTitle: name, action: selector, keyEquivalent: key)
         }
         menu.addItem(edit)
+        // ⌃⌘F stays on this Mac while a viewer captures shortcuts; without a
+        // menu item to take it, the viewer would send it to the remote Mac.
+        let view = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
+        view.submenu = NSMenu(title: "View")
+        view.submenu!.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        view.submenu!.items[0].keyEquivalentModifierMask = [.control, .command]
+        menu.addItem(view)
         let help = NSMenuItem(title: "Help", action: nil, keyEquivalent: "")
         help.submenu = NSMenu(title: "Help")
         help.submenu!.addItem(withTitle: "Connecting to a Mac", action: #selector(showConnectionHelp), keyEquivalent: "?")
