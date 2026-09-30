@@ -106,11 +106,38 @@ struct NativeMetric: Hashable {
     static let keyframeRequests = Self(ML_METRIC_KEYFRAME_REQUESTS)
     static let decoderOverflows = Self(ML_METRIC_DECODER_OVERFLOWS)
     static let captureMs = Self(ML_METRIC_CAPTURE_MS)
+    static let sendQueueKib = Self(ML_METRIC_SEND_QUEUE_KIB)
+    static let queueWaitMs = Self(ML_METRIC_QUEUE_WAIT_MS)
     static let latencyMs = Self(ML_METRIC_LATENCY_MS)
     static let latencyMsP95 = Self(ML_METRIC_LATENCY_MS_P95)
     static let toViewerMs = Self(ML_METRIC_TO_VIEWER_MS)
     static let displayWaitMs = Self(ML_METRIC_DISPLAY_WAIT_MS)
     static let clockErrorMs = Self(ML_METRIC_CLOCK_ERROR_MS)
+}
+
+/// Host: the send-buffer limit for starting a frame. Rust sets it from the
+/// fastest round trip of the last ten seconds and the bytes sent in the last
+/// one; call `update` once a second. `bytes` may be read from any queue.
+final class NativeFlowLimit: @unchecked Sendable {
+    static let window = 10
+    private let lock = NSLock()
+    private var limit = ml_flow_queue_limit(0, 0)
+    private var roundTrips: [UInt32] = []
+    private var lastSent: UInt64?
+    var bytes: UInt32 { lock.lock(); defer { lock.unlock() }; return limit }
+    func update(_ queue: MLSendQueue) {
+        lock.lock(); defer { lock.unlock() }
+        if queue.round_trip_ms > 0 {
+            roundTrips.append(queue.round_trip_ms)
+            if roundTrips.count > Self.window { roundTrips.removeFirst(roundTrips.count - Self.window) }
+        }
+        let sent = lastSent.map { queue.sent_bytes >= $0 ? queue.sent_bytes - $0 : 0 } ?? 0
+        lastSent = queue.sent_bytes
+        limit = ml_flow_queue_limit(roundTrips.min() ?? 0, sent)
+    }
+    func reset() {
+        lock.lock(); roundTrips.removeAll(); lastSent = nil; limit = ml_flow_queue_limit(0, 0); lock.unlock()
+    }
 }
 
 /// What this Mac announces in protocol 5. Pointer shapes, gestures and latency

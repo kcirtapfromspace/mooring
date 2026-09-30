@@ -30,7 +30,7 @@ Sharing Mac:
 |---|---|
 | `capture_fps` | Complete frames ScreenCaptureKit delivered. Only screen changes produce frames, up to the `fps` cap. |
 | `encoded_fps` | Frames the hardware encoder produced. |
-| `skipped_fps` | Captured frames refused because the in-flight limit was reached (backpressure). |
+| `skipped_fps` | Captured frames never encoded: a newer frame replaced them while the encoder or the connection was busy. The newest always goes out once they allow (preview 18 and later). |
 | `dropped_fps` | Frames the encoder's real-time rate control skipped. |
 | `failed_frames`, `keyframes` | Failed frames (each restarts with a keyframe) and keyframes sent in the interval. |
 | `encode_ms`, `encode_ms_max` | Average and maximum hardware encode time. |
@@ -39,6 +39,8 @@ Sharing Mac:
 | `in_flight` | Frames encoding or sending right now (at most `in_flight` tuning). |
 | `bitrate_mbps`, `fps_cap`, `pixel_width`, `pixel_height` | Settings in effect and the capture size. |
 | `capture_ms` | Average time from a screen change reaching this Mac's display to ScreenCaptureKit delivering it (preview 14 and later). |
+| `bitrate_mbps` | The bitrate in use: the tuned one, or less while pacing has lowered it (preview 18 and later). |
+| `send_queue_kib`, `queue_wait_ms` | Most video held in this Mac's network send buffer in the interval, and milliseconds frames waited for it to drain. This Mac only; not sent to the viewer. |
 
 Viewing Mac:
 

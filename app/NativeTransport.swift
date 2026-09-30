@@ -74,6 +74,12 @@ final class NativeTransport: @unchecked Sendable {
     var listeningPort: UInt16 { ml_session_listener_port(id) }
     /// 4 or 5; capabilities are exchanged only in protocol 5.
     var protocolVersion: Int { Int(max(0, ml_session_protocol_version(id))) }
+    /// The kernel's send buffer and round trip for this connection, or nil
+    /// once it has closed.
+    func sendQueue() -> MLSendQueue? {
+        var queue = MLSendQueue()
+        return ml_session_send_queue(id, &queue) == ML_SESSION_OK ? queue : nil
+    }
     /// What the peer announced; zero until its Hello arrives.
     var peerCapabilities: UInt64 { var value: UInt64 = 0; _ = ml_session_peer_capabilities(id, &value); return value }
     func accept() throws -> NativeTransport? {

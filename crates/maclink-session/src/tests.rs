@@ -2057,3 +2057,67 @@ fn clock_estimate_crosses_the_c_abi() {
         Error::Invalid as i32
     );
 }
+
+#[test]
+fn hosts_read_their_send_queue_and_pacing_crosses_the_c_abi() {
+    let (viewer, host) = pair();
+    let mut queue = MLSendQueue::default();
+    // The handshake's last bytes may still await acknowledgment briefly.
+    let settled = Instant::now() + Duration::from_secs(2);
+    loop {
+        assert_eq!(unsafe { ml_session_send_queue(host.0, &mut queue) }, 0);
+        if queue.queued_bytes == 0 || Instant::now() > settled {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        queue.queued_bytes, 0,
+        "an idle connection has nothing queued"
+    );
+    assert_eq!(send_control(host.0, &geometry(1)), 0);
+    assert_eq!(send_video(host.0, &frame(IDR, true, 1)), 0);
+    assert_eq!(unsafe { ml_session_send_queue(host.0, &mut queue) }, 0);
+    assert!(queue.sent_bytes > 0, "the kernel counts what was sent");
+    assert_eq!(
+        unsafe { ml_session_send_queue(host.0, std::ptr::null_mut()) },
+        Error::Invalid as i32
+    );
+    let limit = ml_flow_queue_limit(3, 12_000_000);
+    assert_eq!(limit, 128 * 1024);
+    assert_eq!(ml_flow_admits_frame(limit, limit), 1);
+    assert_eq!(ml_flow_admits_frame(limit + 1, limit), 0);
+    let (mut state, mut kbps) = (MLFlowState::default(), 0);
+    for _ in 0..2 {
+        assert_eq!(
+            unsafe { ml_flow_next_bitrate(25_000, 25_000, 200, &mut state, &mut kbps) },
+            0
+        );
+    }
+    assert_eq!((kbps, state.recent, state.clear_seconds), (18_750, 0, 0));
+    ml_session_close(viewer.0);
+    assert_eq!(
+        unsafe { ml_session_send_queue(viewer.0, &mut queue) },
+        Error::Closed as i32
+    );
+}
+
+#[test]
+fn local_only_metrics_never_reach_the_peer() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let (viewer, host) = pair_version(5);
+    hello(host.0);
+    hello(viewer.0);
+    let stats = stats_message(&[(1, 60.0), (18, 2.0), (19, 300.0), (20, 4.0)]);
+    assert_eq!(
+        unsafe { ml_session_send_telemetry(host.0, &stats, 1000) },
+        0
+    );
+    let mut buffer = vec![0; 4096];
+    let (status, message) = typed(viewer.0, &mut buffer, 2000);
+    let sent: Vec<u8> = message.telemetry.metrics[..usize::from(message.telemetry.count)]
+        .iter()
+        .map(|metric| metric.metric)
+        .collect();
+    assert_eq!((status, sent), (0, vec![1, 18]));
+}

@@ -335,7 +335,80 @@ pub(crate) struct Session {
     pub(crate) receive: Mutex<Inbound>,
     pub(crate) closed: AtomicBool,
 }
+/// macOS's `struct tcp_connection_info` (netinet/tcp.h), 112 bytes. Declared
+/// here because the SDK packs the TCP Fast Open flags into one 32-bit bit
+/// field, which the libc crate's version lays out as separate fields.
+#[repr(C)]
+#[derive(Default)]
+struct TcpConnectionInfo {
+    state: u8,
+    snd_wscale: u8,
+    rcv_wscale: u8,
+    pad1: u8,
+    options: u32,
+    flags: u32,
+    rto: u32,
+    maxseg: u32,
+    snd_ssthresh: u32,
+    snd_cwnd: u32,
+    snd_wnd: u32,
+    snd_sbbytes: u32,
+    rcv_wnd: u32,
+    rttcur: u32,
+    srtt: u32,
+    rttvar: u32,
+    fast_open_flags: u32,
+    txpackets: u64,
+    txbytes: u64,
+    txretransmitbytes: u64,
+    rxpackets: u64,
+    rxbytes: u64,
+    rxoutoforderbytes: u64,
+    txretransmitpackets: u64,
+}
+const _: () = assert!(std::mem::size_of::<TcpConnectionInfo>() == 112);
+const _: () = assert!(std::mem::offset_of!(TcpConnectionInfo, snd_sbbytes) == 32);
+const _: () = assert!(std::mem::offset_of!(TcpConnectionInfo, txbytes) == 64);
+
+/// The kernel's view of this connection's sending side.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SendQueue {
+    /// Bytes in the send buffer: not yet sent, or sent and not acknowledged.
+    pub queued_bytes: u32,
+    /// Smoothed round trip, in milliseconds.
+    pub round_trip_ms: u32,
+    pub sent_bytes: u64,
+    pub retransmitted_bytes: u64,
+}
+
 impl Session {
+    /// Reads TCP_CONNECTION_INFO for the host's pacing; no data is touched.
+    pub(crate) fn send_queue(&self) -> Result<SendQueue> {
+        use std::os::fd::AsRawFd;
+        self.check_open()?;
+        let mut info = TcpConnectionInfo::default();
+        let mut length = std::mem::size_of::<TcpConnectionInfo>() as libc::socklen_t;
+        // SAFETY: `info` is a plain C struct of `length` bytes that
+        // getsockopt fills; it writes no more than `length`.
+        let status = unsafe {
+            libc::getsockopt(
+                self.socket.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_CONNECTION_INFO,
+                (&mut info as *mut TcpConnectionInfo).cast(),
+                &mut length,
+            )
+        };
+        if status != 0 || length as usize != std::mem::size_of::<TcpConnectionInfo>() {
+            return Err(Error::Io);
+        }
+        Ok(SendQueue {
+            queued_bytes: info.snd_sbbytes,
+            round_trip_ms: info.srtt,
+            sent_bytes: info.txbytes,
+            retransmitted_bytes: info.txretransmitbytes,
+        })
+    }
     fn new(socket: TcpStream, crypto: StatelessTransportState, role: Role, version: u32) -> Self {
         let local_capabilities = if version >= 5 {
             LOCAL_CAPABILITIES.load(Ordering::Acquire)
@@ -427,16 +500,25 @@ impl Session {
                 self.send_bytes(CONTROL, &control.encode(), end)
             }
             Outgoing::Control(_) => Err(Error::Invalid),
-            // An older peer rejects metric IDs it does not know; latency
-            // metrics reach only peers that announced them.
+            // An older peer rejects metric IDs it does not know: latency
+            // metrics reach only peers that announced them, and local-only
+            // metrics never leave this Mac.
             Outgoing::Telemetry(TelemetryMessage::Stats(stats))
-                if self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_LATENCY == 0
-                    && stats.iter().any(|(metric, _)| metric.needs_latency()) =>
+                if stats.iter().any(|(metric, _)| {
+                    metric.is_local_only()
+                        || (metric.needs_latency()
+                            && self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_LATENCY
+                                == 0)
+                }) =>
             {
+                let latency =
+                    self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_LATENCY != 0;
                 let known = stats
                     .iter()
                     .copied()
-                    .filter(|(metric, _)| !metric.needs_latency())
+                    .filter(|(metric, _)| {
+                        !metric.is_local_only() && (latency || !metric.needs_latency())
+                    })
                     .collect();
                 self.send_bytes(TELEMETRY, &TelemetryMessage::Stats(known).encode()?, end)
             }

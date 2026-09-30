@@ -14,4 +14,5 @@ serde_json.workspace = true
 sha2 = { version = "0.10", default-features = false }
 snow = { version = "0.10", default-features = false, features = ["std", "use-curve25519", "use-chacha20poly1305", "use-blake2", "use-getrandom"] }
 getrandom = "0.4"
+libc = "0.2"
 zeroize = "1"

@@ -88,11 +88,17 @@ struct NativeMediaTests {
             try require(collector.decodeOutput.wait(timeout: .now() + 5) == .success, "Hardware decode timed out")
         }
         let blocked = try image(index: 99, width: width, height: height)
-        for _ in 0..<100 { try require(!encoder.encode(blocked, presentationTime: CMTime(value: 2, timescale: 60)), "Encode backpressure admitted an extra frame") }
-        try require(encoder.inFlightCount == NativeVideoEncoder.maxInFlight && encoder.snapshot.encoded_frames == 2,
-                    "Encode/send backlog is bounded at two frames")
+        // Between the second frame's timestamp and the next paced one.
+        for _ in 0..<100 { try require(!encoder.encode(blocked, presentationTime: CMTime(value: 3, timescale: 120)), "Encode backpressure admitted an extra frame") }
+        try require(encoder.inFlightCount == NativeVideoEncoder.maxInFlight && encoder.snapshot.encoded_frames == 2
+                    && encoder.snapshot.skipped_capture_frames == 99, "Encode/send backlog is bounded at two frames; the newest refused frame waits")
         collector.lock.lock(); let releases = collector.heldReleases; collector.heldReleases = []; collector.lock.unlock()
         for release in releases { release(); release() } // Idempotent completion from a transport teardown.
+        // The waiting frame starts at once, so the last change still reaches the viewer.
+        try require(collector.decodeOutput.wait(timeout: .now() + 5) == .success && encoder.snapshot.encoded_frames == 3,
+                    "The newest refused frame is encoded once a slot frees")
+        let drained = ProcessInfo.processInfo.systemUptime + 2
+        while encoder.inFlightCount > 0 && ProcessInfo.processInfo.systemUptime < drained { Thread.sleep(forTimeInterval: 0.001) }
         try require(encoder.inFlightCount == 0, "Released frames free their admission slots")
         let began = ProcessInfo.processInfo.systemUptime
         for index in NativeVideoEncoder.maxInFlight..<frames {
@@ -113,11 +119,12 @@ struct NativeMediaTests {
         let widths = collector.widths, heights = collector.heights
         collector.lock.unlock()
         try require(errors.isEmpty, errors.first ?? "Media error")
-        try require(encoded.count == frames && decoded == frames, "Complete paced hardware round trip")
+        // Plus the frame that waited while two were in flight.
+        try require(encoded.count == frames + 1 && decoded == frames + 1, "Complete paced hardware round trip")
         try require(widths == [width] && heights == [height], "Actual decoded dimensions")
         try require(encoder.snapshot.hardware_encoder && decoder.hardwareDecoder, "Hardware codec use")
-        try require(encoded[0].keyframe && encoded[60].keyframe, "Initial and requested IDR")
-        try require(encoded[60].metrics.target_bitrate == 16_000_000, "Live bitrate change")
+        try require(encoded[0].keyframe && encoded[61].keyframe, "Initial and requested IDR")
+        try require(encoded[61].metrics.target_bitrate == 16_000_000, "Live bitrate change")
         var packets: [NativeVideoPacket] = []
         for frame in encoded {
             // Real hardware output must satisfy Rust's packet rules before sending.
@@ -230,12 +237,12 @@ struct NativeMediaTests {
         try require(decoder.decode(frames[5].packet), "Later waiting P frame admission")
         try require(keyframe.wait(timeout: .now() + 3) == .success, "A dropped keyframe request is retried")
         try require(output.wait(timeout: .now() + 0.05) == .timedOut, "Waiting P frames are never displayed")
-        try require(decoder.decode(frames[60].packet), "Recovery IDR admission")
+        try require(decoder.decode(frames[61].packet), "Recovery IDR admission")
         try require(output.wait(timeout: .now() + 3) == .success, "IDR recovers the chain")
-        try require(decoder.decode(frames[61].packet), "Recovered P admission")
+        try require(decoder.decode(frames[62].packet), "Recovered P admission")
         try require(output.wait(timeout: .now() + 3) == .success, "Recovered P decode")
         decoder.stop()
-        try require(!decoder.decode(frames[62].packet), "Stopped decoder rejects admission")
+        try require(!decoder.decode(frames[63].packet), "Stopped decoder rejects admission")
     }
     static func testOverflow(_ frames: [NativeEncodedFrame]) throws {
         let decoder = NativeVideoDecoder(), entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
@@ -258,7 +265,7 @@ struct NativeMediaTests {
         try require(!decoder.decode(frames[NativeVideoDecoder.maxPending + 1].packet) && decoder.pendingFrameCount == 0,
                     "Overflow clears reference chain")
         try require(keyframe.wait(timeout: .now() + 1) == .success, "Overflow requests IDR")
-        try require(decoder.decode(frames[60].packet), "Recovery keyframe waits in the pending queue")
+        try require(decoder.decode(frames[61].packet), "Recovery keyframe waits in the pending queue")
         resume.signal()
         try require(recovered.wait(timeout: .now() + 3) == .success, "Overflow recovers with IDR")
     }
@@ -273,10 +280,10 @@ struct NativeMediaTests {
             lock.lock(); outputs += 1; let first = outputs == 1; lock.unlock()
             if first { entered.signal(); _ = resume.wait(timeout: .now() + 5) } else { recovered.signal() }
         }
-        try require(frames[60].keyframe && !frames[5].keyframe, "Fixture: frame 60 is a keyframe, frame 5 is not")
+        try require(frames[61].keyframe && !frames[5].keyframe, "Fixture: frame 61 is a keyframe, frame 5 is not")
         try require(decoder.decode(frames[0].packet), "First keyframe admission")
         try require(entered.wait(timeout: .now() + 3) == .success, "Decode callback held")
-        try require(decoder.decode(frames[5].packet) && decoder.decode(frames[60].packet), "A gap, then a keyframe, wait")
+        try require(decoder.decode(frames[5].packet) && decoder.decode(frames[61].packet), "A gap, then a keyframe, wait")
         resume.signal()
         try require(recovered.wait(timeout: .now() + 3) == .success, "The queued keyframe restarts the chain")
     }
@@ -292,10 +299,44 @@ struct NativeMediaTests {
         try require(encoder.encode(pixels, presentationTime: CMTime(value: 0, timescale: 60)), "First frame admission")
         try require(output.wait(timeout: .now() + 5) == .success, "Small hardware encode")
         try require(!encoder.encode(pixels, presentationTime: CMTime(value: 1, timescale: 60)), "A limit of one refuses a second frame")
-        lock.lock(); held.forEach { $0() }; held = []; lock.unlock()
+        lock.lock(); var releasing = held; held = []; lock.unlock()
+        releasing.forEach { $0() }
+        try require(output.wait(timeout: .now() + 5) == .success, "Releasing the send starts the waiting frame")
+        lock.lock(); releasing = held; held = []; lock.unlock()
+        releasing.forEach { $0() }
         try require(encoder.encode(pixels, presentationTime: CMTime(value: 2, timescale: 60)), "Releasing the send admits the next frame")
-        try require(output.wait(timeout: .now() + 5) == .success, "Second small hardware encode")
+        try require(output.wait(timeout: .now() + 5) == .success, "Third small hardware encode")
         lock.lock(); held.forEach { $0() }; lock.unlock()
+        try testConnectionGate()
+    }
+    /// A frame that the connection refuses waits in the encoder, the newest
+    /// replacing older ones, and starts within a few milliseconds of the
+    /// connection clearing, with no further capture.
+    static func testConnectionGate() throws {
+        let encoder = try NativeVideoEncoder(width: 640, height: 360)
+        let output = DispatchSemaphore(value: 0), lock = NSLock()
+        var open = false, times: [UInt64] = []
+        defer { encoder.stop() }
+        encoder.admitsFrame = { lock.lock(); defer { lock.unlock() }; return open }
+        encoder.onEncodedFrame = { frame, release in
+            lock.lock(); times.append(frame.packet.timestamp); lock.unlock()
+            release(); output.signal()
+        }
+        let pixels = try image(index: 0, width: 640, height: 360)
+        for index in 0..<5 { try require(!encoder.encode(pixels, presentationTime: CMTime(value: Int64(index), timescale: 60)), "A busy connection refuses frames") }
+        // An older frame, such as one retried while a newer was captured, never replaces a newer waiting one.
+        try require(!encoder.encode(pixels, presentationTime: CMTime(value: 2, timescale: 60)), "A busy connection refuses an older frame")
+        try require(output.wait(timeout: .now() + 0.1) == .timedOut, "Nothing starts while the connection is busy")
+        let snapshot = encoder.snapshot
+        try require(snapshot.skipped_capture_frames == 5, "Only the newest refused frame is kept")
+        // One wait, however many 5 ms retries it took, measured in time.
+        try require(snapshot.queue_waits == 1 && snapshot.queue_wait_ms >= 90, "Waiting for the connection is measured in time, once")
+        lock.lock(); open = true; lock.unlock()
+        try require(output.wait(timeout: .now() + 3) == .success, "The waiting frame starts once the connection clears")
+        lock.lock(); let encodedTimes = times; lock.unlock()
+        // Packets carry capture time in whole microseconds.
+        try require(encodedTimes == [UInt64(CMTime(value: 4, timescale: 60).seconds * 1_000_000)],
+                    "It is the newest frame, with its own capture time")
     }
     /// A keyframe whose header disagrees with its parameter sets always fails.
     static func testFailureBudget(_ frames: [NativeEncodedFrame]) throws {

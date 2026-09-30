@@ -34,7 +34,13 @@ struct NativeDisplayGeometry: Equatable {
 struct NativeMediaMetrics: Codable {
     var encode_ms: Double = 0
     var encoded_frames: UInt64 = 0
+    /// Captured frames never encoded: a newer frame replaced them while the
+    /// encoder or the connection was busy.
     var skipped_capture_frames: UInt64 = 0
+    /// Times, and total milliseconds, a frame waited for the connection's
+    /// send buffer to drain.
+    var queue_waits: UInt64 = 0
+    var queue_wait_ms: Double = 0
     var encoded_bytes: UInt64 = 0
     var hardware_encoder: Bool = false
     var hardware_encoder_evidence: String = ""
@@ -250,8 +256,23 @@ final class NativeVideoEncoder {
     static let failureBudget = 8
     var onEncodedFrame: ((NativeEncodedFrame, @escaping () -> Void) -> Void)?
     var onError: ((String) -> Void)?
+    /// Checked before each frame, off the lock: false while the connection's
+    /// send buffer holds too much for another frame. Set before encoding.
+    var admitsFrame: (() -> Bool)?
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "MacLink.native.encode", qos: .userInteractive)
+    /// The newest frame refused while the encoder or the connection was
+    /// busy. It is encoded as soon as they allow, so the last change always
+    /// reaches the viewer even if the screen then stays still.
+    private var waiting: (image: CVPixelBuffer, time: CMTime)?
+    private var retryScheduled = false
+    /// Frames reach the encoder in capture order; one older than the last
+    /// started is obsolete.
+    private var lastStarted: CMTime?
+    /// When the connection began holding frames back, while it still does.
+    private var connectionHeldSince: TimeInterval?
+    /// How often a frame waiting on the send buffer checks it again.
+    static let queueRetryInterval: TimeInterval = 0.005
     private var session: VTCompressionSession?
     private var active = true
     private var outstanding = Set<UInt64>()
@@ -353,7 +374,14 @@ final class NativeVideoEncoder {
         } catch { VTCompressionSessionInvalidate(created); session = nil; throw error }
     }
     deinit { if let session { VTCompressionSessionInvalidate(session) } }
-    var snapshot: NativeMediaMetrics { lock.lock(); defer { lock.unlock() }; return metrics }
+    /// Includes a wait for the connection still in progress, so the total
+    /// only grows.
+    var snapshot: NativeMediaMetrics {
+        lock.lock(); defer { lock.unlock() }
+        var value = metrics
+        if let since = connectionHeldSince { value.queue_wait_ms += (ProcessInfo.processInfo.systemUptime - since) * 1000 }
+        return value
+    }
     var inFlightCount: Int { lock.lock(); defer { lock.unlock() }; return outstanding.count }
     /// Live settings take effect on the next encoded frame.
     func setFrameRate(_ framesPerSecond: Int) {
@@ -370,19 +398,59 @@ final class NativeVideoEncoder {
         lock.lock(); targetBitrate = min(80_000_000, max(1_000_000, bitsPerSecond)); lock.unlock()
     }
     func requestKeyframe() { lock.lock(); forceKeyframe = true; lock.unlock() }
+    /// False when the frame was not started now; the newest such frame waits
+    /// and starts as soon as the encoder and the connection allow.
     @discardableResult
     func encode(_ image: CVPixelBuffer, presentationTime: CMTime) -> Bool {
-        lock.lock()
-        guard active, outstanding.count < inFlightLimit else { if active { metrics.skipped_capture_frames &+= 1 }; lock.unlock(); return false }
         guard CVPixelBufferGetWidth(image) == width, CVPixelBufferGetHeight(image) == height,
-              presentationTime.isNumeric, presentationTime.seconds >= 0 else { lock.unlock(); return false }
+              presentationTime.isNumeric, presentationTime.seconds >= 0 else { return false }
+        let connectionClear = admitsFrame?() ?? true
+        lock.lock()
+        guard active else { lock.unlock(); return false }
+        // Time held by the connection, however often a waiting frame retries.
+        let now = ProcessInfo.processInfo.systemUptime
+        if connectionClear, let since = connectionHeldSince {
+            metrics.queue_wait_ms += (now - since) * 1000; connectionHeldSince = nil
+        } else if !connectionClear, connectionHeldSince == nil {
+            connectionHeldSince = now; metrics.queue_waits &+= 1
+        }
+        if let lastStarted, presentationTime <= lastStarted {
+            metrics.skipped_capture_frames &+= 1; lock.unlock(); return false
+        }
+        guard connectionClear, outstanding.count < inFlightLimit else {
+            // Only a newer frame replaces the one waiting: a retried frame
+            // may be older than one captured meanwhile.
+            if let held = waiting, held.time >= presentationTime {
+                metrics.skipped_capture_frames &+= 1
+            } else {
+                if waiting != nil { metrics.skipped_capture_frames &+= 1 }
+                waiting = (image, presentationTime)
+            }
+            let retry = !connectionClear && !retryScheduled
+            if retry { retryScheduled = true }
+            lock.unlock()
+            // Nothing else wakes a frame that waits on the connection.
+            if retry {
+                queue.asyncAfter(deadline: .now() + Self.queueRetryInterval) { [weak self] in
+                    guard let self else { return }
+                    self.lock.lock(); self.retryScheduled = false; self.lock.unlock()
+                    self.startWaiting()
+                }
+            }
+            return false
+        }
+        // A newer frame supersedes one still waiting.
+        if waiting != nil { waiting = nil; metrics.skipped_capture_frames &+= 1 }
+        lastStarted = presentationTime
         nextToken &+= 1
         let token = nextToken, keyframe = forceKeyframe, bitrate = targetBitrate
         let frameRate = targetFrameRate, keyframeSeconds = targetKeyframeSeconds
         outstanding.insert(token)
         forceKeyframe = false
-        lock.unlock()
         let began = ProcessInfo.processInfo.systemUptime
+        // Queued while still holding the lock, so frames reach the encoder in
+        // the order they were started. The block takes the lock later.
+        defer { lock.unlock() }
         queue.async { [weak self] in
             guard let self else { return }
             self.lock.lock(); let active = self.active; self.lock.unlock()
@@ -414,6 +482,16 @@ final class NativeVideoEncoder {
     /// Idempotent, including after stop.
     private func release(_ token: UInt64) {
         lock.lock(); outstanding.remove(token); lock.unlock()
+        startWaiting()
+    }
+    /// Starts the waiting frame if the encoder has room; it waits again if
+    /// the connection is still busy.
+    private func startWaiting() {
+        lock.lock()
+        guard active, let next = waiting, outstanding.count < inFlightLimit else { lock.unlock(); return }
+        waiting = nil
+        lock.unlock()
+        encode(next.image, presentationTime: next.time)
     }
     /// A failed frame is skipped and the chain restarts with a keyframe. Only a
     /// run of failures, such as an invalidated session, ends the session. The
@@ -426,7 +504,7 @@ final class NativeVideoEncoder {
         outstanding.remove(token); consecutiveFailures += 1; metrics.failed_frames &+= 1; sequence &+= 1
         let report = active && consecutiveFailures >= Self.failureBudget
         lock.unlock()
-        if report { onError?(message) }
+        if report { onError?(message) } else { startWaiting() }
     }
     private func encoded(status: OSStatus, flags: VTEncodeInfoFlags, sample: CMSampleBuffer?, token: UInt64, began: TimeInterval) {
         lock.lock(); let valid = active && outstanding.contains(token); lock.unlock()
@@ -435,6 +513,7 @@ final class NativeVideoEncoder {
             // Real-time rate control skipped this frame; the encoder's references
             // are unchanged, so the chain continues without it.
             lock.lock(); outstanding.remove(token); metrics.dropped_frames &+= 1; lock.unlock()
+            startWaiting()
             return
         }
         guard status == noErr, let sample, CMSampleBufferDataIsReady(sample) else {
@@ -493,7 +572,7 @@ final class NativeVideoEncoder {
         } catch { fail(token, error.localizedDescription) }
     }
     func stop(completion: (() -> Void)? = nil) {
-        lock.lock(); active = false; outstanding.removeAll(); lock.unlock()
+        lock.lock(); active = false; outstanding.removeAll(); waiting = nil; connectionHeldSince = nil; lock.unlock()
         queue.async { [self] in
             if let session { VTCompressionSessionInvalidate(session); self.session = nil }
             completion?()
@@ -539,6 +618,9 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// When set, a change of main display or its geometry calls this (once)
     /// instead of onError, so the owner can restart capture on the new display.
     var onDisplayChanged: (() -> Void)?
+    /// Passed to each encoder: false while the connection's send buffer holds
+    /// too much to start another frame. Any queue.
+    var admitsFrame: (() -> Bool)?
     private var displayChangeReported = false
 
     init(maxPixelWidth: Int = 3840, maxPixelHeight: Int = 2160, framesPerSecond: Int = 60, showsCursor: Bool = true,
@@ -588,6 +670,7 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                     callback(frame, release)
                 }
                 encoder.onError = { [weak self] in self?.onError?($0) }
+                encoder.admitsFrame = self.admitsFrame
                 self.setEncoder(encoder)
                 let configuration = SCStreamConfiguration()
                 configuration.width = width; configuration.height = height

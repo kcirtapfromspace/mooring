@@ -67,6 +67,20 @@ enum NativeSessionTests {
         try require(sync.estimate?.errorUs == 4_500, "Only the latest 16 replies count")
         sync.reset()
         try require(sync.estimate == nil, "A new session starts unplaced")
+        // Host pacing: the send-buffer limit follows the fastest recent round trip.
+        let flow = NativeFlowLimit()
+        try require(flow.bytes == 131_072, "Pacing starts at the 128 KiB floor")
+        func queue(_ roundTrip: UInt32, _ sent: UInt64) -> MLSendQueue {
+            MLSendQueue(queued_bytes: 0, round_trip_ms: roundTrip, sent_bytes: sent, retransmitted_bytes: 0)
+        }
+        flow.update(queue(80, 1_000_000)); flow.update(queue(50, 4_000_000))
+        try require(flow.bytes == 225_000, "3 MB a second at a 50 ms round trip allows 225 kB")
+        flow.update(queue(400, 7_000_000))
+        try require(flow.bytes == 225_000, "A slow round trip during a stall does not raise the limit")
+        for _ in 0..<NativeFlowLimit.window { flow.update(queue(3, 7_000_000)) }
+        try require(flow.bytes == 131_072, "Idle, and on a home network, the floor applies")
+        flow.reset()
+        try require(flow.bytes == 131_072, "A new session starts at the floor")
         var window = NativeLatencyWindow()
         try require(window.summary == nil, "No summary without frames")
         for value in 1...100 { window.add((Double(value), Double(value) / 2, 1)) }

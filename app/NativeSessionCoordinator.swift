@@ -23,9 +23,10 @@ private final class NativeHostInputGate: @unchecked Sendable {
 /// Encoder counters from captures a restart retired, so session totals never
 /// go backward when a new encoder starts from zero.
 private struct NativeEncoderCounters {
-    var skipped: UInt64 = 0, dropped: UInt64 = 0, failed: UInt64 = 0
+    var skipped: UInt64 = 0, dropped: UInt64 = 0, failed: UInt64 = 0, queueWaitMs: Double = 0
     mutating func add(_ metrics: NativeMediaMetrics) {
         skipped &+= metrics.skipped_capture_frames; dropped &+= metrics.dropped_frames; failed &+= metrics.failed_frames
+        queueWaitMs += metrics.queue_wait_ms
     }
     func adding(_ metrics: NativeMediaMetrics?) -> NativeEncoderCounters {
         var total = self
@@ -98,6 +99,13 @@ final class NativeSessionCoordinator {
     private var captureRestartScheduled = false
     private var lastCaptureRestart: TimeInterval?
     private var retiredEncoderCounters = NativeEncoderCounters()
+    /// Host: the bitrate Rust's pacing chose, at most the tuned bitrate, and
+    /// how many seconds the connection has been clear.
+    private var flowKbps: UInt32 = 0
+    private var flowState = MLFlowState()
+    /// Host: the send-buffer limit, read on the capture queue and updated
+    /// once a second from the last ten seconds' fastest round trip.
+    private let flowLimit = NativeFlowLimit()
     /// Why the latest session on this Mac ended, for the log and telemetry.
     private var lastEnd: (reason: String, at: TimeInterval)?
     /// Automatic viewer reconnects after an unexpected end; Rust sets the budget.
@@ -385,6 +393,7 @@ final class NativeSessionCoordinator {
         let channel = NativeSessionChannel(transport)
         hostChannel = channel; lastHostMeasurements = channel.measurements
         retiredEncoderCounters = NativeEncoderCounters(); hostInputGate.invalidate()
+        flowKbps = UInt32(hostTuning.bitrate / 1000); flowState = MLFlowState(); flowLimit.reset()
         let version = channel.transport.protocolVersion
         NativeLog.session.notice("host session started, protocol \(version)")
         if !isConnected { clipboard.start(includeCurrent: false) }
@@ -423,11 +432,19 @@ final class NativeSessionCoordinator {
         let audioEncoder = audioAvailable && channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_AUDIO) != 0
             ? try? NativeAudioEncoder() : nil
         let capture = NativeCapture(maxPixelWidth: tuning.maxWidth, framesPerSecond: tuning.fps,
-                                    showsCursor: !NativeInputInjector.isTrusted, bitrate: tuning.bitrate,
+                                    showsCursor: !NativeInputInjector.isTrusted, bitrate: currentBitrate,
                                     keyframeSeconds: tuning.keyframeSeconds, inFlightLimit: tuning.inFlight, codec: codec,
                                     capturesAudio: audioEncoder != nil && audioGate != nil)
         let firstKeyframe = NativeRunToken()
         let live = NativeRunToken()
+        // Start a frame only while little video waits in the kernel, where a
+        // newer frame can't replace it; the newest frame waits here instead.
+        let limit = flowLimit
+        capture.admitsFrame = { [weak channel] in
+            guard let channel, let queue = channel.transport.sendQueue() else { return true }
+            channel.measurements.recordMax("send_queue_bytes", Double(queue.queued_bytes))
+            return ml_flow_admits_frame(queue.queued_bytes, limit.bytes) != 0
+        }
         if let audioEncoder, let audioGate {
             let firstSound = NativeRunToken()
             audioEncoder.onPacket = { [weak channel] payload in
@@ -513,7 +530,11 @@ final class NativeSessionCoordinator {
         }
         guard let channel = hostChannel, channel.token.isActive, let capture else { return }
         if tuning.maxWidth != captureMaxWidth { scheduleCaptureRestart() }
-        if tuning.bitrate != previous.bitrate { capture.setTargetBitrate(tuning.bitrate) }
+        if tuning.bitrate != previous.bitrate {
+            // A new tuned bitrate is the new ceiling; pacing starts from it.
+            flowKbps = UInt32(tuning.bitrate / 1000); flowState = MLFlowState()
+            capture.setTargetBitrate(tuning.bitrate)
+        }
         if tuning.fps != previous.fps { capture.setFrameRate(tuning.fps) }
         if tuning.keyframeSeconds != previous.keyframeSeconds { capture.setKeyframeSeconds(tuning.keyframeSeconds) }
         if tuning.inFlight != previous.inFlight { capture.setInFlightLimit(tuning.inFlight) }
@@ -1296,8 +1317,10 @@ final class NativeSessionCoordinator {
                 channel.measurements.set("skipped_capture_frames", Double(totals.skipped))
                 channel.measurements.set("encoder_dropped_frames", Double(totals.dropped))
                 channel.measurements.set("encoder_failed_frames", Double(totals.failed))
+                channel.measurements.set("queue_wait_ms", totals.queueWaitMs)
             }
             let interval = channel.measurements.nextInterval()
+            if role == Int(ML_ROLE_HOST) { pace(interval) }
             let local = stats(interval)
             channel.send(.telemetry(.stats(local)))
             guard !published else { continue }
@@ -1311,13 +1334,37 @@ final class NativeSessionCoordinator {
                                           tuning: hostTuning, lastEnd: ended)
         }
     }
+    /// The effective bitrate: the tuned one, or less while pacing has lowered it.
+    private var currentBitrate: Int {
+        flowKbps > 0 ? min(hostTuning.bitrate, Int(flowKbps) * 1000) : hostTuning.bitrate
+    }
+    /// Host, once a second: Rust lowers the bitrate when frames keep waiting
+    /// for the send buffer and raises it again after clear seconds.
+    private func pace(_ interval: NativeInterval) {
+        guard let capture, let channel = hostChannel else { return }
+        if let queue = channel.transport.sendQueue() { flowLimit.update(queue) }
+        var kbps: UInt32 = 0
+        let waited = UInt32(min(interval.delta("queue_wait_ms"), Double(UInt32.max)))
+        let queued = UInt32(min(interval.maxima["send_queue_bytes"] ?? 0, Double(UInt32.max)))
+        guard ml_flow_next_bitrate(flowKbps, UInt32(hostTuning.bitrate / 1000), waited, &flowState, &kbps) == ML_SESSION_OK else { return }
+        let previous = flowKbps
+        flowKbps = kbps
+        guard kbps != previous else { return }
+        capture.setTargetBitrate(Int(kbps) * 1000)
+        if kbps < previous {
+            NativeLog.session.notice("pacing: frames waited \(Int(waited)) ms for the network, up to \(Int(queued / 1024)) KiB queued; bitrate \(Int(kbps)) kbps")
+        } else if kbps == UInt32(hostTuning.bitrate / 1000) {
+            NativeLog.session.notice("pacing: connection clear; bitrate back to \(Int(kbps)) kbps")
+        }
+    }
     private func hostStats(_ interval: NativeInterval) -> NativeStats {
         var stats: NativeStats = [
             .captureFps: interval.rate("captured_frames"), .encodedFps: interval.rate("encoded_frames"),
             .skippedFps: interval.rate("skipped_capture_frames"), .droppedFps: interval.rate("encoder_dropped_frames"),
             .failedFrames: interval.delta("encoder_failed_frames"), .keyframes: interval.delta("encoded_keyframes"),
             .sentMbps: interval.rate("sent_video_bytes") * 8 / 1_000_000, .inFlight: Double(capture?.inFlightCount ?? 0),
-            .bitrateMbps: Double(hostTuning.bitrate) / 1_000_000, .fpsCap: Double(hostTuning.fps),
+            .bitrateMbps: Double(currentBitrate) / 1_000_000, .fpsCap: Double(hostTuning.fps),
+            .queueWaitMs: interval.delta("queue_wait_ms"), .sendQueueKib: (interval.maxima["send_queue_bytes"] ?? 0) / 1024,
             .encodeMsMax: interval.maxima["encode_ms"] ?? 0, .sendMsMax: interval.maxima["video_send_ms"] ?? 0
         ]
         stats[.encodeMs] = interval.average("encode_ms_total", per: "encoded_frames")

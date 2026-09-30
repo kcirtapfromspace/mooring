@@ -315,6 +315,29 @@ For `v0.3.0-preview.17`:
 - **Draw frames on arrival.** Tried and not shipped. Drawing a frame as soon as it was decoded, with MacLink's own display link instead of MTKView's timer, was measured with `scripts/measure-native-present.swift` (now with a sparse, typing-like case and a decoded-to-presented figure). Isolated frames were at best about 5 ms sooner. Steady 60 fps streams were often a refresh later, and the build Mac's virtual display gives no presentation time, so the figures are the presented handler's time. The change was reverted.
 - **Lower Display Latency (May Tear).** A new viewer option, off by default, turns off CAMetalLayer display sync. On the build Mac, over two runs each: steady 60 fps into a window, 46–69 ms with sync against 14 ms without; retina-sized, 19–30 against 20–23; isolated frames, 25 against 19–22. Its effect on a real display, including any tearing, is checked between two Macs.
 
+## Pacing and the newest frame
+
+Sampling the live session's send queue with `netstat` found it empty most of the time. The 99th percentile was 49 KB, but it reached 524 KB during a Wi-Fi slowdown, about 200 ms at 20 Mbit/s. The viewer's 95th-percentile latency spiked to 283 ms at the same time as a 143 ms ping. The encoder also discarded frames that arrived while it was busy, so if the last change before the screen went still was discarded, the viewer kept an earlier picture until the next change.
+
+For `v0.3.0-preview.18`:
+
+- **The newest frame always goes out.** A frame that can't start now waits in the encoder, replacing older waiting frames, and starts as soon as a slot frees or the connection clears. Frames older than the last one started are dropped, so the encoder always receives them in order.
+- **A frame starts only while the send buffer is under the queue limit.** The limit is 1.5 times the bytes sent per fastest round trip of the last ten seconds, between 128 KiB and 4 MiB, so a long connection stays busy.
+- **The bitrate adapts once a second, from how long frames waited.** A second with 150 ms or more of waiting is congested. Two such seconds of the last four lower the bitrate to three quarters, and each three clear seconds raise it 10% (at least 500 kbps), between 4 Mbps and the tuned bitrate. One slow second, as for a single large keyframe, changes nothing.
+- **Review fixes.** A code review of the first version found four problems, all fixed before release:
+  - it counted each 5 ms retry as a wait, so one keyframe looked like congestion and the bitrate could slide to the floor on a healthy network;
+  - a retried older frame could replace a newer waiting one;
+  - frames could reach the encoder out of order in a rare interleaving;
+  - the bitrate rose every second after three clear ones.
+- **Where the rules live.** The pacing rules are in Rust. The send buffer comes from TCP_CONNECTION_INFO, through a struct declared to match the SDK's 112-byte layout; the libc crate's version differs because of a bit field.
+
+Local checks:
+
+- **Rust suite:** the queue limit, admission, the two-of-four rule, one step per three clear seconds, convergence under a periodic slow keyframe, the bounds, a live send-queue reading on loopback, and local-only metrics never reaching the peer.
+- **Native media suite:** the newest refused frame is encoded once a slot frees. A frame refused by a busy connection starts within a few milliseconds of it clearing, with its own capture time. Only the newest of five is kept, and an older frame never replaces it. The wait is measured once and in milliseconds, however many retries it takes.
+- **Session suite:** the limit's window.
+- **Between two Macs:** pacing under a real Wi-Fi slowdown is observed in telemetry and the session log.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

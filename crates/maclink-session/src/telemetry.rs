@@ -68,6 +68,8 @@ metrics! {
     PixelHeight = 16 => "pixel_height",
     FpsCap = 17 => "fps_cap",
     CaptureMs = 18 => "capture_ms",
+    SendQueueKib = 19 => "send_queue_kib",
+    QueueWaitMs = 20 => "queue_wait_ms",
     ReceivedFps = 32 => "received_fps",
     ReceivedMbps = 33 => "received_mbps",
     DecodeMs = 34 => "decode_ms",
@@ -85,6 +87,10 @@ metrics! {
 }
 
 impl Metric {
+    /// This Mac's own pacing, published locally and never sent to the peer.
+    pub(crate) fn is_local_only(self) -> bool {
+        matches!(self, Self::SendQueueKib | Self::QueueWaitMs)
+    }
     /// Added with the latency capability; older peers reject these IDs.
     pub(crate) fn needs_latency(self) -> bool {
         matches!(

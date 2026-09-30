@@ -49,6 +49,8 @@ enum {
     ML_METRIC_PIXEL_HEIGHT = 16,
     ML_METRIC_FPS_CAP = 17,
     ML_METRIC_CAPTURE_MS = 18, /* host: screen update to the encoder */
+    ML_METRIC_SEND_QUEUE_KIB = 19, /* host, local only: most queued in the send buffer */
+    ML_METRIC_QUEUE_WAIT_MS = 20, /* host, local only: milliseconds frames waited for the send buffer */
     ML_METRIC_RECEIVED_FPS = 32,
     ML_METRIC_RECEIVED_MBPS = 33,
     ML_METRIC_DECODE_MS = 34,
@@ -239,6 +241,18 @@ typedef struct {
     size_t png_offset, png_length;
 } MLCursorMessage;
 
+/* The kernel's view of a session's sending side: bytes in the send buffer
+ * (unsent, or sent and unacknowledged), smoothed round trip, and totals. */
+typedef struct {
+    uint32_t queued_bytes, round_trip_ms;
+    uint64_t sent_bytes, retransmitted_bytes;
+} MLSendQueue;
+
+/* Pacing history kept by the host between bitrate updates; start zeroed. */
+typedef struct {
+    uint32_t recent, clear_seconds;
+} MLFlowState;
+
 /* One clock reply, in microseconds of CoreMedia host time: when this viewer
  * sent the ping and received the reply, and the host's time in the reply. */
 typedef struct {
@@ -336,6 +350,8 @@ _Static_assert(offsetof(MLVideoPacket, sps_offset) == 32, "MLVideoPacket.sps_off
 _Static_assert(offsetof(MLVideoPacket, avcc_length) == 72, "MLVideoPacket.avcc_length layout");
 _Static_assert(sizeof(MLSessionMessage) == 872, "MLSessionMessage layout");
 _Static_assert(sizeof(MLClockSample) == 24 && offsetof(MLClockSample, host_us) == 16, "MLClockSample layout");
+_Static_assert(sizeof(MLSendQueue) == 24 && offsetof(MLSendQueue, sent_bytes) == 8, "MLSendQueue layout");
+_Static_assert(sizeof(MLFlowState) == 8, "MLFlowState layout");
 _Static_assert(sizeof(MLClockEstimate) == 16 && offsetof(MLClockEstimate, error_us) == 8, "MLClockEstimate layout");
 _Static_assert(offsetof(MLSessionMessage, audio) == 848, "MLSessionMessage.audio layout");
 _Static_assert(sizeof(MLAudioMessage) == 24 && offsetof(MLAudioMessage, frames) == 4
@@ -413,6 +429,19 @@ int32_t ml_audio_playout(uint32_t buffered_frames, uint8_t playing, uint8_t *pla
  * the shortest round trip wins, and its half is the error bound. INVALID when
  * no sample is usable (round trips over 1 s are ignored). */
 int32_t ml_clock_estimate(const MLClockSample *samples, size_t count, MLClockEstimate *out);
+/* Host pacing. Video in the kernel's send buffer can't be replaced by a newer
+ * frame, so a host starts a frame only while the buffer holds at most the
+ * queue limit: 1.5 times the bytes sent per fastest recent round trip, from
+ * 128 KiB to 4 MiB. Once a second it adapts its bitrate from how long frames
+ * waited: a second with 150 ms or more of waiting is congested; two such
+ * seconds of the last four lower the bitrate to three quarters, and each
+ * three clear seconds raise it 10% (at least 500 kbps), between 4 Mbps (or a
+ * lower ceiling) and the tuned ceiling. */
+int32_t ml_session_send_queue(uint64_t session, MLSendQueue *out);
+uint32_t ml_flow_queue_limit(uint32_t min_round_trip_ms, uint64_t sent_bytes_per_second);
+int32_t ml_flow_admits_frame(uint32_t queued_bytes, uint32_t limit);
+int32_t ml_flow_next_bitrate(uint32_t current_kbps, uint32_t ceiling_kbps, uint32_t waited_ms, MLFlowState *state,
+                             uint32_t *kbps_out);
 /* Pass an ML_SESSION_MAX_VIDEO buffer: video, pointers and sound (to viewers)
  * and clipboard (to either side) arrive in it. TIMEOUT is retryable when no message bytes were
  * read; the deadline bounds only the wait for a new message, and a message

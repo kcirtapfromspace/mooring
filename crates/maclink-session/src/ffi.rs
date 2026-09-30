@@ -136,6 +136,22 @@ pub struct MLCursorMessage {
     pub png_offset: usize,
     pub png_length: usize,
 }
+/// Pacing history the host keeps between once-a-second bitrate updates.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MLFlowState {
+    pub recent: u32,
+    pub clear_seconds: u32,
+}
+/// The kernel's view of a session's sending side, for the host's pacing.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MLSendQueue {
+    pub queued_bytes: u32,
+    pub round_trip_ms: u32,
+    pub sent_bytes: u64,
+    pub retransmitted_bytes: u64,
+}
 /// One clock reply: the viewer's send and receive times for the ping, and the
 /// host's time in its reply, all in microseconds of CoreMedia host time.
 #[repr(C)]
@@ -311,6 +327,8 @@ const _: () = {
     assert!(offset_of!(MLVideoPacket, vps_offset) == 80);
     assert!(size_of::<MLSessionMessage>() == 872);
     assert!(size_of::<MLClockSample>() == 24 && offset_of!(MLClockSample, host_us) == 16);
+    assert!(size_of::<MLSendQueue>() == 24 && offset_of!(MLSendQueue, sent_bytes) == 8);
+    assert!(size_of::<MLFlowState>() == 8);
     assert!(size_of::<MLClockEstimate>() == 16 && offset_of!(MLClockEstimate, error_us) == 8);
     assert!(offset_of!(MLSessionMessage, audio) == 848);
     assert!(size_of::<MLAudioMessage>() == 24);
@@ -961,6 +979,64 @@ pub unsafe extern "C" fn ml_audio_playout(
         let (play, drop) = crate::audio::playout(buffered_frames, playing != 0);
         *playing_out = u8::from(play);
         *drop_out = drop;
+        Ok(())
+    })
+}
+/// The session's send buffer and round trip, from the kernel.
+/// # Safety
+/// `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_session_send_queue(id: u64, out: *mut MLSendQueue) -> i32 {
+    ffi(|| {
+        let out = unsafe { output(out)? };
+        let queue = transport::session(id)?.send_queue()?;
+        *out = MLSendQueue {
+            queued_bytes: queue.queued_bytes,
+            round_trip_ms: queue.round_trip_ms,
+            sent_bytes: queue.sent_bytes,
+            retransmitted_bytes: queue.retransmitted_bytes,
+        };
+        Ok(())
+    })
+}
+/// The most the send buffer may hold before the host starts a frame, from
+/// the fastest recent round trip and the bytes sent in the last second.
+#[unsafe(no_mangle)]
+pub extern "C" fn ml_flow_queue_limit(min_round_trip_ms: u32, sent_bytes_per_second: u64) -> u32 {
+    crate::flow::queue_limit(min_round_trip_ms, sent_bytes_per_second)
+}
+/// 1 when the host may start a video frame with this much queued, else 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn ml_flow_admits_frame(queued_bytes: u32, limit: u32) -> i32 {
+    i32::from(crate::flow::admits_frame(queued_bytes, limit))
+}
+/// The host's bitrate for the next second, from the milliseconds frames
+/// waited for the send buffer in the last one. The caller keeps `state`,
+/// zeroed at session start.
+/// # Safety
+/// `state` and `kbps_out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_flow_next_bitrate(
+    current_kbps: u32,
+    ceiling_kbps: u32,
+    waited_ms: u32,
+    state: *mut MLFlowState,
+    kbps_out: *mut u32,
+) -> i32 {
+    ffi(|| {
+        let state = unsafe { output(state)? };
+        let kbps_out = unsafe { output(kbps_out)? };
+        let previous = crate::flow::FlowState {
+            recent: state.recent,
+            clear_seconds: state.clear_seconds,
+        };
+        let (kbps, next) =
+            crate::flow::next_bitrate(current_kbps, ceiling_kbps, previous, waited_ms);
+        *state = MLFlowState {
+            recent: next.recent,
+            clear_seconds: next.clear_seconds,
+        };
+        *kbps_out = kbps;
         Ok(())
     })
 }
