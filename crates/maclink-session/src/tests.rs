@@ -1560,6 +1560,8 @@ const TEST_CAPABILITIES: u64 = ML_CAPABILITY_HEVC_444
     | ML_CAPABILITY_GESTURES
     | ML_CAPABILITY_AUDIO
     | ML_CAPABILITY_LATENCY
+    | ML_CAPABILITY_VERSION
+    | ML_CAPABILITY_REMOTE_UPDATE
     | 1 << 40; // plus a bit no build knows
 fn hello(id: u64) -> u64 {
     let mut buffer = vec![0; 4096];
@@ -2120,4 +2122,78 @@ fn local_only_metrics_never_reach_the_peer() {
         .map(|metric| metric.metric)
         .collect();
     assert_eq!((status, sent), (0, vec![1, 18]));
+}
+
+#[test]
+fn versions_and_update_requests_reach_only_macs_that_read_them() {
+    let mut packed = 0;
+    let release = std::ffi::CString::new("0.3.0-preview.19").unwrap();
+    assert_eq!(unsafe { ml_release_pack(release.as_ptr(), &mut packed) }, 0);
+    let mut shown = [0 as std::ffi::c_char; 64];
+    assert_eq!(
+        unsafe { ml_release_display(packed, shown.as_mut_ptr(), shown.len()) },
+        0
+    );
+    let shown = unsafe { std::ffi::CStr::from_ptr(shown.as_ptr()) };
+    assert_eq!(shown.to_str().unwrap(), "0.3.0 preview 19");
+    let bad = std::ffi::CString::new("0.3.0-beta").unwrap();
+    assert_eq!(
+        unsafe { ml_release_pack(bad.as_ptr(), &mut packed) },
+        Error::Invalid as i32
+    );
+
+    let version = MLControlMessage {
+        geometry: MLDisplayGeometry {
+            pixel_width: 24,
+            ..Default::default()
+        },
+        ..control(9, 3 << 32 | 19)
+    };
+    let request = control(10, 0);
+    let ready = MLControlMessage {
+        geometry: MLDisplayGeometry {
+            pixel_width: 25,
+            pixel_height: 3,
+            ..Default::default()
+        },
+        ..control(11, 3 << 32 | 20)
+    };
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let (viewer, host) = pair_version(5);
+    hello(host.0);
+    hello(viewer.0);
+    let mut buffer = vec![0; 4096];
+    assert_eq!(send_control(viewer.0, &version), 0);
+    assert_eq!(send_control(viewer.0, &request), 0);
+    for (kind, value) in [(9, 3 << 32 | 19), (10, 0)] {
+        let (status, message) = typed(host.0, &mut buffer, 2000);
+        assert_eq!(
+            (status, message.control.kind, message.control.ping_id),
+            (0, kind, value)
+        );
+    }
+    assert_eq!(send_control(host.0, &version), 0);
+    assert_eq!(send_control(host.0, &ready), 0);
+    for (kind, width) in [(9, 24), (11, 25)] {
+        let (status, message) = typed(viewer.0, &mut buffer, 2000);
+        assert_eq!(
+            (
+                status,
+                message.control.kind,
+                message.control.geometry.pixel_width
+            ),
+            (0, kind, width)
+        );
+    }
+    assert_eq!(
+        send_control(host.0, &request),
+        Error::Invalid as i32,
+        "hosts never ask"
+    );
+    // Protocol 4 peers announce nothing: nothing new is sent to them.
+    let (old_viewer, old_host) = pair_version(4);
+    assert_eq!(send_control(old_viewer.0, &version), Error::Invalid as i32);
+    assert_eq!(send_control(old_viewer.0, &request), Error::Invalid as i32);
+    assert_eq!(send_control(old_host.0, &ready), Error::Invalid as i32);
+    assert!(!is_closed(old_viewer.0) && !is_closed(old_host.0));
 }

@@ -46,11 +46,22 @@ enum NativeSessionTests {
     static func testLatency() throws {
         // Every build announces what it always supports; self-tests add the rest.
         let always = UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_GESTURES) | UInt64(ML_CAPABILITY_LATENCY)
+            | UInt64(ML_CAPABILITY_VERSION)
         try require(NativeCapabilities.local(hevc444: false, virtualDisplay: false, audio: false) == always,
-                    "Pointer shapes, gestures and latency are always announced")
+                    "Pointer shapes, gestures, latency and versions are always announced")
         let everything = always | UInt64(ML_CAPABILITY_HEVC_444) | UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) | UInt64(ML_CAPABILITY_AUDIO)
-        try require(NativeCapabilities.local(hevc444: true, virtualDisplay: true, audio: true) == everything,
-                    "Self-tested capabilities are announced when they pass")
+            | UInt64(ML_CAPABILITY_REMOTE_UPDATE)
+        try require(NativeCapabilities.local(hevc444: true, virtualDisplay: true, audio: true, updatesItself: true) == everything,
+                    "Self-tested capabilities, and remote updates for release builds, are announced when they apply")
+        // Versions compare by release, then build; development builds can't be ordered.
+        let preview19 = NativeVersion(build: 24, release: 3 << 32 | 19), preview20 = NativeVersion(build: 25, release: 3 << 32 | 20)
+        try require(preview19.compared(to: preview20) == .orderedAscending && preview20.compared(to: preview19) == .orderedDescending
+                    && preview19.compared(to: preview19) == .orderedSame, "Later releases are newer")
+        try require(preview19.compared(to: NativeVersion(build: 99, release: 0)) == nil, "A development build is never ordered")
+        try require(preview19.name == "0.3.0 preview 19" && NativeVersion(build: 3, release: 0).name == "a development build",
+                    "Versions read as people write them")
+        try require(NativeVersion.local.release == 0 && NativeVersion.local.build >= 1,
+                    "A build without an update feed reports as a development build")
         let sync = NativeClockSync()
         let frame = NativeFrameTiming(hostUs: 5_100_000, decodeStartUs: 112_000, decodedUs: 116_000, presentedUs: 130_000)
         try require(sync.latency(frame) == nil, "No latency before the clocks are placed")
@@ -161,11 +172,14 @@ enum NativeSessionTests {
             try require(!invalid.isValid, "Display bounds come from Rust")
         }
         for message: NativeControlMessage in [.geometry(display, inputEnabled: true), .inputState(enabled: false),
-                                              .ping(0), .pong(UInt64.max), .keyframe, .clock(7, hostUs: 0x0123_4567_89AB_CDEF)] {
+                                              .ping(0), .pong(UInt64.max), .keyframe, .clock(7, hostUs: 0x0123_4567_89AB_CDEF),
+                                              .version(NativeVersion(build: 24, release: 3 << 32 | 19)), .updateRequest,
+                                              .updateStatus(.checking, ready: nil),
+                                              .updateStatus(.ready, ready: NativeVersion(build: 25, release: 3 << 32 | 20))] {
             try require(try NativeControlMessage(validated: message.raw) == message, "Every control message round-trips the C ABI")
         }
         try testLatency()
-        var unknown = MLControlMessage(); unknown.kind = 9
+        var unknown = MLControlMessage(); unknown.kind = 12
         try rejects("Unknown control kinds are rejected") { _ = try NativeControlMessage(validated: unknown) }
 
         try testTelemetry()

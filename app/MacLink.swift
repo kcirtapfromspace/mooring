@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Darwin
+import ServiceManagement
 
 struct SavedMac: Decodable {
     let id: String
@@ -338,6 +339,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     private lazy var automation: MacLinkAutomationService = AutomationCoordinator(cli: cli)
     private lazy var native = NativeSessionCoordinator()
     private let updater = MacLinkUpdater()
+    private var settingsWindow: MacLinkSettingsWindow?
     private var automationState = AutomationMenuState()
     private var automationStarted = false
     private var initialLoad = true
@@ -388,14 +390,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         automationState = automation.state
         native.onChange = { [weak self] in
             self?.refreshStatusMenu()
+            self?.refreshSettings()
             // A session that just ended may free a waiting update to install.
             DispatchQueue.main.async { self?.updater.installIfIdle() }
         }
-        native.onPeersChange = { [weak self] in self?.rebuildRows() }
+        native.onPeersChange = { [weak self] in self?.rebuildRows(); self?.refreshSettings() }
         native.onVersionMismatch = { [weak self] in self?.updater.checkInBackground() }
+        native.onCheckForUpdates = { [weak self] in self?.updater.checkForUpdates() }
+        native.onUpdateRequest = { [weak self] in self?.updater.checkForViewer() }
+        updater.onViewerStatus = { [weak self] state, ready in self?.native.reportUpdateStatus(state, ready: ready) }
+        updater.willInstall = { [weak self] in self?.native.prepareForUpdateInstall() }
         updater.isIdle = { [weak self] in self?.native.isIdleForUpdate ?? false }
-        updater.onChange = { [weak self] in self?.refreshStatusMenu() }
+        updater.onChange = { [weak self] in self?.refreshStatusMenu(); self?.refreshSettings() }
         updater.start()
+        // Announced from the launch self-tests: viewers may ask this Mac to update.
+        native.updatesItself = updater.isAvailable
         // Sharing can stop without a session change, such as automatic sharing resuming.
         updateTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.updater.installIfIdle() }
         reloadConnections()
@@ -459,22 +468,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             let stop = NSMenuItem(title: "Stop Sharing This Mac", action: #selector(stopNativeSharing), keyEquivalent: "")
             stop.target = self; statusMenu.addItem(stop)
         }
-        let match = NSMenuItem(title: "Match Shared Screen to This Mac", action: #selector(toggleMatchScreen), keyEquivalent: "")
-        match.target = self; match.state = native.matchesScreen ? .on : .off
-        match.toolTip = "When viewing, the sharing Mac shows a screen exactly this Mac's size, pixel for pixel."
-        statusMenu.addItem(match)
-        let sound = NSMenuItem(title: "Play Sound from Shared Mac", action: #selector(toggleSharedSound), keyEquivalent: "")
-        sound.target = self; sound.state = native.playsSound ? .on : .off
-        sound.toolTip = "When viewing, play the sharing Mac's sound on this Mac. It still plays on the sharing Mac too."
-        statusMenu.addItem(sound)
-        let latency = NSMenuItem(title: "Lower Display Latency (May Tear)", action: #selector(toggleDisplayLatency), keyEquivalent: "")
-        latency.target = self; latency.state = native.lowersDisplayLatency ? .on : .off
-        latency.toolTip = "When viewing, show each frame without waiting for this display's next refresh. Sooner, but moving pictures can show a tear line."
-        statusMenu.addItem(latency)
-        let clipboard = NSMenuItem(title: "Shared Clipboard", action: #selector(toggleSharedClipboard), keyEquivalent: "")
-        clipboard.target = self; clipboard.state = native.sharesClipboard ? .on : .off
-        clipboard.toolTip = "Copy on one Mac and paste on the other during a MacLink session."
-        statusMenu.addItem(clipboard)
         statusMenu.addItem(.separator())
         let connectMenuItem = NSMenuItem(title: "Apple Screen Sharing", action: nil, keyEquivalent: "")
         let connectMenu = NSMenu()
@@ -518,7 +511,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         statusMenu.addItem(pauseItem)
         let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
-        settings.isEnabled = available
+        settings.toolTip = "Sharing, viewing, paired Macs and updates."
         statusMenu.addItem(settings)
         // Version and updates sit together, just above Quit.
         statusMenu.addItem(.separator())
@@ -544,10 +537,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     @objc private func stopNativeSharing() { native.stopSharingByUser() }
     @objc private func checkForUpdates() { updater.checkForUpdates() }
     @objc private func installUpdate() { updater.install() }
-    @objc private func toggleSharedClipboard() { native.sharesClipboard.toggle() }
-    @objc private func toggleMatchScreen() { native.matchesScreen.toggle() }
-    @objc private func toggleSharedSound() { native.playsSound.toggle() }
-    @objc private func toggleDisplayLatency() { native.lowersDisplayLatency.toggle() }
+
     @objc private func connectNativePeer(_ sender: NSMenuItem) {
         if let id = sender.representedObject as? String { native.connect(peerID: id) }
     }
@@ -887,7 +877,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(showConnections) { return true }
-        if menuItem.action == #selector(addMac) || menuItem.action == #selector(showSettings) {
+        if menuItem.action == #selector(showSettings) { return true }
+        if menuItem.action == #selector(addMac) {
             return !busy && !automationState.isBusy && addController == nil && window.attachedSheet == nil
         }
         if [#selector(connect), #selector(removeMac)].contains(menuItem.action) {
@@ -1086,10 +1077,78 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     @objc private func showSettings() {
+        if settingsWindow == nil {
+            let controller = MacLinkSettingsWindow()
+            controller.onChange = { [weak self] setting, on in self?.changeSetting(setting, on) }
+            controller.onRemovePeer = { [weak self] peer in
+                guard let self else { return }
+                do { try self.native.forget(peerID: peer.id) } catch { self.showSettingsError(error.localizedDescription) }
+                self.refreshSettings()
+            }
+            controller.onShareThisMac = { [weak self] in self?.native.showShare() }
+            controller.onAllowKeyboardAndMouse = { [weak self] in self?.native.allowKeyboardAndMouse() }
+            controller.onCheckForUpdates = { [weak self] in self?.updater.checkForUpdates() }
+            controller.onInstallUpdate = { [weak self] in self?.updater.install() }
+            controller.onAutomationSettings = { [weak self] in self?.showAutomationSettings() }
+            // Permissions and login approval change in System Settings.
+            controller.onAppear = { [weak self] in self?.refreshSettings() }
+            settingsWindow = controller
+            controller.window?.center()
+        }
+        refreshSettings()
+        settingsWindow?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Apple Screen Sharing automation keeps its own Save and Cancel window.
+    private func showAutomationSettings() {
         guard !busy, !automationState.isBusy, window.attachedSheet == nil else { return }
         NSApp.activate(ignoringOtherApps: true)
         automation.showSettings(connections: connections, parentWindow: window.isVisible ? window : nil)
         updateControls()
+    }
+
+    private func refreshSettings() {
+        guard let settingsWindow else { return }
+        var state = MacLinkSettingsState()
+        state.sharesAutomatically = native.sharesAutomatically
+        state.sharesClipboard = native.sharesClipboard
+        state.keyboardAndMouseAllowed = native.keyboardAndMouseAllowed
+        state.matchesScreen = native.matchesScreen
+        state.playsSound = native.playsSound
+        state.lowersDisplayLatency = native.lowersDisplayLatency
+        let login = SMAppService.mainApp.status
+        state.launchesAtLogin = login == .enabled || login == .requiresApproval
+        state.loginNeedsApproval = login == .requiresApproval
+        state.peers = native.peers
+        state.connectedPeerID = native.connectedPeerID
+        let local = NativeVersion.local
+        state.version = "\(local.release == 0 ? (Bundle.main.object(forInfoDictionaryKey: "MacLinkReleaseVersion") as? String ?? "development") : local.name) (build \(local.build))"
+        if let ready = updater.readyVersion { state.updates = .ready(updater.readyNativeVersion?.name ?? ready) }
+        else { state.updates = updater.isAvailable ? .available : .unavailable }
+        settingsWindow.show(state)
+    }
+
+    private func changeSetting(_ setting: MacLinkSetting, _ on: Bool) {
+        switch setting {
+        case .sharesAutomatically: native.setSharingAutomatically(on)
+        case .sharesClipboard: native.sharesClipboard = on
+        case .matchesScreen: native.matchesScreen = on
+        case .playsSound: native.playsSound = on
+        case .lowersDisplayLatency: native.lowersDisplayLatency = on
+        case .launchesAtLogin:
+            do {
+                let status = SMAppService.mainApp.status
+                if on && status != .enabled && status != .requiresApproval { try SMAppService.mainApp.register() }
+                else if !on && (status == .enabled || status == .requiresApproval) { try SMAppService.mainApp.unregister() }
+            } catch { showSettingsError("MacLink couldn't change launching at login: \(error.localizedDescription)") }
+        }
+        refreshSettings()
+    }
+
+    private func showSettingsError(_ message: String) {
+        let alert = NSAlert(); alert.messageText = "MacLink Settings"; alert.informativeText = message
+        if let window = settingsWindow?.window, window.isVisible { alert.beginSheetModal(for: window) } else { alert.runModal() }
     }
 
     @objc private func showConnectionHelp() {

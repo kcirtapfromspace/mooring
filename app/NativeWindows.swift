@@ -168,6 +168,7 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
     var onReconnect: (() -> Void)?
     var onCancelReconnect: (() -> Void)?
     var onAllowSystemKeys: (() -> Void)?
+    var onVersionAction: (() -> Void)?
     /// Set once the window closes; a closed window is never reused.
     private(set) var isClosed = false
     /// Full screen is entered for the first picture only, so a reconnect keeps
@@ -180,6 +181,9 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
     private let closeButton = NSButton(title: "Close", target: nil, action: nil)
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let allowSystemKeys = NSButton(title: "Allow ⌘-Tab…", target: nil, action: nil)
+    /// When the two Macs run different MacLink versions: what that means and,
+    /// when there is one, the next step.
+    private let versionNotice = NSButton(title: "", target: nil, action: nil)
     init(name: String, peerID: String) {
         self.peerID = peerID
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
@@ -198,7 +202,9 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
         allowSystemKeys.target = self; allowSystemKeys.action = #selector(allowKeys); allowSystemKeys.bezelStyle = .inline
         allowSystemKeys.toolTip = "Allow MacLink in Accessibility on this Mac to send ⌘-Tab and other system shortcuts to the remote Mac."
         allowSystemKeys.isHidden = true
-        let bar = stack([status, NSView(), allowSystemKeys, diagnostics], orientation: .horizontal, spacing: 12)
+        versionNotice.target = self; versionNotice.action = #selector(versionAction); versionNotice.bezelStyle = .inline
+        versionNotice.isHidden = true
+        let bar = stack([status, NSView(), versionNotice, allowSystemKeys, diagnostics], orientation: .horizontal, spacing: 12)
         root.addSubview(bar)
         NSLayoutConstraint.activate([
             video.leadingAnchor.constraint(equalTo: root.leadingAnchor), video.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -249,6 +255,12 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
     func hideOverlay() { ended.isHidden = true }
     var isReconnecting: Bool { !ended.isHidden && !cancelButton.isHidden }
     func setSystemKeysAllowed(_ allowed: Bool) { allowSystemKeys.isHidden = allowed }
+    /// nil hides the notice; a disabled notice is information only.
+    func setVersionNotice(_ text: String?, enabled: Bool = false) {
+        versionNotice.isHidden = text == nil
+        versionNotice.title = text ?? ""
+        versionNotice.isEnabled = enabled
+    }
     private func showOverlay(title: String, reason: String, reconnecting: Bool) {
         endedTitle.stringValue = title; endedReason.stringValue = reason
         cancelButton.isHidden = !reconnecting
@@ -258,6 +270,7 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
     @objc private func reconnect() { onReconnect?() }
     @objc private func cancelReconnect() { onCancelReconnect?() }
     @objc private func allowKeys() { onAllowSystemKeys?() }
+    @objc private func versionAction() { onVersionAction?() }
     @objc private func closeWindow() { window?.performClose(nil) }
     func windowWillClose(_ notification: Notification) { isClosed = true; onClose?() }
     func windowDidResignKey(_ notification: Notification) { onReleaseInput?() }

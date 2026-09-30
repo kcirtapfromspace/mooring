@@ -982,6 +982,32 @@ pub unsafe extern "C" fn ml_audio_playout(
         Ok(())
     })
 }
+/// Packs a release such as "0.3.0-preview.19" for the version message.
+/// # Safety
+/// `text` must be NUL terminated and `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_release_pack(release: *const c_char, out: *mut u64) -> i32 {
+    ffi(|| {
+        let out = unsafe { output(out)? };
+        *out = crate::control::Release::parse(&unsafe { text(release)? })?.0;
+        Ok(())
+    })
+}
+/// A packed release for display, NUL terminated: "0.3.0 preview 19",
+/// "0.3.0", or "a development build".
+/// # Safety
+/// `out` must be writable for `capacity` bytes, at least ML_RELEASE_CAPACITY.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_release_display(packed: u64, out: *mut c_char, capacity: usize) -> i32 {
+    ffi(|| {
+        if out.is_null() || capacity < ML_RELEASE_CAPACITY {
+            return Err(Error::Invalid);
+        }
+        // SAFETY: caller promises `capacity` writable bytes.
+        let target = unsafe { &mut *(out as *mut [c_char; ML_RELEASE_CAPACITY]) };
+        write_text(target, &crate::control::Release(packed).display())
+    })
+}
 /// The session's send buffer and round trip, from the kernel.
 /// # Safety
 /// `out` must be writable.
@@ -1223,6 +1249,9 @@ pub const ML_CAPABILITY_CURSOR: u64 = crate::policy::CAPABILITY_CURSOR;
 pub const ML_CAPABILITY_GESTURES: u64 = crate::policy::CAPABILITY_GESTURES;
 pub const ML_CAPABILITY_AUDIO: u64 = crate::policy::CAPABILITY_AUDIO;
 pub const ML_CAPABILITY_LATENCY: u64 = crate::policy::CAPABILITY_LATENCY;
+pub const ML_CAPABILITY_VERSION: u64 = crate::policy::CAPABILITY_VERSION;
+pub const ML_CAPABILITY_REMOTE_UPDATE: u64 = crate::policy::CAPABILITY_REMOTE_UPDATE;
+pub const ML_RELEASE_CAPACITY: usize = 64;
 pub const ML_AUDIO_MAX_PAYLOAD: usize = crate::audio::MAX_AUDIO_PAYLOAD;
 pub const ML_AUDIO_SAMPLE_RATE: u32 = crate::audio::SAMPLE_RATE;
 pub const ML_CODEC_H264: u8 = 1;
@@ -1275,6 +1304,14 @@ const _: () = assert!(RECONNECT_STABLE.as_secs() == ML_RECONNECT_STABLE_SECONDS 
 #[unsafe(no_mangle)]
 pub extern "C" fn ml_reconnect_delay_ms(attempt: u32) -> i32 {
     reconnect_delay(attempt)
+        .and_then(|delay| i32::try_from(delay.as_millis()).ok())
+        .unwrap_or(Error::Invalid as i32)
+}
+pub const ML_UPDATE_RECONNECT_ATTEMPTS: u32 = crate::policy::UPDATE_RECONNECT_ATTEMPTS;
+/// As `ml_reconnect_delay_ms`, while the sharing Mac installs an update.
+#[unsafe(no_mangle)]
+pub extern "C" fn ml_update_reconnect_delay_ms(attempt: u32) -> i32 {
+    crate::policy::update_reconnect_delay(attempt)
         .and_then(|delay| i32::try_from(delay.as_millis()).ok())
         .unwrap_or(Error::Invalid as i32)
 }

@@ -79,7 +79,18 @@ enum {
     /* protocol 5, host to a viewer with ML_CAPABILITY_LATENCY: a pong carrying
      * ping_id and the host's time in microseconds of CoreMedia host time, as
      * geometry.pixel_width (high 32 bits) and pixel_height (low 32 bits). */
-    ML_CONTROL_CLOCK = 8
+    ML_CONTROL_CLOCK = 8,
+    /* protocol 5, either way, once, to a peer with ML_CAPABILITY_VERSION: the
+     * sender's build in geometry.pixel_width (at least 1) and its packed
+     * release (see ml_release_pack; 0 for a development build) in ping_id. */
+    ML_CONTROL_VERSION = 9,
+    /* protocol 5, viewer to a host with ML_CAPABILITY_REMOTE_UPDATE, all
+     * fields zero; hosts skip requests under 60 s apart. */
+    ML_CONTROL_UPDATE_REQUEST = 10,
+    /* protocol 5, host to a viewer with ML_CAPABILITY_VERSION: the state
+     * (ML_UPDATE_*) in geometry.pixel_height; for READY, the waiting update's
+     * build and release as in VERSION, otherwise zero. */
+    ML_CONTROL_UPDATE_STATUS = 11
 };
 enum {
     ML_INPUT_KEY_DOWN = 1, ML_INPUT_KEY_UP = 2, ML_INPUT_POINTER_MOVE = 3,
@@ -112,6 +123,7 @@ enum {
 #define ML_CLIPBOARD_MAX_BYTES 4194304u /* 4 MiB of representation bytes per message */
 #define ML_CLIPBOARD_MAX_MESSAGE 4194332u /* the smallest receive buffer for a host */
 #define ML_RECONNECT_ATTEMPTS 5u
+#define ML_UPDATE_RECONNECT_ATTEMPTS 40u
 enum { ML_CODEC_H264 = 1, ML_CODEC_HEVC = 2 };
 /* Capability bits announced in protocol 5 sessions. */
 #define ML_CAPABILITY_HEVC_444 1ull
@@ -120,6 +132,10 @@ enum { ML_CODEC_H264 = 1, ML_CODEC_HEVC = 2 };
 #define ML_CAPABILITY_GESTURES 8ull /* the host injects trackpad gestures */
 #define ML_CAPABILITY_AUDIO 16ull /* this Mac encodes and decodes Opus; a viewer plays the host's sound */
 #define ML_CAPABILITY_LATENCY 32ull /* clock replies and latency metrics; peers without it never receive them */
+#define ML_CAPABILITY_VERSION 64ull /* sends and reads the MacLink version and update status */
+#define ML_CAPABILITY_REMOTE_UPDATE 128ull /* a sharing Mac that updates itself when a viewer asks */
+#define ML_RELEASE_CAPACITY 64u
+enum { ML_UPDATE_CHECKING = 1, ML_UPDATE_UP_TO_DATE = 2, ML_UPDATE_READY = 3, ML_UPDATE_FAILED = 4 };
 #define ML_AUDIO_MAX_PAYLOAD 1500u /* bytes in one Opus packet */
 #define ML_AUDIO_SAMPLE_RATE 48000u
 #define ML_RECONNECT_STABLE_SECONDS 20u
@@ -429,6 +445,12 @@ int32_t ml_audio_playout(uint32_t buffered_frames, uint8_t playing, uint8_t *pla
  * the shortest round trip wins, and its half is the error bound. INVALID when
  * no sample is usable (round trips over 1 s are ignored). */
 int32_t ml_clock_estimate(const MLClockSample *samples, size_t count, MLClockEstimate *out);
+/* Strict "major.minor.patch" or "major.minor.patch-preview.N", each below
+ * 65536 and N from 1 to 65534, packed 16 bits apiece for ML_CONTROL_VERSION.
+ * A final release stores 0xffff as N, so it compares after its previews. */
+int32_t ml_release_pack(const char *release, uint64_t *out);
+/* "0.3.0 preview 19", "0.3.0" or "a development build" for 0. */
+int32_t ml_release_display(uint64_t packed, char *out, size_t capacity);
 /* Host pacing. Video in the kernel's send buffer can't be replaced by a newer
  * frame, so a host starts a frame only while the buffer holds at most the
  * queue limit: 1.5 times the bytes sent per fastest recent round trip, from
@@ -466,6 +488,9 @@ int32_t ml_input_keeps_local(uint16_t key_code, uint32_t modifiers);
  * before attempt 1...ML_RECONNECT_ATTEMPTS, then ML_SESSION_INVALID. A session
  * that stayed connected ML_RECONNECT_STABLE_SECONDS starts a new budget. */
 int32_t ml_reconnect_delay_ms(uint32_t attempt);
+/* While the sharing Mac installs an update: 3000 ms before attempts 1 to
+ * ML_UPDATE_RECONNECT_ATTEMPTS (two minutes), then ML_SESSION_INVALID. */
+int32_t ml_update_reconnect_delay_ms(uint32_t attempt);
 
 /* Protocol negotiation: builds speak versions 4-5 and agree on the highest
  * both support; version 5 sessions start with each side's Hello. Set this

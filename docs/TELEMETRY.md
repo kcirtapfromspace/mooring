@@ -50,7 +50,7 @@ Viewing Mac:
 | `decode_ms`, `decode_ms_max`, `decoded_fps` | Hardware decode time and rate. |
 | `presented_fps` | Frames that reached the display. |
 | `rtt_ms` | Ping round trip, including the sharing Mac's send queue. Not display latency. |
-| `latency_ms`, `latency_ms_p95` | Median and 95th percentile time from a screen change on the sharing Mac to that frame appearing on this Mac's display, over the last second with frames. Needs preview 14 on both Macs. |
+| `latency_ms`, `latency_ms_p95` | Median and 95th percentile time from a screen change on the sharing Mac to that frame appearing on this Mac's display, over the last second. Absent when no frame reached the screen in that second, as while the window is hidden (preview 19 and later). Needs preview 14 on both Macs. |
 | `to_viewer_ms` | Median part of that until this Mac starts decoding: capture, encode, sending and the network. |
 | `display_wait_ms` | Median time from decoded to on screen: queueing for the next display refresh and drawing. |
 | `clock_error_ms` | How far off the two Macs' clocks could be placed, half the fastest recent ping round trip. Latency figures are accurate to about this much. |

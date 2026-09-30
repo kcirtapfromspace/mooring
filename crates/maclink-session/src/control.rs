@@ -57,6 +57,81 @@ pub(crate) enum ControlKind {
     /// Protocol 5, host to a viewer that measures latency: a pong that also
     /// carries the host's clock.
     Clock = 8,
+    /// Protocol 5, either way, to a peer that announced it reads it: this
+    /// Mac's MacLink version, once per session.
+    Version = 9,
+    /// Protocol 5, viewer to a host that can update itself: check for an update.
+    UpdateRequest = 10,
+    /// Protocol 5, host to viewer: how that check is going.
+    UpdateStatus = 11,
+}
+
+/// A MacLink release like 0.3.0-preview.19, packed as major, minor, patch
+/// and preview number in 16 bits each, so later releases compare greater. A
+/// final release stores 0xffff as its preview, after all its previews; 0
+/// overall is a development build.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Release(pub u64);
+
+impl Release {
+    const FINAL: u64 = 0xffff;
+    /// Strict: `major.minor.patch` or `major.minor.patch-preview.N`, decimal
+    /// numbers without leading zeros, each below 65536, N from 1 to 65534.
+    pub(crate) fn parse(text: &str) -> Result<Self> {
+        let number = |digits: &str| -> Result<u64> {
+            let valid = !digits.is_empty()
+                && digits.len() <= 5
+                && digits.bytes().all(|byte| byte.is_ascii_digit())
+                && (digits == "0" || !digits.starts_with('0'));
+            if !valid {
+                return Err(Error::Invalid);
+            }
+            let value: u64 = digits.parse().map_err(|_| Error::Invalid)?;
+            if value > u64::from(u16::MAX) {
+                return Err(Error::Invalid);
+            }
+            Ok(value)
+        };
+        let (base, preview) = match text.split_once("-preview.") {
+            Some((base, preview)) => {
+                let preview = number(preview)?;
+                if preview == 0 || preview == Self::FINAL {
+                    return Err(Error::Invalid);
+                }
+                (base, preview)
+            }
+            None => (text, Self::FINAL),
+        };
+        let parts: Vec<&str> = base.split('.').collect();
+        let [major, minor, patch] = parts.as_slice() else {
+            return Err(Error::Invalid);
+        };
+        Ok(Self(
+            number(major)? << 48 | number(minor)? << 32 | number(patch)? << 16 | preview,
+        ))
+    }
+    pub(crate) fn display(self) -> String {
+        if self.0 == 0 {
+            return "a development build".into();
+        }
+        let part = |shift: u32| (self.0 >> shift) & 0xffff;
+        let base = format!("{}.{}.{}", part(48), part(32), part(16));
+        match part(0) {
+            Self::FINAL => base,
+            preview => format!("{base} preview {preview}"),
+        }
+    }
+}
+
+/// Where a sharing Mac's update check stands, as reported to the viewer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum UpdateState {
+    Checking = 1,
+    UpToDate = 2,
+    /// Downloaded and verified; installs once no session is connected.
+    Ready = 3,
+    Failed = 4,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -83,6 +158,20 @@ pub(crate) enum ControlMessage {
     Clock {
         ping_id: u64,
         host_us: u64,
+    },
+    /// The sender's build number and release, in the pixel_width and
+    /// ping_id fields.
+    Version {
+        build: u32,
+        release: Release,
+    },
+    UpdateRequest,
+    /// The state in pixel_height; for Ready, the waiting update's release
+    /// and build as in Version, otherwise zero.
+    UpdateStatus {
+        state: UpdateState,
+        build: u32,
+        release: Release,
     },
 }
 
@@ -167,6 +256,39 @@ impl ControlMessage {
                         | u64::from(geometry.pixel_height),
                 }
             }
+            9 if !enabled
+                && [geometry.x, geometry.y, geometry.width, geometry.height] == [0.0; 4]
+                && geometry.pixel_width > 0
+                && geometry.pixel_height == 0 =>
+            {
+                Self::Version {
+                    build: geometry.pixel_width,
+                    release: Release(ping_id),
+                }
+            }
+            10 if !enabled && geometry.is_zero() && ping_id == 0 => Self::UpdateRequest,
+            11 if !enabled
+                && [geometry.x, geometry.y, geometry.width, geometry.height] == [0.0; 4] =>
+            {
+                let state = match geometry.pixel_height {
+                    1 => UpdateState::Checking,
+                    2 => UpdateState::UpToDate,
+                    3 => UpdateState::Ready,
+                    4 => UpdateState::Failed,
+                    _ => return Err(Error::Invalid),
+                };
+                // Only a waiting update names its version, and it must.
+                let named = geometry.pixel_width != 0 || ping_id != 0;
+                let complete = geometry.pixel_width != 0;
+                if named != (state == UpdateState::Ready) || (named && !complete) {
+                    return Err(Error::Invalid);
+                }
+                Self::UpdateStatus {
+                    state,
+                    build: geometry.pixel_width,
+                    release: Release(ping_id),
+                }
+            }
             _ => return Err(Error::Invalid),
         };
         Ok(message)
@@ -182,6 +304,9 @@ impl ControlMessage {
             Self::Hello(_) => ControlKind::Hello,
             Self::DisplayRequest(_) => ControlKind::DisplayRequest,
             Self::Clock { .. } => ControlKind::Clock,
+            Self::Version { .. } => ControlKind::Version,
+            Self::UpdateRequest => ControlKind::UpdateRequest,
+            Self::UpdateStatus { .. } => ControlKind::UpdateStatus,
         }
     }
 
@@ -206,6 +331,28 @@ impl ControlMessage {
                 DisplayGeometry {
                     pixel_width: (host_us >> 32) as u32,
                     pixel_height: host_us as u32,
+                    ..DisplayGeometry::default()
+                },
+            ),
+            Self::Version { build, release } => (
+                0,
+                release.0,
+                DisplayGeometry {
+                    pixel_width: build,
+                    ..DisplayGeometry::default()
+                },
+            ),
+            Self::UpdateRequest => (0, 0, DisplayGeometry::default()),
+            Self::UpdateStatus {
+                state,
+                build,
+                release,
+            } => (
+                0,
+                release.0,
+                DisplayGeometry {
+                    pixel_width: build,
+                    pixel_height: state as u32,
                     ..DisplayGeometry::default()
                 },
             ),
@@ -291,6 +438,30 @@ mod tests {
                 ping_id: u64::MAX,
                 host_us: u64::MAX,
             },
+            ControlMessage::Version {
+                build: 24,
+                release: Release::parse("0.3.0-preview.19").unwrap(),
+            },
+            ControlMessage::Version {
+                build: u32::MAX,
+                release: Release(0),
+            },
+            ControlMessage::UpdateRequest,
+            ControlMessage::UpdateStatus {
+                state: UpdateState::Checking,
+                build: 0,
+                release: Release(0),
+            },
+            ControlMessage::UpdateStatus {
+                state: UpdateState::Ready,
+                build: 25,
+                release: Release::parse("0.3.0-preview.20").unwrap(),
+            },
+            ControlMessage::UpdateStatus {
+                state: UpdateState::Failed,
+                build: 0,
+                release: Release(0),
+            },
         ];
         for message in messages {
             assert_eq!(ControlMessage::decode(&message.encode()).unwrap(), message);
@@ -330,6 +501,89 @@ mod tests {
             ControlMessage::from_parts(8, 1, 3, display),
             Err(Error::Invalid)
         );
+    }
+
+    #[test]
+    fn releases_parse_strictly_and_display_plainly() {
+        let preview = Release::parse("0.3.0-preview.19").unwrap();
+        assert_eq!(preview.0, 3 << 32 | 19);
+        assert_eq!(preview.display(), "0.3.0 preview 19");
+        assert_eq!(Release::parse("1.2.3").unwrap().display(), "1.2.3");
+        assert_eq!(
+            Release::parse("65535.0.10-preview.65534").unwrap().0,
+            65535 << 48 | 10 << 16 | 65534
+        );
+        assert_eq!(Release(0).display(), "a development build");
+        // Later previews sort after earlier ones, and a final release after all its previews.
+        let final_release = Release::parse("0.3.0").unwrap();
+        assert!(Release::parse("0.3.0-preview.20").unwrap().0 > preview.0);
+        assert!(final_release.0 > Release::parse("0.3.0-preview.65534").unwrap().0);
+        assert!(Release::parse("0.3.1-preview.1").unwrap().0 > final_release.0);
+        for bad in [
+            "",
+            "0.3",
+            "0.3.0.1",
+            "0.3.0-preview.",
+            "0.3.0-preview.0",
+            "0.3.0-preview.07",
+            "0.3.0-preview.65535",
+            "03.0.0",
+            "0.3.0-beta.1",
+            "0.3.0-preview.1-preview.2",
+            "65536.0.0",
+            "0.3.x",
+            " 0.3.0",
+            "0.3.0\n",
+            "-1.0.0",
+            "0..0",
+        ] {
+            assert_eq!(Release::parse(bad), Err(Error::Invalid), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn version_and_update_messages_carry_only_their_fields() {
+        let version = |build: u32, height: u32, x: f64| DisplayGeometry {
+            x,
+            pixel_width: build,
+            pixel_height: height,
+            ..DisplayGeometry::default()
+        };
+        assert!(ControlMessage::from_parts(9, 0, 5, version(24, 0, 0.0)).is_ok());
+        for (enabled, geometry) in [
+            (0, version(0, 0, 0.0)),
+            (0, version(24, 1, 0.0)),
+            (0, version(24, 0, 1.0)),
+            (1, version(24, 0, 0.0)),
+        ] {
+            assert_eq!(
+                ControlMessage::from_parts(9, enabled, 5, geometry),
+                Err(Error::Invalid)
+            );
+        }
+        assert_eq!(
+            ControlMessage::from_parts(10, 0, 1, DisplayGeometry::default()),
+            Err(Error::Invalid)
+        );
+        let status = |state: u32, build: u32, release: u64| {
+            ControlMessage::from_parts(11, 0, release, version(build, state, 0.0))
+        };
+        assert!(status(3, 25, 7).is_ok() && status(3, 25, 0).is_ok() && status(2, 0, 0).is_ok());
+        for (state, build, release) in [
+            (0, 0, 0),
+            (5, 0, 0),
+            (3, 0, 0),
+            (3, 0, 7),
+            (1, 25, 0),
+            (2, 0, 7),
+            (4, 1, 1),
+        ] {
+            assert_eq!(
+                status(state, build, release),
+                Err(Error::Invalid),
+                "{state} {build} {release}"
+            );
+        }
     }
 
     #[test]
@@ -421,7 +675,7 @@ mod tests {
             (6, 1, 3, zero), // hello carries only capabilities
             (6, 0, 3, display),
             (0, 0, 0, zero), // unknown kinds
-            (9, 0, 0, zero),
+            (12, 0, 0, zero),
         ] {
             assert!(ControlMessage::from_parts(kind, enabled, id, value).is_err());
         }

@@ -43,6 +43,9 @@ final class NativeSessionCoordinator {
     private static let matchScreenKey = "native.matchScreen"
     private static let playSoundKey = "native.playSound"
     private static let lowLatencyDisplayKey = "native.lowLatencyDisplay"
+    /// One-shot: sharing was on, but not automatic, when a viewer's requested
+    /// update installed; share again after the relaunch.
+    private static let resumeAfterUpdateKey = "native.resumeSharingAfterUpdate"
     private let defaults: UserDefaults
     private let keychain = NativeKeychain()
     private let peerStore = NativePeerStore()
@@ -153,11 +156,31 @@ final class NativeSessionCoordinator {
     /// A connection closed during the handshake, which usually means the Macs
     /// run different MacLink versions.
     var onVersionMismatch: (() -> Void)?
+    /// Set by the app before launch self-tests finish: this is a release build
+    /// that updates itself, so viewers may ask it to.
+    var updatesItself = false
+    /// Host: a viewer asked this Mac to check for an update now.
+    var onUpdateRequest: (() -> Void)?
+    /// Viewer: the sharing Mac is newer; check for an update to this Mac.
+    var onCheckForUpdates: (() -> Void)?
+    /// The other Mac's MacLink version in the current session, if it sent one.
+    private(set) var viewerPeerVersion: NativeVersion?
+    private(set) var hostPeerVersion: NativeVersion?
+    /// Viewer: the sharing Mac's answer to "Update It".
+    private var peerUpdate: (state: NativeUpdateState, ready: NativeVersion?, at: TimeInterval)?
+    /// Viewer: disconnected so the sharing Mac could install an update; wait
+    /// for it to come back on Rust's longer schedule.
+    private var awaitingPeerUpdate = false
+    /// Viewer: counts Update It requests, so a timeout acts only on its own.
+    private var updateRequestSerial = 0
+    /// Host: a viewer was told its requested update is ready, so it installs
+    /// when that session ends even if sharing isn't automatic.
+    private var viewerAwaitsInstall = false
     /// Relaunching now would interrupt nothing: no session in either role, no
     /// connect or reconnect under way, and any sharing resumes by itself.
     var isIdleForUpdate: Bool {
         !isConnected && hostChannel == nil && connecting == nil && reconnectWork == nil
-            && (!isSharing || sharesAutomatically)
+            && (!isSharing || sharesAutomatically || viewerAwaitsInstall)
     }
     var isSharing: Bool { sharingToken?.isActive == true }
     var isConnected: Bool { viewerChannel?.token.isActive == true }
@@ -246,7 +269,8 @@ final class NativeSessionCoordinator {
                 self.hevc444Available = hevc
                 self.audioAvailable = audio
                 let virtualDisplay = NativeSharedDisplay.isAvailable
-                ml_capabilities_set(NativeCapabilities.local(hevc444: hevc, virtualDisplay: virtualDisplay, audio: audio))
+                ml_capabilities_set(NativeCapabilities.local(hevc444: hevc, virtualDisplay: virtualDisplay, audio: audio,
+                                                             updatesItself: self.updatesItself))
                 NativeLog.session.notice("Opus sound encode and decode: \(audio ? "available" : "unavailable", privacy: .public)")
                 NativeLog.session.notice("virtual display for viewers: \(virtualDisplay ? "available" : "unavailable", privacy: .public)")
                 NativeLog.session.notice("HEVC 4:4:4 hardware encode and decode: \(hevc ? "available" : "unavailable", privacy: .public)")
@@ -256,7 +280,8 @@ final class NativeSessionCoordinator {
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
             guard let self, !self.capabilitiesReady else { return }
             NativeLog.session.error("launch self-tests still running after 5 s; sessions start without HEVC 4:4:4 and sound")
-            ml_capabilities_set(NativeCapabilities.local(hevc444: false, virtualDisplay: NativeSharedDisplay.isAvailable, audio: false))
+            ml_capabilities_set(NativeCapabilities.local(hevc444: false, virtualDisplay: NativeSharedDisplay.isAvailable, audio: false,
+                                                         updatesItself: self.updatesItself))
             self.capabilitiesAreReady()
         }
         clipboard.onSend = { [weak self] content in self?.sendClipboard(content) }
@@ -279,17 +304,8 @@ final class NativeSessionCoordinator {
             }
             controller.onCopy = { [weak self] in self?.copyPairingCode() }
             controller.onReset = { [weak self] in self?.resetPairing() }
-            controller.onControlPermission = { [weak self] in
-                AppleSession.requestPermission()
-                self?.shareWindow?.detail.stringValue = "Enable MacLink in macOS Accessibility to allow keyboard and mouse. Viewing works without it."
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
-            }
-            controller.onAutomaticChange = { [weak self] enabled in
-                guard let self else { return }
-                self.sharesAutomatically = enabled
-                NativeLog.session.notice("automatic sharing \(enabled ? "on" : "off", privacy: .public)")
-                if enabled && !self.isSharing { self.userStoppedSharing = false; self.startSharing() } else { self.refreshShare() }
-            }
+            controller.onControlPermission = { [weak self] in self?.allowKeyboardAndMouse() }
+            controller.onAutomaticChange = { [weak self] enabled in self?.setSharingAutomatically(enabled) }
             controller.onDiagnostics = { [weak self] in self?.saveDiagnostics(self?.lastHostMeasurements) }
             controller.onClipboardChange = { [weak self] enabled in self?.sharesClipboard = enabled }
         }
@@ -301,7 +317,9 @@ final class NativeSessionCoordinator {
         shareWindow?.toggle.title = isSharing ? "Stop Sharing" : "Start Sharing"
         shareWindow?.copy.isEnabled = isSharing
         let idle = sharesAutomatically && !userStoppedSharing ? "Sharing paused · resumes automatically" : "Sharing is off"
-        shareWindow?.status.stringValue = isSharing ? (hostChannel == nil ? "Ready for your other Mac" : "Connected · sharing this display") : idle
+        var connected = "Connected · sharing this display"
+        if let viewer = hostPeerVersion, viewer != NativeVersion.local { connected += " · the viewer runs \(viewer.name)" }
+        shareWindow?.status.stringValue = isSharing ? (hostChannel == nil ? "Ready for your other Mac" : connected) : idle
         shareWindow?.control.isEnabled = !NativeInputInjector.isTrusted
         shareWindow?.control.title = NativeInputInjector.isTrusted ? "Keyboard & Mouse Enabled" : "Enable Keyboard & Mouse…"
         shareWindow?.automatic.state = sharesAutomatically ? .on : .off
@@ -309,6 +327,22 @@ final class NativeSessionCoordinator {
         if let message { shareWindow?.detail.stringValue = message }
         onChange?()
     }
+
+    /// Keyboard and mouse control needs Accessibility on this, the sharing, Mac.
+    var keyboardAndMouseAllowed: Bool { NativeInputInjector.isTrusted }
+    func allowKeyboardAndMouse() {
+        AppleSession.requestPermission()
+        shareWindow?.detail.stringValue = "Enable MacLink in macOS Accessibility to allow keyboard and mouse. Viewing works without it."
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
+    }
+    /// Turning it on starts sharing now; turning it off leaves a running share alone.
+    func setSharingAutomatically(_ enabled: Bool) {
+        sharesAutomatically = enabled
+        NativeLog.session.notice("automatic sharing \(enabled ? "on" : "off", privacy: .public)")
+        if enabled && !isSharing { userStoppedSharing = false; startSharing() } else { refreshShare() }
+    }
+    /// The paired Mac this Mac is viewing now, if any.
+    var connectedPeerID: String? { isConnected ? viewerWindow?.peerID : nil }
 
     /// Stop reasons say whether sharing comes back by itself.
     private func pausedReason(_ reason: String) -> String {
@@ -359,10 +393,20 @@ final class NativeSessionCoordinator {
 
     /// Runs at launch and once a second. Retries are spaced five seconds apart.
     private func resumeSharingIfAutomatic() {
-        guard sharesAutomatically, !userStoppedSharing, !isSharing, uptime >= nextAutomaticShare,
+        let afterUpdate = defaults.bool(forKey: Self.resumeAfterUpdateKey)
+        guard sharesAutomatically || afterUpdate, !userStoppedSharing, !isSharing, uptime >= nextAutomaticShare,
               NativePrivacyGuard.displayIsAwake, NativePrivacyGuard.mayShareNow() else { return }
         nextAutomaticShare = uptime + 5
+        if afterUpdate { defaults.removeObject(forKey: Self.resumeAfterUpdateKey) }
         startSharing(automatic: true)
+    }
+    /// Just before an update installs and MacLink relaunches: stop taking
+    /// connections, so a viewer waiting for the new version doesn't reach this
+    /// one, and remember to share again if sharing was on.
+    func prepareForUpdateInstall() {
+        guard isSharing else { return }
+        if !sharesAutomatically { defaults.set(true, forKey: Self.resumeAfterUpdateKey) }
+        stopSharing(reason: "Installing an update. Sharing resumes when MacLink restarts.")
     }
 
     private func acceptNext(listener: NativeTransport, token: NativeRunToken) {
@@ -683,7 +727,21 @@ final class NativeSessionCoordinator {
                         channel.deliverControl { [weak self, weak channel] in
                             guard let self, let channel, self.hostChannel === channel else { return }
                             if capabilities & UInt64(ML_CAPABILITY_CURSOR) != 0 { self.cursorWatcher.start(); self.cursorWatcher.resend() }
+                            if capabilities & UInt64(ML_CAPABILITY_VERSION) != 0 { channel.control(.version(.local)) }
                             if self.capture == nil { self.startCapture(for: channel) }
+                        }
+                    case .control(.version(let version)):
+                        channel.deliverControl { [weak self, weak channel] in
+                            guard let self, let channel, self.hostChannel === channel else { return }
+                            self.hostPeerVersion = version
+                            NativeLog.session.notice("viewer runs MacLink \(version.name, privacy: .public) (build \(version.build))")
+                            self.refreshShare()
+                        }
+                    case .control(.updateRequest):
+                        channel.deliverControl { [weak self, weak channel] in
+                            guard let self, let channel, self.hostChannel === channel else { return }
+                            NativeLog.updates.notice("the viewer asked this Mac to check for updates")
+                            self.onUpdateRequest?()
                         }
                     case .telemetry(.stats(let stats)):
                         channel.storePeerStats(stats)
@@ -707,7 +765,7 @@ final class NativeSessionCoordinator {
 
     private func endHost(reason: String) {
         recordEnd("host", reason)
-        hostChannel?.close(); hostChannel = nil; hostAudioGate = nil
+        hostChannel?.close(); hostChannel = nil; hostAudioGate = nil; hostPeerVersion = nil
         cursorWatcher.stop()
         sharedDisplay.release(); pendingDisplayRequest = nil; displayRestarts = []
         endHostActivity()
@@ -731,7 +789,7 @@ final class NativeSessionCoordinator {
         if sharingToken != nil { NativeLog.session.notice("sharing stopped: \(reason, privacy: .public)") }
         sharingToken?.cancel(); sharingToken = nil
         listener?.close(); listener = nil
-        hostChannel?.close(); hostChannel = nil; hostAudioGate = nil
+        hostChannel?.close(); hostChannel = nil; hostAudioGate = nil; hostPeerVersion = nil
         cursorWatcher.stop()
         sharedDisplay.release(); pendingDisplayRequest = nil; displayRestarts = []
         endHostActivity()
@@ -912,10 +970,12 @@ final class NativeSessionCoordinator {
     /// Schedules the next automatic attempt; false once Rust's budget is spent.
     private func scheduleReconnect(_ window: NativeViewerWindow, reason: String) -> Bool {
         let attempt = reconnectAttempts + 1
-        let milliseconds = ml_reconnect_delay_ms(UInt32(attempt))
-        guard milliseconds >= 0 else { reconnectAttempts = 0; return false }
+        // While the sharing Mac installs an update, Rust's longer schedule.
+        let milliseconds = awaitingPeerUpdate ? ml_update_reconnect_delay_ms(UInt32(attempt)) : ml_reconnect_delay_ms(UInt32(attempt))
+        guard milliseconds >= 0 else { reconnectAttempts = 0; awaitingPeerUpdate = false; return false }
         reconnectAttempts = attempt
-        window.showReconnecting(reason: reason, attempt: attempt, of: Int(ML_RECONNECT_ATTEMPTS))
+        window.showReconnecting(reason: reason, attempt: attempt,
+                                of: Int(awaitingPeerUpdate ? ML_UPDATE_RECONNECT_ATTEMPTS : ML_RECONNECT_ATTEMPTS))
         NativeLog.session.notice("viewer reconnect \(attempt) of \(ML_RECONNECT_ATTEMPTS) in \(milliseconds) ms")
         reconnectWork?.cancel()
         let peerID = window.peerID
@@ -935,7 +995,7 @@ final class NativeSessionCoordinator {
         return true
     }
     private func stopReconnecting() {
-        reconnectWork?.cancel(); reconnectWork = nil; reconnectAttempts = 0
+        reconnectWork?.cancel(); reconnectWork = nil; reconnectAttempts = 0; awaitingPeerUpdate = false
     }
     /// Stops reconnecting and any connect in flight; a window still saying
     /// "Reconnecting…" shows `reason` instead.
@@ -994,6 +1054,12 @@ final class NativeSessionCoordinator {
         }
         window.onReleaseInput = release; window.video.onReleaseInput = release
         window.onDiagnostics = { [weak self, measurements = channel.measurements] in self?.saveDiagnostics(measurements) }
+        window.onVersionAction = { [weak self] in self?.versionNoticeClicked() }
+        viewerPeerVersion = nil; peerUpdate = nil; window.setVersionNotice(nil)
+        if awaitingPeerUpdate {
+            // The sharing Mac is back after its update.
+            awaitingPeerUpdate = false; reconnectAttempts = 0
+        }
         window.video.onInput = { [weak self, weak channel] event in
             guard let self, let channel, self.viewerChannel === channel else { return }
             self.sendInput(event)
@@ -1130,7 +1196,88 @@ final class NativeSessionCoordinator {
                 if let estimate = clockSync.estimate { channel.measurements.set("clock_error_ms", Double(estimate.errorUs) / 1000) }
                 pendingPing = nil
             }
-        case .ping, .keyframe, .hello, .displayRequest:
+        case .hello(let capabilities):
+            if capabilities & UInt64(ML_CAPABILITY_VERSION) != 0 { channel.control(.version(.local)) }
+        case .version(let version):
+            viewerPeerVersion = version
+            NativeLog.session.notice("sharing Mac runs MacLink \(version.name, privacy: .public) (build \(version.build))")
+            refreshVersionNotice()
+        case .updateStatus(let state, let ready):
+            peerUpdate = (state, ready, uptime)
+            NativeLog.updates.notice("sharing Mac update check: \(String(describing: state), privacy: .public)")
+            refreshVersionNotice()
+        case .ping, .keyframe, .displayRequest, .updateRequest:
+            break
+        }
+    }
+    /// Host: tells the connected viewer how its requested update check went.
+    func reportUpdateStatus(_ state: NativeUpdateState, ready: NativeVersion?) {
+        guard let channel = hostChannel, channel.token.isActive,
+              channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_VERSION) != 0 else { return }
+        if state == .ready { viewerAwaitsInstall = true }
+        channel.control(.updateStatus(state, ready: ready))
+    }
+    /// Viewer: what the versions mean for the person in front of this Mac.
+    private func refreshVersionNotice() {
+        guard let window = viewerWindow else { return }
+        guard let peer = viewerPeerVersion, let channel = viewerChannel, channel.token.isActive else {
+            window.setVersionNotice(nil); return
+        }
+        let local = NativeVersion.local
+        window.status.toolTip = "The sharing Mac runs MacLink \(peer.name); this Mac runs \(local.name)."
+        switch local.compared(to: peer) {
+        case .orderedDescending:
+            guard channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_REMOTE_UPDATE) != 0 else {
+                window.setVersionNotice("Sharing Mac runs \(peer.name); update it there", enabled: false); return
+            }
+            switch peerUpdate {
+            case nil:
+                window.setVersionNotice("Sharing Mac runs \(peer.name) · Update It", enabled: true)
+            case .some((.checking, _, _)):
+                window.setVersionNotice("Sharing Mac is checking for updates…", enabled: false)
+            case .some((.ready, let ready, _)):
+                window.setVersionNotice("\(ready?.name ?? "An update") is ready on the sharing Mac · Disconnect and Update", enabled: true)
+            case .some((.upToDate, _, let at)), .some((.failed, _, let at)):
+                // The sharing Mac takes another request a minute later.
+                let wait = max(0, 61 - (uptime - at))
+                let reason = peerUpdate?.state == .upToDate ? "found no newer update yet" : "couldn't check for updates"
+                window.setVersionNotice("Sharing Mac \(reason)\(wait > 0 ? "" : " · Try Again")", enabled: wait == 0)
+                if wait > 0 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.refreshVersionNotice() }
+                }
+            }
+        case .orderedAscending:
+            window.setVersionNotice("This Mac runs \(local.name), the sharing Mac \(peer.name) · Check for Updates", enabled: true)
+        case .orderedSame, nil:
+            window.setVersionNotice(nil)
+        }
+    }
+    private func versionNoticeClicked() {
+        guard let peer = viewerPeerVersion, let channel = viewerChannel, channel.token.isActive else { return }
+        switch NativeVersion.local.compared(to: peer) {
+        case .orderedAscending:
+            onCheckForUpdates?()
+        case .orderedDescending:
+            if case .some((.ready, let ready, _)) = peerUpdate {
+                awaitingPeerUpdate = true; reconnectAttempts = 0
+                NativeLog.updates.notice("disconnecting so the sharing Mac can install \(ready?.name ?? "its update", privacy: .public)")
+                disconnectViewer(reason: "The sharing Mac is installing \(ready?.name ?? "an update") and will restart. MacLink reconnects when it's back.",
+                                 reconnect: true)
+            } else {
+                peerUpdate = (.checking, nil, uptime)
+                updateRequestSerial += 1
+                let serial = updateRequestSerial
+                channel.control(.updateRequest)
+                refreshVersionNotice()
+                // A check that never answers, as when the sharing Mac shows an
+                // update window, may be asked again after 90 s.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 90) { [weak self] in
+                    guard let self, self.updateRequestSerial == serial, self.peerUpdate?.state == .checking else { return }
+                    self.peerUpdate = (.failed, nil, self.uptime - 61)
+                    self.refreshVersionNotice()
+                }
+            }
+        default:
             break
         }
     }
@@ -1201,6 +1348,10 @@ final class NativeSessionCoordinator {
         if let latency {
             channel.measurements.set("latency_ms", latency.p50); channel.measurements.set("latency_ms_p95", latency.p95)
             channel.measurements.set("to_viewer_ms", latency.toViewer); channel.measurements.set("display_wait_ms", latency.displayWait)
+        } else {
+            // No frame reached the screen this second, as while the window is
+            // hidden or the picture is still: report nothing rather than old figures.
+            for key in ["latency_ms", "latency_ms_p95", "to_viewer_ms", "display_wait_ms"] { channel.measurements.remove(key) }
         }
         // Screen change on the sharing Mac to this display, when frames are
         // flowing and the clocks are placed; otherwise the network round trip.
@@ -1251,6 +1402,7 @@ final class NativeSessionCoordinator {
         let lasted = uptime - viewerStarted
         recordEnd("viewer", reason); lastViewerEnd = reason
         releaseViewerInput(); channel.close(); viewerChannel = nil
+        viewerPeerVersion = nil; peerUpdate = nil; viewerWindow?.setVersionNotice(nil)
         audioPlayer?.stop(); audioPlayer = nil
         systemKeys?.stop()
         decoder?.stop(); decoder = nil; viewerInputEnabled = false

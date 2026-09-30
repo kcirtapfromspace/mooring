@@ -33,6 +33,12 @@ enum NativeControlMessage: Equatable {
     /// Protocol 5, host to a viewer that measures latency: a pong carrying the
     /// host's clock when it received the ping, in microseconds.
     case clock(UInt64, hostUs: UInt64)
+    /// Protocol 5, either way, once: the sender's MacLink version.
+    case version(NativeVersion)
+    /// Protocol 5, viewer to a sharing Mac that updates itself.
+    case updateRequest
+    /// Protocol 5, sharing Mac to viewer; for ready, the waiting update.
+    case updateStatus(NativeUpdateState, ready: NativeVersion?)
 
     var raw: MLControlMessage {
         var raw = MLControlMessage()
@@ -51,6 +57,12 @@ enum NativeControlMessage: Equatable {
         case .clock(let id, let hostUs):
             raw.kind = UInt8(ML_CONTROL_CLOCK); raw.ping_id = id
             raw.geometry.pixel_width = UInt32(truncatingIfNeeded: hostUs >> 32); raw.geometry.pixel_height = UInt32(truncatingIfNeeded: hostUs)
+        case .version(let version):
+            raw.kind = UInt8(ML_CONTROL_VERSION); raw.ping_id = version.release; raw.geometry.pixel_width = version.build
+        case .updateRequest: raw.kind = UInt8(ML_CONTROL_UPDATE_REQUEST)
+        case .updateStatus(let state, let ready):
+            raw.kind = UInt8(ML_CONTROL_UPDATE_STATUS); raw.geometry.pixel_height = state.rawValue
+            if state == .ready, let ready { raw.ping_id = ready.release; raw.geometry.pixel_width = ready.build }
         }
         return raw
     }
@@ -68,6 +80,14 @@ enum NativeControlMessage: Equatable {
             self = .displayRequest(width: width, height: Int(raw.geometry.height), scale: width > 0 ? pixels / width : 0)
         case ML_CONTROL_CLOCK:
             self = .clock(raw.ping_id, hostUs: UInt64(raw.geometry.pixel_width) << 32 | UInt64(raw.geometry.pixel_height))
+        case ML_CONTROL_VERSION: self = .version(NativeVersion(build: raw.geometry.pixel_width, release: raw.ping_id))
+        case ML_CONTROL_UPDATE_REQUEST: self = .updateRequest
+        case ML_CONTROL_UPDATE_STATUS:
+            guard let state = NativeUpdateState(rawValue: raw.geometry.pixel_height) else {
+                throw NativeSessionError(message: "The other Mac sent an unsupported session command.")
+            }
+            let ready = state == .ready ? NativeVersion(build: raw.geometry.pixel_width, release: raw.ping_id) : nil
+            self = .updateStatus(state, ready: ready)
         default: throw NativeSessionError(message: "The other Mac sent an unsupported session command.")
         }
     }
@@ -140,15 +160,55 @@ final class NativeFlowLimit: @unchecked Sendable {
     }
 }
 
-/// What this Mac announces in protocol 5. Pointer shapes, gestures and latency
-/// need nothing beyond this build; the rest depend on launch self-tests.
+/// What this Mac announces in protocol 5. Pointer shapes, gestures, latency
+/// and versions need nothing beyond this build; the rest depend on launch
+/// self-tests, and remote updates on a release build with an update feed.
 enum NativeCapabilities {
-    static func local(hevc444: Bool, virtualDisplay: Bool, audio: Bool) -> UInt64 {
+    static func local(hevc444: Bool, virtualDisplay: Bool, audio: Bool, updatesItself: Bool = false) -> UInt64 {
         var capabilities = UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_GESTURES) | UInt64(ML_CAPABILITY_LATENCY)
+            | UInt64(ML_CAPABILITY_VERSION)
         if hevc444 { capabilities |= UInt64(ML_CAPABILITY_HEVC_444) }
         if virtualDisplay { capabilities |= UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) }
         if audio { capabilities |= UInt64(ML_CAPABILITY_AUDIO) }
+        if updatesItself { capabilities |= UInt64(ML_CAPABILITY_REMOTE_UPDATE) }
         return capabilities
+    }
+}
+
+enum NativeUpdateState: UInt32 {
+    case checking = 1, upToDate, ready, failed
+}
+
+/// A MacLink version: the build number and the release, packed by Rust so
+/// later releases compare greater. Release 0 is a development build.
+struct NativeVersion: Equatable {
+    let build: UInt32
+    let release: UInt64
+
+    /// This copy of MacLink. Only release builds carry an update feed; others
+    /// report as development builds so they never claim to be newer.
+    static let local: NativeVersion = {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let build = UInt32(info["CFBundleVersion"] as? String ?? "") ?? 1
+        var release: UInt64 = 0
+        if info["SUFeedURL"] != nil, let text = info["MacLinkReleaseVersion"] as? String, ml_release_pack(text, &release) != ML_SESSION_OK {
+            release = 0
+        }
+        return NativeVersion(build: max(1, build), release: release)
+    }()
+    init(build: UInt32, release: UInt64) { self.build = build; self.release = release }
+    /// For example "0.3.0 preview 19", or "a development build".
+    var name: String {
+        var text = [CChar](repeating: 0, count: Int(ML_RELEASE_CAPACITY))
+        guard ml_release_display(release, &text, text.count) == ML_SESSION_OK else { return "build \(build)" }
+        return nativeString(text)
+    }
+    /// nil when either is a development build, which can't be ordered.
+    func compared(to other: NativeVersion) -> ComparisonResult? {
+        guard release != 0, other.release != 0 else { return nil }
+        if release != other.release { return release < other.release ? .orderedAscending : .orderedDescending }
+        if build != other.build { return build < other.build ? .orderedAscending : .orderedDescending }
+        return .orderedSame
     }
 }
 
@@ -315,6 +375,10 @@ final class NativeSessionMeasurements: @unchecked Sendable {
     func set(_ key: String, _ value: Double) {
         guard value.isFinite, value >= 0 else { return }
         lock.lock(); values[key] = value; lock.unlock()
+    }
+    /// For a value that no longer applies, so it isn't reported as current.
+    func remove(_ key: String) {
+        lock.lock(); values[key] = nil; lock.unlock()
     }
     func add(_ key: String, _ amount: Double = 1) {
         guard amount.isFinite, amount >= 0 else { return }

@@ -17,10 +17,14 @@ for build_tool in cargo rustup swiftc xcrun lipo codesign plutil; do
 done
 
 release_version="${MACLINK_RELEASE_VERSION:-0.3.0}"
-if [[ ! "$release_version" =~ ^([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
-    printf 'Invalid release version: %s\n' "$release_version" >&2
-    exit 1
-fi
+# The grammar the session library packs for the version message: numbers
+# without leading zeros below 65536, and preview numbers from 1 to 65534.
+invalid_release() { printf 'Invalid release version: %s (use 1.2.3 or 1.2.3-preview.N)\n' "$release_version" >&2; exit 1; }
+[[ "$release_version" =~ ^(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})(-preview\.([1-9][0-9]{0,4}))?$ ]] || invalid_release
+release_parts=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+release_preview="${BASH_REMATCH[5]}"
+for part in "${release_parts[@]}"; do (( part <= 65535 )) || invalid_release; done
+[[ -z "$release_preview" ]] || (( release_preview <= 65534 )) || invalid_release
 short_version="${release_version%%-*}"
 app_bundle="${MACLINK_APP_OUTPUT:-$project_root/dist/MacLink.app}"
 [[ "$app_bundle" = /* ]] || app_bundle="$project_root/$app_bundle"

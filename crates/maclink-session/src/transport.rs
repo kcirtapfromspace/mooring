@@ -14,8 +14,9 @@ use crate::cursor::{self, CursorPacket, CursorShape, MAX_CURSOR};
 use crate::input::InputEvent;
 use crate::policy::{
     AUDIO, Admission, CAPABILITY_AUDIO, CAPABILITY_CURSOR, CAPABILITY_GESTURES,
-    CAPABILITY_HEVC_444, CAPABILITY_LATENCY, CAPABILITY_VIRTUAL_DISPLAY, CLIPBOARD, CONTROL,
-    CURSOR, INPUT, PROTOCOL_MAX, PROTOCOL_MIN, ReceivePolicy, Role, TELEMETRY, VIDEO,
+    CAPABILITY_HEVC_444, CAPABILITY_LATENCY, CAPABILITY_REMOTE_UPDATE, CAPABILITY_VERSION,
+    CAPABILITY_VIRTUAL_DISPLAY, CLIPBOARD, CONTROL, CURSOR, INPUT, PROTOCOL_MAX, PROTOCOL_MIN,
+    ReceivePolicy, Role, TELEMETRY, VIDEO,
 };
 use crate::telemetry::{MAX_TELEMETRY, TelemetryMessage};
 use crate::video::Codec;
@@ -490,6 +491,19 @@ impl Session {
                 Err(Error::Invalid)
             }
             Outgoing::Input(event) => self.send_bytes(INPUT, &event.encode(), end),
+            // Version and update status only to a peer that reads them; update
+            // requests only to a host that updates itself.
+            Outgoing::Control(
+                ControlMessage::Version { .. } | ControlMessage::UpdateStatus { .. },
+            ) if self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_VERSION == 0 => {
+                Err(Error::Invalid)
+            }
+            Outgoing::Control(ControlMessage::UpdateRequest)
+                if self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_REMOTE_UPDATE
+                    == 0 =>
+            {
+                Err(Error::Invalid)
+            }
             // Clock replies only to a viewer that announced it measures latency.
             Outgoing::Control(ControlMessage::Clock { .. })
                 if self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_LATENCY == 0 =>

@@ -35,6 +35,11 @@ pub(crate) const CAPABILITY_AUDIO: u64 = 1 << 4;
 /// This Mac understands clock replies and the latency metrics. Viewers use
 /// them to measure how long a screen change takes to reach their display.
 pub(crate) const CAPABILITY_LATENCY: u64 = 1 << 5;
+/// This Mac sends and reads the MacLink version and update status messages.
+pub(crate) const CAPABILITY_VERSION: u64 = 1 << 6;
+/// This sharing Mac updates itself from the release feed, and checks when a
+/// viewer asks.
+pub(crate) const CAPABILITY_REMOTE_UPDATE: u64 = 1 << 7;
 /// Hosts send a cursor only when it changes; this stops a flood.
 const CURSORS_PER_WINDOW: u32 = 20;
 /// Four times the rate of 10 ms packets. Sound beyond it, as after a stall, is
@@ -55,6 +60,8 @@ const PING_SPACING: Duration = Duration::from_millis(250);
 /// Viewers retry keyframe requests at a longer interval, so a request dropped
 /// here is always followed by one that is honored.
 const KEYFRAME_SPACING: Duration = Duration::from_millis(500);
+/// A viewer may ask the sharing Mac to check for an update once a minute.
+const UPDATE_REQUEST_SPACING: Duration = Duration::from_secs(60);
 
 /// Automatic viewer reconnects after an unexpected end use a short, bounded
 /// backoff. A session that stayed connected for `RECONNECT_STABLE` starts a
@@ -67,6 +74,19 @@ pub(crate) const RECONNECT_DELAYS: [Duration; 5] = [
     Duration::from_secs(8),
 ];
 pub(crate) const RECONNECT_STABLE: Duration = Duration::from_secs(20);
+
+/// After the viewer disconnects so the sharing Mac can install an update, it
+/// relaunches, runs its self-tests and shares again: try every 3 s for 2 minutes.
+pub(crate) const UPDATE_RECONNECT_INTERVAL: Duration = Duration::from_secs(3);
+pub(crate) const UPDATE_RECONNECT_ATTEMPTS: u32 = 40;
+
+/// The wait before reconnect `attempt` (1-based) while the sharing Mac
+/// updates, or None once two minutes are spent.
+pub(crate) fn update_reconnect_delay(attempt: u32) -> Option<Duration> {
+    (1..=UPDATE_RECONNECT_ATTEMPTS)
+        .contains(&attempt)
+        .then_some(UPDATE_RECONNECT_INTERVAL)
+}
 
 /// The wait before reconnect `attempt` (1-based), or None once the budget is spent.
 pub(crate) fn reconnect_delay(attempt: u32) -> Option<Duration> {
@@ -102,6 +122,8 @@ impl Role {
                     | ControlKind::Pong
                     | ControlKind::Hello
                     | ControlKind::Clock
+                    | ControlKind::Version
+                    | ControlKind::UpdateStatus
             ),
             Self::Viewer => matches!(
                 kind,
@@ -109,6 +131,8 @@ impl Role {
                     | ControlKind::Keyframe
                     | ControlKind::Hello
                     | ControlKind::DisplayRequest
+                    | ControlKind::Version
+                    | ControlKind::UpdateRequest
             ),
         }
     }
@@ -144,6 +168,8 @@ pub(crate) struct ReceivePolicy {
     audio_count: u32,
     last_ping: Option<Instant>,
     last_keyframe: Option<Instant>,
+    last_update_request: Option<Instant>,
+    version_seen: bool,
     has_geometry: bool,
     last_message: Instant,
     pub(crate) idle_limit: Duration,
@@ -172,6 +198,8 @@ impl ReceivePolicy {
             audio_count: 0,
             last_ping: None,
             last_keyframe: None,
+            last_update_request: None,
+            version_seen: false,
             has_geometry: false,
             last_message: now,
             idle_limit: IDLE_LIMIT,
@@ -207,6 +235,26 @@ impl ReceivePolicy {
                 return Err(Error::Protocol);
             }
             Incoming::Control(ControlMessage::Hello(_)) => self.hello = true,
+            // Version and update messages only reach a Mac that reads them,
+            // in protocol 5; a version arrives once.
+            Incoming::Control(ControlMessage::Version { .. })
+                if self.version < 5
+                    || self.local_capabilities & CAPABILITY_VERSION == 0
+                    || self.version_seen =>
+            {
+                return Err(Error::Protocol);
+            }
+            Incoming::Control(ControlMessage::Version { .. }) => self.version_seen = true,
+            Incoming::Control(ControlMessage::UpdateStatus { .. })
+                if self.version < 5 || self.local_capabilities & CAPABILITY_VERSION == 0 =>
+            {
+                return Err(Error::Protocol);
+            }
+            Incoming::Control(ControlMessage::UpdateRequest)
+                if self.version < 5 || self.local_capabilities & CAPABILITY_REMOTE_UPDATE == 0 =>
+            {
+                return Err(Error::Protocol);
+            }
             // Clock replies only reach a viewer that announced it measures latency.
             Incoming::Control(ControlMessage::Clock { .. })
                 if self.version < 5 || self.local_capabilities & CAPABILITY_LATENCY == 0 =>
@@ -279,6 +327,9 @@ impl ReceivePolicy {
             Incoming::Control(ControlMessage::Ping(_)) => spaced(&mut self.last_ping, PING_SPACING),
             Incoming::Control(ControlMessage::Keyframe) => {
                 spaced(&mut self.last_keyframe, KEYFRAME_SPACING)
+            }
+            Incoming::Control(ControlMessage::UpdateRequest) => {
+                spaced(&mut self.last_update_request, UPDATE_REQUEST_SPACING)
             }
             Incoming::Control(ControlMessage::Geometry { .. }) => {
                 self.has_geometry = true;
@@ -546,6 +597,68 @@ mod tests {
     }
 
     #[test]
+    fn versions_arrive_once_and_update_requests_once_a_minute() {
+        use crate::control::{Release, UpdateState};
+        let now = Instant::now();
+        let version = || {
+            control(ControlMessage::Version {
+                build: 24,
+                release: Release(3 << 32 | 19),
+            })
+        };
+        let request = || control(ControlMessage::UpdateRequest);
+        let status = || {
+            control(ControlMessage::UpdateStatus {
+                state: UpdateState::Checking,
+                build: 0,
+                release: Release(0),
+            })
+        };
+        assert!(Role::Host.may_send_control(ControlKind::Version));
+        assert!(Role::Viewer.may_send_control(ControlKind::Version));
+        assert!(Role::Viewer.may_send_control(ControlKind::UpdateRequest));
+        assert!(!Role::Host.may_send_control(ControlKind::UpdateRequest));
+        assert!(Role::Host.may_send_control(ControlKind::UpdateStatus));
+        assert!(!Role::Viewer.may_send_control(ControlKind::UpdateStatus));
+        // A Mac that did not announce it reads versions, or protocol 4, refuses them.
+        for (version_number, capabilities) in [(5, 0), (4, CAPABILITY_VERSION)] {
+            let mut viewer =
+                ReceivePolicy::for_version(Role::Viewer, version_number, capabilities, now);
+            assert_eq!(viewer.admit(&version(), now), Err(Error::Protocol));
+        }
+        let mut viewer = ReceivePolicy::for_version(Role::Viewer, 5, CAPABILITY_VERSION, now);
+        assert_eq!(viewer.admit(&version(), now), Ok(Admission::Deliver));
+        assert_eq!(viewer.admit(&version(), now), Err(Error::Protocol), "once");
+        assert_eq!(viewer.admit(&status(), now), Ok(Admission::Deliver));
+        assert_eq!(
+            viewer.admit(&request(), now),
+            Err(Error::Protocol),
+            "hosts never ask"
+        );
+        let mut host = ReceivePolicy::for_version(Role::Host, 5, CAPABILITY_VERSION, now);
+        assert_eq!(
+            host.admit(&request(), now),
+            Err(Error::Protocol),
+            "only a host that updates itself"
+        );
+        let mut host = ReceivePolicy::for_version(Role::Host, 5, CAPABILITY_REMOTE_UPDATE, now);
+        assert_eq!(host.admit(&request(), now), Ok(Admission::Deliver));
+        assert_eq!(
+            host.admit(&request(), now + Duration::from_secs(59)),
+            Ok(Admission::Skip)
+        );
+        assert_eq!(
+            host.admit(&request(), now + UPDATE_REQUEST_SPACING),
+            Ok(Admission::Deliver)
+        );
+        assert_eq!(
+            host.admit(&status(), now),
+            Err(Error::Protocol),
+            "viewers never send status"
+        );
+    }
+
+    #[test]
     fn host_spaces_pings_and_keyframe_requests() {
         let now = Instant::now();
         let mut policy = ReceivePolicy::new(Role::Host, now);
@@ -583,6 +696,18 @@ mod tests {
         assert!(
             total < RECONNECT_STABLE,
             "a full budget ends before a session counts as stable"
+        );
+    }
+
+    #[test]
+    fn waiting_for_an_updating_host_lasts_two_minutes() {
+        assert_eq!(update_reconnect_delay(0), None);
+        assert_eq!(update_reconnect_delay(1), Some(UPDATE_RECONNECT_INTERVAL));
+        assert_eq!(update_reconnect_delay(40), Some(UPDATE_RECONNECT_INTERVAL));
+        assert_eq!(update_reconnect_delay(41), None);
+        assert_eq!(
+            UPDATE_RECONNECT_INTERVAL * UPDATE_RECONNECT_ATTEMPTS,
+            Duration::from_secs(120)
         );
     }
 

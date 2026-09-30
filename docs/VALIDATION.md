@@ -338,6 +338,32 @@ Local checks:
 - **Session suite:** the limit's window.
 - **Between two Macs:** pacing under a real Wi-Fi slowdown is observed in telemetry and the session log.
 
+## Versions, remote updates and Settings
+
+For `v0.3.0-preview.19`, each Mac tells the other its MacLink version, and a viewer can ask an older sharing Mac to update itself.
+
+- **Version messages.** Rust adds three control messages, each sent only to a peer that announced the matching capability, so an older Mac never receives an ID it would reject:
+  - Version: either way, once per session;
+  - UpdateRequest: viewer to a sharing Mac that updates itself, at most once a minute;
+  - UpdateStatus: sharing Mac to viewer.
+- **Release numbers.** Releases pack as 16-bit major, minor, patch and preview, with a final release after its previews. Builds without an update feed report as development builds and are never ordered.
+- **Updating.** A sharing Mac's check runs through Sparkle, with the same signed feed and verification. The update still installs only when no session is connected. **Disconnect and Update** ends the viewer's session and reconnects on Rust's update schedule, every 3 s for 2 minutes.
+- **Checks.** The Rust suite covers the message formats and their field rules, strict release parsing and ordering, the direction, once-only, capability and spacing rules, loopback delivery, and refusal toward protocol 4 peers. The session suite covers the Swift mapping, version ordering, and a build without a feed reporting as a development build.
+- **Settings window.** Rendered off-screen in light and dark appearance to check its layout. Its toggles call the same setters as before, so a running session follows them.
+- **Telemetry.** Latency values are now removed rather than repeated when no frame reached the screen in a second.
+- **Review fixes.** A code review of the first version found two problems, fixed before release:
+  - a sharing Mac that shared manually would never install, so **Disconnect and Update** reconnected to the old version in a loop. It now installs when the viewer that was told of the update disconnects, stops taking connections just before, and shares again after the relaunch;
+  - the Settings window didn't refresh after Accessibility or login approval in System Settings. It now refreshes whenever it comes forward.
+
+  Also from the review:
+  - a check that never answers lets the viewer ask again after 90 s;
+  - a ready update's build is never 0;
+  - `build-app.sh` accepts only the release grammar Rust packs;
+  - ⌘, opens Settings while another window is busy.
+- **Update test.** `scripts/test-update-local.sh` passed after these updater changes: the in-place update relaunched in 2 s, and a tampered archive and an altered feed were refused.
+
+Between two Macs, the update request needs preview 19 or later on both, and is first useful when preview 20 is published.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.
