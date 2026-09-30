@@ -37,6 +37,14 @@ codesign -dv --verbose=2 "$app" 2> "$check/signature.txt"
 value() { /usr/libexec/PlistBuddy -c "Print :$1" "$app/Contents/Info.plist"; }
 [[ "$(value MacLinkReleaseVersion)" = "$version" ]] || { printf '%s\n' 'The archive is a different release.' >&2; exit 1; }
 [[ "$(value SUFeedURL)" = "$feed" ]] || { printf 'The archive follows %s, not this feed.\n' "$(value SUFeedURL)" >&2; exit 1; }
+# Never move the feed back: this release becomes the latest, so an older build
+# would reach new installs, and copies on the newer build would stop updating.
+build="$(value CFBundleVersion)"
+current="$(curl -fsSL "$feed" 2>/dev/null | sed -n 's:.*<sparkle\:version>\([0-9][0-9]*\)</sparkle\:version>.*:\1:p' | head -1 || true)"
+if [[ -n "$current" ]] && (( current >= build )); then
+    printf 'The feed already serves build %s; this archive is build %s.\n' "$current" "$build" >&2
+    exit 1
+fi
 
 ./scripts/make-appcast.sh "$archive" "https://github.com/$repo/releases/download/v$version/$name" "$state"
 cp "$archive" "$state/$name"
