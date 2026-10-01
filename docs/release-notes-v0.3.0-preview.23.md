@@ -1,6 +1,6 @@
 # MacLink 0.3.0 preview 23 — Reach your Mac from anywhere you can reach it
 
-Installed copies of preview 6 or later update to this version by themselves when no session is connected. Update both Macs before pairing anew: earlier versions can't read the new pairing codes.
+Installed copies of preview 6 or later update to this version by themselves when no session is connected. Update both Macs before pairing anew: earlier versions can't read the new pairing codes, and say "Paste the pairing code from Share This Mac on your other Mac" when given one.
 
 ## What went wrong
 
@@ -21,6 +21,10 @@ Settings shows each paired Mac's main address, and how many others it has; hover
 ## Your existing pairing
 
 A Mac paired before preview 23 knows only the address it paired with. To give it the full list, pair it once more with a new code from the sharing Mac, after both Macs have preview 23. From away from home, copy the code through Screen Sharing, as before.
+
+## Worth watching
+
+At home, several addresses can lead to the same Mac. The viewing Mac stops the others as soon as one connects, so they rarely get through. If one does, the sharing Mac clears it in about a fifth of a second the next time it takes a connection. If reconnecting at home feels slower than before, that's the place to look.
 
 ## Validation
 
