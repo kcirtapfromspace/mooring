@@ -1,6 +1,6 @@
 # MacLink 0.3.0 preview 22 — Open the lid and pick up where you left off
 
-Installed copies of preview 6 or later update to this version by themselves when no session is connected. It also carries preview 21's fixes, which never reached the update feed on their own: the pointer now lines up with clicks, and in full screen the sharing Mac's menu bar can be reached. See the [preview 21 notes](release-notes-v0.3.0-preview.21.md).
+Installed copies of preview 6 or later update to this version by themselves when no session is connected. It also carries preview 21's fixes: the pointer now lines up with clicks, and in full screen the sharing Mac's menu bar can be reached. See the [preview 21 notes](release-notes-v0.3.0-preview.21.md).
 
 ## A closed lid no longer locks you out
 
