@@ -403,7 +403,7 @@ For `v0.3.0-preview.20`, each viewing Mac has its own Noise static key, and the 
   - A failed last-seen write refused an approved Mac. Removal is now checked by a read, and the write is bookkeeping.
   - Two FFI calls now clear their outputs before anything can fail.
 - **Known limit.** The viewer can't tell a refusal from a close injected in the network path before the first answer. Either one stops automatic reconnecting, with a message to pair again; **Reconnect** tries again. Nothing is deleted.
-- **Between two Macs.** Moving over, removal ending a live session, and pairing with a one-time code are checked by hand (TESTING.md step 8).
+- **Between two Macs.** Moving over, removal ending a live session, and pairing with a one-time code are checked by hand (TESTING.md step 9).
 
 ## Pointer image
 
@@ -431,7 +431,27 @@ For `v0.3.0-preview.22`, a sharing Mac tells a session the viewer ended apart fr
   - Remove and Stop Now never wait.
   - Only a viewer closing its window or quitting MacLink says it's leaving; sleep, lock, dropped connections and the update hand-off don't.
 - **Viewer.** A session ended by this Mac's sleep or lock is reconnected by the one-second tick, once this Mac is awake and unlocked, with a fresh budget. Notifications still only stop sessions; nothing starts from one.
-- **Not verified.** Whether the display assertion also keeps a screen saver from starting and locking is untested. The overnight lid-close check (TESTING.md step 10) is the gate.
+- **Not verified.** Whether the display assertion also keeps a screen saver from starting and locking is untested. The overnight lid-close check (TESTING.md step 11) is the gate.
+
+## Every address of the sharing Mac
+
+For `v0.3.0-preview.23`, a pairing code lists the sharing Mac's addresses, and the viewer tries them together.
+
+- **Format.**
+  - One-time codes (`MLP2.`, version 2) gain an optional `addresses` list. It holds up to seven, each valid by the host rule, none repeated or equal to the main address. Their joined length is at most 1023, so a code is at most 2005 characters.
+  - Old codes and Keychain credentials never carry the list, and a version 1 or 3 object that has one is refused. A preview 22 viewer refuses a preview 23 code, because its parser rejects unknown fields.
+- **Addresses.** Rust lists IPv4 addresses from `getifaddrs`: up and running, not loopback or link-local, `en*` first, then `utun*`. Virtual machine and Internet Sharing bridges are left out. This Mac Studio lists `192.168.25.201 100.122.9.8` after `thinkstudio.local`.
+- **Connecting.**
+  - One thread per address, at most eight, started 200 ms apart, resolves and connects, bounded by the overall deadline. The global resolver cap of four still applies.
+  - Each connection that completes gets the handshake in turn. It has at most 2 s while other candidates are pending, and the remaining time for the last.
+  - A connection that waited over 500 ms is reconnected first, because the sharing Mac gives an accepted connection about a second to begin.
+  - Any close before the sharing Mac's answer is a refusal, including one surfacing on a write, or as macOS's invalid-argument error when setting an option on a reset socket.
+  - The result is Auth only when every candidate that reached a host refused; otherwise the non-refusal error, so reconnecting continues. A sharing Mac that answered is never retried on another address, because it may have recorded an approval.
+  - Moving over falls back to the old handshake on the first address that connected.
+- **Saved peers.** `alternates` default to none, so earlier files load. After a saved peer connects, the address that worked moves to the front.
+- **Logs.** The log names the address's position, never the address.
+- **Known limit.** Another MacLink host at a stale address can refuse while the real one is unreachable. That reads as a refusal and stops reconnecting. **Reconnect** tries again.
+- **Checks.** Loopback tests put the sharing Mac on 127.0.0.1 and a stand-in on ::1 at the same port. They cover a stand-in that never answers, one that closes at once, every address refusing, none answering, and the move-over fallback. Unit tests cover the format, size and strictness, the address ordering, and saved-peer ordering. Three mutations were each caught: no per-candidate time slice, a close ending the attempt, and no reconnect after waiting.
 
 ## Media feasibility
 

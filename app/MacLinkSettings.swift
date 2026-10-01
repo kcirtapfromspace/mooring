@@ -277,7 +277,9 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
         }
         for peer in state.peers {
             let name = label(String(peer.name.prefix(60)), size: 13)
-            let address = label(peer.address, size: 11, color: .secondaryLabelColor)
+            let more = peer.alternates.isEmpty ? "" : " · \(peer.alternates.count) more"
+            let address = label(peer.address + more, size: 11, color: .secondaryLabelColor)
+            address.toolTip = peer.addresses.joined(separator: "\n")
             let remove = NSButton(title: "Remove…", target: self, action: #selector(removePeer(_:)))
             remove.bezelStyle = .rounded; remove.controlSize = .small
             remove.identifier = NSUserInterfaceItemIdentifier(peer.id)

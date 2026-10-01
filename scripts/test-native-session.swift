@@ -54,12 +54,13 @@ enum NativeSessionTests {
     }
     /// Connects while the listener accepts once: the viewer's result and the
     /// host's session, nil when the host refused.
-    static func connectOnce(_ listener: NativeTransport, _ code: NativePairingCode, _ key: NativeDeviceKey)
-        -> (Result<(NativeTransport, NativeTransport.Mode), Error>, NativeTransport?) {
+    static func connectOnce(_ listener: NativeTransport, _ code: NativePairingCode, _ key: NativeDeviceKey,
+                            addresses: [String] = ["127.0.0.1"])
+        -> (Result<(NativeTransport, NativeTransport.Mode, String), Error>, NativeTransport?) {
         let host = Slot<NativeTransport>()
         let done = DispatchSemaphore(value: 0)
         DispatchQueue.global().async { host.value = try? listener.accept(); done.signal() }
-        let viewer = Result { try NativeTransport.connect(address: "127.0.0.1", code: code, deviceKey: key,
+        let viewer = Result { try NativeTransport.connect(addresses: addresses, code: code, deviceKey: key,
                                                           deviceName: "MacBook Pro", port: listener.listeningPort) }
         done.wait()
         return (viewer, host.value)
@@ -69,7 +70,7 @@ enum NativeSessionTests {
         for _ in 0..<40 { if let message = try transport.receive() { return message } }
         throw Failure("No message arrived")
     }
-    static func refused(_ result: Result<(NativeTransport, NativeTransport.Mode), Error>) -> Bool {
+    static func refused(_ result: Result<(NativeTransport, NativeTransport.Mode, String), Error>) -> Bool {
         if case .failure(let error) = result { return (error as? NativeSessionError)?.isAuthenticationFailure == true }
         return false
     }
@@ -91,10 +92,12 @@ enum NativeSessionTests {
                                                  oneTimeSecret: listener.newPairingSecret())
         let key = try NativeDeviceKey.create()
 
-        let (paired, host) = connectOnce(listener, code, key)
-        let (viewer, mode) = try paired.get()
+        // Nothing listens on ::1, so the second address connects.
+        let (paired, host) = connectOnce(listener, code, key, addresses: ["::1", "127.0.0.1"])
+        let (viewer, mode, used) = try paired.get()
         let id = host?.peerDevice ?? ""
         try require(mode == .pair && mode.approvedKey && id.count == 64, "A one-time code approves this Mac's key")
+        try require(used == "127.0.0.1", "The address that connected is reported")
         let approved = try devices.load()
         try require(approved.devices.map(\.id) == [id] && approved.devices.first?.name == "MacBook Pro"
                     && approved.devices.first?.migrated == false && !approved.legacy.accepted,
@@ -105,7 +108,7 @@ enum NativeSessionTests {
 
         let saved = try code.device()
         let (returning, returningHost) = connectOnce(listener, saved, key)
-        let (again, againMode) = try returning.get()
+        let (again, againMode, _) = try returning.get()
         try require(againMode == .device && !againMode.approvedKey && returningHost?.peerDevice == id,
                     "The saved pairing connects as the approved Mac")
         guard let returningHost else { throw Failure("The host session is missing") }
@@ -235,7 +238,12 @@ enum NativeSessionTests {
         let privateKey = Data((0..<32).map { UInt8($0 + 201) })
         let identity = NativeHostIdentity(privateKey: privateKey, publicKey: publicKey, secret: secret)
         let code = try NativePairingCode.forHost(address: "Studio.local", computerName: " Studio\u{200D} Mac\n", identity: identity,
-                                                 oneTimeSecret: secret)
+                                                 oneTimeSecret: secret, alternates: ["192.168.25.201", "studio.local", "no//t"])
+        try require(code.alternates == ["192.168.25.201"] && code.addresses == ["studio.local", "192.168.25.201"],
+                    "A code lists this Mac's other addresses, leaving out repeats and invalid ones")
+        for address in NativePairingCode.localAddresses() {
+            try require(NativePairingCode.normalizedAddress(address) == address, "This Mac's own addresses follow the host rule")
+        }
         try require(code.address == "studio.local" && code.name == "Studio Mac", "Rust normalizes this Mac's address and name")
         try require(code.publicKey == publicKey && code.secret == secret && code.kind == .oneTime, "Pairing code carries exact credentials")
         try require(code.peerID.count == 64 && code.peerID.allSatisfy { "0123456789abcdef".contains($0) },
@@ -243,7 +251,7 @@ enum NativeSessionTests {
         let encoded = try code.encoded()
         let decoded = try NativePairingCode.parse(" \n\t" + encoded + "\r\n ")
         try require(encoded.hasPrefix("MLP2.") && decoded.address == code.address && decoded.name == code.name
-                     && decoded.peerID == code.peerID && decoded.secret == secret && decoded.kind == .oneTime,
+                     && decoded.peerID == code.peerID && decoded.secret == secret && decoded.kind == .oneTime && decoded.alternates == code.alternates,
                     "Pairing text round-trips through Rust")
         try rejects("A one-time code is never saved") { _ = try code.credential() }
         let device = try code.device()
@@ -287,10 +295,13 @@ enum NativeSessionTests {
         try require(try store.load().isEmpty, "A missing peer store is empty")
         let legacyPeers = try JSONSerialization.data(withJSONObject: [["id": String(repeating: "a", count: 64), "name": "Old Mac", "address": "old.local"]])
         try store.importLegacy(legacyPeers)
-        let peer = try store.remember(code, address: "Studio.Local")
-        try require(peer.id == code.peerID && peer.address == "studio.local", "Remembered peers use the Rust ID and address rule")
+        let peer = try store.remember(code, tried: ["Studio.Local"])
+        try require(peer.id == code.peerID && peer.addresses == ["studio.local", "192.168.25.201"],
+                    "Remembered peers use the Rust ID and address rule, and keep the code's other addresses")
         try require(try store.load().map(\.name) == ["Studio Mac", "Old Mac"], "Most recent peer first after legacy import")
-        try rejects("Invalid addresses are not saved") { try store.remember(code, address: "http://studio.local") }
+        try store.connected(peer.id, through: "192.168.25.201")
+        try require(try store.load().first?.addresses == ["192.168.25.201", "studio.local"], "The address that worked goes first")
+        try rejects("Invalid addresses are not saved") { _ = try store.remember(code, tried: ["http://studio.local"]) }
         let peerFile = try String(contentsOf: folder.appendingPathComponent("native-peers.json"), encoding: .utf8)
         for sensitive in [secret.base64EncodedString(), privateKey.base64EncodedString(), publicKey.base64EncodedString(), "secret"] {
             try require(!peerFile.contains(sensitive), "Saved peer metadata contains no key or secret material")

@@ -65,6 +65,10 @@ struct NativePairingCode {
     }
     let raw: MLPairingCode
     var address: String { nativeString(raw.address) }
+    /// The sharing Mac's other addresses, from a one-time code.
+    var alternates: [String] { nativeString(raw.alternates).split(separator: " ").map(String.init) }
+    /// Every address, the main one first.
+    var addresses: [String] { [address] + alternates }
     var name: String { nativeString(raw.name) }
     /// Lowercase hex SHA-256 of the public key; contains no secret material.
     var peerID: String { nativeString(raw.peer_id) }
@@ -72,15 +76,25 @@ struct NativePairingCode {
     var secret: Data { withUnsafeBytes(of: raw.secret) { Data($0) } }
     var kind: Kind? { Kind(rawValue: raw.kind) }
 
-    /// A one-time code for this Mac. Rust normalizes the computer name rather than failing.
-    static func forHost(address: String, computerName: String, identity: NativeHostIdentity, oneTimeSecret: Data) throws -> Self {
+    /// This Mac's network addresses for its codes, best first (Rust's rule).
+    static func localAddresses() -> [String] {
+        var text = [CChar](repeating: 0, count: Int(ML_ALTERNATES_CAPACITY))
+        guard ml_local_addresses(&text, text.count) == ML_SESSION_OK else { return [] }
+        return nativeString(text).split(separator: " ").map(String.init)
+    }
+    /// A one-time code for this Mac, listing its other addresses too. Rust
+    /// normalizes the computer name rather than failing, and leaves out
+    /// addresses that don't qualify or fit.
+    static func forHost(address: String, computerName: String, identity: NativeHostIdentity, oneTimeSecret: Data,
+                        alternates: [String] = []) throws -> Self {
         try identity.validate()
         guard oneTimeSecret.count == 32 else { throw NativeSessionError(message: "The pairing code could not be made. Try again.") }
         var raw = MLPairingCode()
         let status = identity.publicKey.withUnsafeBytes { publicBytes in
             oneTimeSecret.withUnsafeBytes { secretBytes in
                 ml_pairing_code_for_host(address, computerName, publicBytes.bindMemory(to: UInt8.self).baseAddress!,
-                                         secretBytes.bindMemory(to: UInt8.self).baseAddress!, Kind.oneTime.rawValue, &raw)
+                                         secretBytes.bindMemory(to: UInt8.self).baseAddress!, Kind.oneTime.rawValue,
+                                         alternates.joined(separator: " "), &raw)
             }
         }
         guard status == ML_SESSION_OK else {
@@ -195,8 +209,17 @@ struct NativePeer: Equatable {
     let id: String
     let name: String
     let address: String
-    init(_ raw: MLPeer) { id = nativeString(raw.id); name = nativeString(raw.name); address = nativeString(raw.address) }
-    init(code: NativePairingCode, address: String) { id = code.peerID; name = code.name; self.address = address }
+    /// Tried with `address`, which is the one that last worked.
+    let alternates: [String]
+    var addresses: [String] { [address] + alternates }
+    init(_ raw: MLPeer) {
+        id = nativeString(raw.id); name = nativeString(raw.name); address = nativeString(raw.address)
+        alternates = nativeString(raw.alternates).split(separator: " ").map(String.init)
+    }
+    init(code: NativePairingCode, address: String) {
+        id = code.peerID; name = code.name; self.address = address
+        alternates = code.addresses.filter { $0 != address }
+    }
 }
 
 /// Saved peer metadata lives in Rust's store: never secrets, at most 32 peers.
@@ -211,11 +234,16 @@ struct NativePeerStore {
         return peers.prefix(count).map(NativePeer.init)
     }
     @discardableResult
-    func remember(_ code: NativePairingCode, address: String) throws -> NativePeer {
+    /// `tried`: the addresses the connection used, the one that connected first.
+    func remember(_ code: NativePairingCode, tried: [String]) throws -> NativePeer {
         var raw = code.raw
         var peer = MLPeer()
-        try NativeTransport.check(ml_peers_remember(directory, &raw, address, &peer))
+        try NativeTransport.check(ml_peers_remember(directory, &raw, tried.joined(separator: " "), &peer))
         return NativePeer(peer)
+    }
+    /// After a saved Mac connected through `address`: it's tried first next time.
+    func connected(_ id: String, through address: String) throws {
+        try NativeTransport.check(ml_peers_connected(directory, id, address))
     }
     func forget(_ id: String) throws { try NativeTransport.check(ml_peers_forget(directory, id)) }
     /// One-time import of the earlier preference list; a no-op once a store exists.

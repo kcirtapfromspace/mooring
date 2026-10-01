@@ -17,8 +17,10 @@ Each viewing Mac has its own Noise static key; the sharing Mac approves keys. A
 one-time code supplies the sharing Mac's public key and a 32-byte random secret
 that approves one key, once, within ten minutes. It is `MLP2.` followed by strict
 padded base64 of a JSON object with exactly `version` (2), `address`, `name`,
-`publicKey` and `secret`. The secret lives only in the listener's memory, and a newer
-code replaces an unused one. After approval the viewer saves a device pairing: the
+`publicKey` and `secret`, and optionally `addresses`: the sharing Mac's other
+addresses (`ml_local_addresses`: IPv4 on Ethernet and Wi-Fi, then tunnels), at most
+seven, each valid by the host rule. The secret lives only in the listener's memory,
+and a newer code replaces an unused one. After approval the viewer saves a device pairing: the
 same fields at `version` 3 with no secret. Codes from before per-device keys are
 `MLP1.` at `version` 1 with the sharing Mac's long-lived secret. Keychain credentials
 hold the same JSON, so pairings saved by earlier builds remain readable.
@@ -35,7 +37,12 @@ the lowercase hex SHA-256 of the public key. Secrets are never logged, and heap
 copies made while encoding or decoding them are zeroized.
 
 Saved peers (`native-peers.json` in `MACLINK_HOME` or Application Support) hold only
-ID, name and address, at most 32, most recent first. The file uses the CLI store's
+ID, name, the address that last connected and up to seven others, at most 32, most
+recent first. `ml_session_connect_paired` takes all of a peer's addresses: it
+starts a TCP connection to each, 200 ms apart, and gives each that connects the
+handshake in turn, at most 2 s while others are pending, reconnecting one that
+waited over 500 ms. It reports the address that worked, which
+`ml_peers_connected` moves to the front. The file uses the CLI store's
 conventions: bounded size, strict validation, owner-only permissions, atomic
 replacement and a cross-process lock; an unreadable file is never overwritten. The
 earlier preference list is imported once.

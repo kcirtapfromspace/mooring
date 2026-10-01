@@ -5,8 +5,10 @@
 //!   base64 of 32 bytes). The secret is the sharing Mac's long-lived pairing
 //!   PSK. Keychain credentials from before per-device keys hold the same JSON
 //!   without the envelope, so they remain readable.
-//! - A one-time code, `MLP2.` and the same fields with `version` 2. Its secret
-//!   approves one new Mac within minutes; it is never saved.
+//! - A one-time code, `MLP2.` and the same fields with `version` 2, plus an
+//!   optional `addresses` list: the sharing Mac's other addresses, so a viewer
+//!   away from its home network can still reach it. Its secret approves one
+//!   new Mac within minutes; it is never saved.
 //! - A saved pairing for an approved Mac: `version` 3 without a secret. The
 //!   viewer's own device key proves who it is.
 //!
@@ -21,7 +23,14 @@ pub(crate) const MAX_NAME_BYTES: usize = 160;
 const PREFIX: &str = "MLP1.";
 const ONE_TIME_PREFIX: &str = "MLP2.";
 const MAX_CODE_TEXT: usize = 2048;
-const MAX_CODE_JSON: usize = 1024;
+/// Base64 makes this at most 2000 characters, which with the prefix fits
+/// MAX_CODE_TEXT.
+const MAX_CODE_JSON: usize = 1500;
+/// A code or saved Mac lists at most this many addresses: the main one and up
+/// to seven others.
+pub(crate) const MAX_ADDRESSES: usize = 8;
+/// The other addresses, joined by single spaces, fit the C structs' field.
+pub(crate) const MAX_ALTERNATES_TEXT: usize = 1023;
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Control (Cc) and format (Cf) characters, including bidirectional overrides
@@ -129,6 +138,8 @@ struct Wire {
     public_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    addresses: Vec<String>,
 }
 impl Drop for Wire {
     fn drop(&mut self) {
@@ -160,9 +171,51 @@ impl CodeKind {
     }
 }
 
+/// The other addresses of a Mac whose main one is `primary`: each valid by the
+/// host rule and normalized, none repeated or equal to `primary`, at most
+/// seven, and short enough to join.
+pub(crate) fn checked_alternates(primary: &str, list: &[String]) -> Result<Vec<String>> {
+    let mut checked: Vec<String> = Vec::with_capacity(list.len());
+    for entry in list {
+        let address = normalize_address(entry)?;
+        if address == primary || checked.contains(&address) {
+            return Err(Error::Invalid);
+        }
+        checked.push(address);
+    }
+    if checked.len() >= MAX_ADDRESSES || joined_length(&checked) > MAX_ALTERNATES_TEXT {
+        return Err(Error::Invalid);
+    }
+    Ok(checked)
+}
+/// As checked_alternates, but drops what doesn't qualify instead of failing:
+/// for this Mac's own list.
+pub(crate) fn fitted_alternates(primary: &str, list: &[String]) -> Vec<String> {
+    let mut fitted: Vec<String> = Vec::new();
+    for entry in list {
+        let Ok(address) = normalize_address(entry) else {
+            continue;
+        };
+        if address == primary || fitted.contains(&address) || fitted.len() + 1 >= MAX_ADDRESSES {
+            continue;
+        }
+        fitted.push(address);
+        if joined_length(&fitted) > MAX_ALTERNATES_TEXT {
+            fitted.pop();
+        }
+    }
+    fitted
+}
+fn joined_length(list: &[String]) -> usize {
+    list.iter().map(String::len).sum::<usize>() + list.len().saturating_sub(1)
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct PairingCode {
     pub address: String,
+    /// Other addresses of the same Mac, tried with `address`; never saved
+    /// in Keychain.
+    pub alternates: Vec<String>,
     pub name: String,
     pub public_key: [u8; 32],
     /// All zero for a device pairing.
@@ -179,6 +232,7 @@ impl std::fmt::Debug for PairingCode {
         formatter
             .debug_struct("PairingCode")
             .field("address", &self.address)
+            .field("alternates", &self.alternates)
             .field("name", &self.name)
             .field("peer_id", &self.peer_id())
             .field("kind", &self.kind)
@@ -211,17 +265,30 @@ impl PairingCode {
         }
         Ok(Self {
             address: normalize_address(address)?,
+            alternates: vec![],
             name: name.to_owned(),
             public_key,
             secret,
             kind,
         })
     }
+    /// The same code listing `alternates` too, checked strictly.
+    pub(crate) fn with_alternates(mut self, alternates: &[String]) -> Result<Self> {
+        self.alternates = checked_alternates(&self.address, alternates)?;
+        Ok(self)
+    }
+    /// Every address, the main one first.
+    pub(crate) fn addresses(&self) -> Vec<String> {
+        std::iter::once(self.address.clone())
+            .chain(self.alternates.iter().cloned())
+            .collect()
+    }
     /// The saved pairing once this Mac's device key is approved: the same
     /// sharing Mac, without a secret.
     pub(crate) fn device(&self) -> Self {
         Self {
             address: self.address.clone(),
+            alternates: self.alternates.clone(),
             name: self.name.clone(),
             public_key: self.public_key,
             secret: [0; 32],
@@ -229,24 +296,28 @@ impl PairingCode {
         }
     }
 
-    /// For the sharing Mac's own code: the computer name is normalized.
+    /// For the sharing Mac's own code: the computer name is normalized, and
+    /// of its other addresses, those that don't qualify or fit are left out.
     pub(crate) fn for_host(
         address: &str,
         computer_name: &str,
         public_key: [u8; 32],
         secret: [u8; 32],
         kind: CodeKind,
+        alternates: &[String],
     ) -> Result<Self> {
         if kind == CodeKind::Device {
             return Err(Error::Invalid);
         }
-        Self::of_kind(
+        let mut code = Self::of_kind(
             address,
             &local_name(computer_name),
             public_key,
             secret,
             kind,
-        )
+        )?;
+        code.alternates = fitted_alternates(&code.address, alternates);
+        Ok(code)
     }
 
     /// Lowercase hex SHA-256 of the public key: no secret, name or address.
@@ -257,6 +328,7 @@ impl PairingCode {
             .collect()
     }
 
+    /// Only a one-time code lists the other addresses.
     fn json(&self, version: u32) -> Zeroizing<Vec<u8>> {
         let wire = Wire {
             version,
@@ -264,6 +336,11 @@ impl PairingCode {
             name: self.name.clone(),
             public_key: base64_encode(&self.public_key),
             secret: (self.kind != CodeKind::Device).then(|| base64_encode(&self.secret)),
+            addresses: if version == 2 {
+                self.alternates.clone()
+            } else {
+                vec![]
+            },
         };
         Zeroizing::new(
             serde_json::to_vec(&wire).expect("pairing JSON has only string and integer fields"),
@@ -275,7 +352,7 @@ impl PairingCode {
             return Err(Error::Invalid);
         }
         let wire: Wire = serde_json::from_slice(bytes).map_err(|_| Error::Invalid)?;
-        if wire.version != version {
+        if wire.version != version || (version != 2 && !wire.addresses.is_empty()) {
             return Err(Error::Invalid);
         }
         let secret = match (kind, wire.secret.as_deref()) {
@@ -289,7 +366,8 @@ impl PairingCode {
             key(&wire.public_key)?,
             secret,
             kind,
-        )
+        )?
+        .with_alternates(&wire.addresses)
     }
 
     /// The JSON stored in Keychain: version 1 for an old pairing, 3 for a
@@ -315,7 +393,11 @@ impl PairingCode {
             CodeKind::OneTime => (ONE_TIME_PREFIX, 2),
             CodeKind::Device => return Err(Error::Invalid),
         };
-        let payload = Zeroizing::new(base64_encode(&self.json(version)));
+        let json = self.json(version);
+        if json.len() > MAX_CODE_JSON {
+            return Err(Error::Invalid);
+        }
+        let payload = Zeroizing::new(base64_encode(&json));
         Ok(Zeroizing::new(prefix.to_owned() + &payload))
     }
 
@@ -435,6 +517,74 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn one_time_codes_list_other_addresses_strictly_and_within_size() {
+        let host = code();
+        let long: Vec<String> = (0..7)
+            .map(|index| {
+                let label = "a".repeat(63);
+                format!("{label}.{label}.{label}.{}{index}.example", "b".repeat(30))
+            })
+            .collect();
+        let once = PairingCode::for_host(
+            "studio.local",
+            "S".repeat(MAX_NAME_BYTES).as_str(),
+            host.public_key,
+            [9; 32],
+            CodeKind::OneTime,
+            &long,
+        )
+        .unwrap();
+        assert!(!once.alternates.is_empty() && once.alternates.len() < long.len());
+        assert!(once.alternates.join(" ").len() <= MAX_ALTERNATES_TEXT);
+        let text = once.encode().unwrap();
+        assert!(text.len() <= MAX_CODE_TEXT);
+        assert_eq!(
+            PairingCode::parse(&text).unwrap().alternates,
+            once.alternates
+        );
+
+        let listed = |addresses: Value| {
+            let mut object: Value = serde_json::from_slice(&once.json(2)).unwrap();
+            object["addresses"] = addresses;
+            ONE_TIME_PREFIX.to_owned() + &base64_encode(&serde_json::to_vec(&object).unwrap())
+        };
+        let good = PairingCode::parse(&listed(json!(["192.168.25.201", "100.122.9.8"]))).unwrap();
+        assert_eq!(
+            good.addresses(),
+            ["studio.local", "192.168.25.201", "100.122.9.8"]
+        );
+        for bad in [
+            json!(["vnc://studio.local"]),
+            json!(["studio.local"]),
+            json!(["10.0.0.1", "10.0.0.1"]),
+            json!(
+                (1..=8)
+                    .map(|index| format!("10.0.0.{index}"))
+                    .collect::<Vec<_>>()
+            ),
+            json!("10.0.0.1"),
+            json!([1]),
+        ] {
+            assert_eq!(
+                PairingCode::parse(&listed(bad.clone())),
+                Err(Error::Invalid),
+                "{bad}"
+            );
+        }
+        // Old codes and saved pairings never list them.
+        let mut object: Value = serde_json::from_slice(&host.credential().unwrap()).unwrap();
+        object["addresses"] = json!(["10.0.0.1"]);
+        assert_eq!(
+            PairingCode::from_credential(&serde_json::to_vec(&object).unwrap()),
+            Err(Error::Invalid)
+        );
+        let saved = good.device();
+        assert_eq!(saved.alternates, good.alternates);
+        let stored = String::from_utf8(saved.credential().unwrap().to_vec()).unwrap();
+        assert!(!stored.contains("addresses"));
+    }
+
+    #[test]
     fn one_time_codes_and_device_pairings_have_their_own_forms() {
         let host = code();
         let once = PairingCode::for_host(
@@ -443,6 +593,7 @@ pub(crate) mod tests {
             host.public_key,
             [9; 32],
             CodeKind::OneTime,
+            &[],
         )
         .unwrap();
         let text = once.encode().unwrap();
@@ -482,7 +633,14 @@ pub(crate) mod tests {
             Err(Error::Invalid)
         );
         assert_eq!(
-            PairingCode::for_host("studio.local", "Mac", [1; 32], [0; 32], CodeKind::Device),
+            PairingCode::for_host(
+                "studio.local",
+                "Mac",
+                [1; 32],
+                [0; 32],
+                CodeKind::Device,
+                &[]
+            ),
             Err(Error::Invalid)
         );
         let mut object: Value = serde_json::from_slice(&host.credential().unwrap()).unwrap();
@@ -598,7 +756,8 @@ pub(crate) mod tests {
                 "A\u{200d}B",
                 [1; 32],
                 [2; 32],
-                CodeKind::Legacy
+                CodeKind::Legacy,
+                &[]
             )
             .is_ok()
         );

@@ -81,20 +81,24 @@ final class NativeTransport: @unchecked Sendable {
         var approvedKey: Bool { self == .pair || self == .migrate }
     }
     /// Connects with a pasted code or saved pairing, proving this Mac's key.
-    static func connect(address: String, code: NativePairingCode, deviceKey: NativeDeviceKey,
-                        deviceName: String = NativeDeviceKey.computerName, port: UInt16 = 45900) throws -> (NativeTransport, Mode) {
+    /// The sharing Mac's addresses are tried together, the first preferred;
+    /// returns the one that connected.
+    static func connect(addresses: [String], code: NativePairingCode, deviceKey: NativeDeviceKey,
+                        deviceName: String = NativeDeviceKey.computerName,
+                        port: UInt16 = 45900) throws -> (NativeTransport, Mode, String) {
         guard deviceKey.privateKey.count == 32 else { throw NativeSessionError(message: "This Mac's device key is invalid. Pair the Macs again.") }
         var handle: UInt64 = 0
         var mode: UInt8 = 0
+        var used = [CChar](repeating: 0, count: Int(ML_TEXT_CAPACITY))
         var raw = code.raw
         let status = deviceKey.privateKey.withUnsafeBytes { keyBytes in
-            ml_session_connect_paired(address, port, &raw, keyBytes.bindMemory(to: UInt8.self).baseAddress!, deviceName,
-                                      5_000, &handle, &mode)
+            ml_session_connect_paired(addresses.joined(separator: " "), port, &raw, keyBytes.bindMemory(to: UInt8.self).baseAddress!,
+                                      deviceName, 5_000, &handle, &mode, &used)
         }
         if status == ML_SESSION_INVALID { throw NativeSessionError(message: "Enter a hostname or IP address, without a port or URL.") }
         try check(status)
-        guard let used = Mode(rawValue: mode) else { _ = ml_session_close(handle); throw NativeSessionError(message: "Internal error") }
-        return (NativeTransport(handle, receivesVideo: true), used)
+        guard let connected = Mode(rawValue: mode) else { _ = ml_session_close(handle); throw NativeSessionError(message: "Internal error") }
+        return (NativeTransport(handle, receivesVideo: true), connected, nativeString(used))
     }
     var listeningPort: UInt16 { ml_session_listener_port(id) }
     /// 4 or 5; capabilities are exchanged only in protocol 5.

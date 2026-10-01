@@ -60,7 +60,7 @@ struct NativeStreamIntegration {
             let transport = try? listener.accept()
             lock.lock(); server = transport; lock.unlock(); accepted.signal()
         }
-        let (client, _) = try NativeTransport.connect(address: "127.0.0.1", code: code, deviceKey: NativeDeviceKey.create(),
+        let (client, _, _) = try NativeTransport.connect(addresses: ["127.0.0.1"], code: code, deviceKey: NativeDeviceKey.create(),
                                                       port: listener.listeningPort)
         defer { client.close() }
         try require(accepted.wait(timeout: .now() + 5) == .success, "HEVC session accept")
@@ -225,7 +225,7 @@ struct NativeStreamIntegration {
                 }
             } catch { if token.isActive { state.fail(error.localizedDescription) } }
         }
-        let (client, mode) = try NativeTransport.connect(address: "127.0.0.1", code: code, deviceKey: NativeDeviceKey.create(),
+        let (client, mode, _) = try NativeTransport.connect(addresses: ["127.0.0.1"], code: code, deviceKey: NativeDeviceKey.create(),
                                                          port: listener.listeningPort)
         defer { client.close() }
         try require(mode == .pair, "A one-time code pairs this Mac's key")

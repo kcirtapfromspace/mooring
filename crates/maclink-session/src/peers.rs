@@ -1,10 +1,13 @@
-//! Saved native-session peers: public metadata only (peer ID, display name and
-//! address). Pairing secrets stay in Keychain. The file follows the CLI store's
+//! Saved native-session peers: public metadata only (peer ID, display name,
+//! the address that last worked, and up to seven others). Pairing secrets stay
+//! in Keychain. The file follows the CLI store's
 //! conventions: bounded size, strict validation, owner-only permissions, atomic
 //! replacement, a cross-process lock, and never overwriting a file it cannot read.
 
 use crate::files;
-use crate::pairing::{PairingCode, normalize_address, validate_name};
+use crate::pairing::{
+    PairingCode, checked_alternates, fitted_alternates, normalize_address, validate_name,
+};
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,6 +26,9 @@ pub(crate) struct Peer {
     pub id: String,
     pub name: String,
     pub address: String,
+    /// Tried with `address`; files from before they existed have none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternates: Vec<String>,
 }
 
 impl Peer {
@@ -36,8 +42,11 @@ impl Peer {
             return Err(Error::Invalid);
         }
         validate_name(&self.name)?;
+        let address = normalize_address(&self.address)?;
+        let alternates = checked_alternates(&address, &self.alternates)?;
         Ok(Self {
-            address: normalize_address(&self.address)?,
+            address,
+            alternates,
             ..self
         })
     }
@@ -91,12 +100,23 @@ impl PeerStore {
             .collect()
     }
 
-    /// Save or refresh a peer after an authenticated connection.
-    pub(crate) fn remember(&self, code: &PairingCode, address: &str) -> Result<Peer> {
+    /// Save or refresh a peer after an authenticated connection. `tried`
+    /// lists the addresses that connection used, the one that connected
+    /// first; the code's own follow, at most eight in all.
+    pub(crate) fn remember(&self, code: &PairingCode, tried: &[String]) -> Result<Peer> {
+        let mut addresses: Vec<String> = Vec::new();
+        for entry in tried.iter().cloned().chain(code.addresses()) {
+            let address = normalize_address(&entry)?;
+            if !addresses.contains(&address) {
+                addresses.push(address);
+            }
+        }
+        let (address, others) = addresses.split_first().ok_or(Error::Invalid)?;
         let peer = Peer {
             id: code.peer_id(),
             name: code.name.clone(),
-            address: address.to_owned(),
+            address: address.clone(),
+            alternates: fitted_alternates(address, others),
         }
         .validated()?;
         let _lock = self.lock()?;
@@ -106,6 +126,26 @@ impl PeerStore {
         peers.truncate(MAX_PEERS);
         self.save(peers)?;
         Ok(peer)
+    }
+
+    /// After a saved peer connected: the address that worked goes first, and
+    /// the peer to the top of the list. Returns whether the peer was saved.
+    pub(crate) fn connected(&self, id: &str, address: &str) -> Result<bool> {
+        let address = normalize_address(address)?;
+        let _lock = self.lock()?;
+        let mut peers = self.load()?;
+        let Some(index) = peers.iter().position(|saved| saved.id == id) else {
+            return Ok(false);
+        };
+        let mut peer = peers.remove(index);
+        if let Some(at) = peer.alternates.iter().position(|saved| *saved == address) {
+            let previous = std::mem::replace(&mut peer.address, peer.alternates.remove(at));
+            peer.alternates.insert(0, previous);
+            peer.alternates = fitted_alternates(&peer.address, &peer.alternates);
+        }
+        peers.insert(0, peer);
+        self.save(peers)?;
+        Ok(true)
     }
 
     /// Remove a peer. Returns whether it was saved; an absent peer is not an error.
@@ -195,21 +235,72 @@ mod tests {
     }
 
     #[test]
+    fn saved_macs_keep_every_address_with_the_one_that_worked_first() {
+        let directory = Directory::new();
+        let store = directory.store();
+        let code = peer_code(1)
+            .with_alternates(&["192.168.25.201".into(), "100.122.9.8".into()])
+            .unwrap();
+        let peer = store.remember(&code, &["100.122.9.8".into()]).unwrap();
+        assert_eq!(
+            (peer.address.as_str(), peer.alternates.clone()),
+            (
+                "100.122.9.8",
+                vec!["studio.local".to_string(), "192.168.25.201".into()]
+            )
+        );
+        store
+            .remember(&peer_code(2), &["mac.local".into()])
+            .unwrap();
+        assert!(store.connected(&peer.id, "192.168.25.201").unwrap());
+        let saved = store.load().unwrap();
+        assert_eq!(
+            saved[0].id, peer.id,
+            "the Mac that connected moves to the top"
+        );
+        assert_eq!(
+            (saved[0].address.as_str(), saved[0].alternates.clone()),
+            (
+                "192.168.25.201",
+                vec!["100.122.9.8".to_string(), "studio.local".into()]
+            )
+        );
+        assert!(!store.connected(&"f".repeat(64), "mac.local").unwrap());
+        // A file from before other addresses loads, and nothing invalid does.
+        let path = directory.0.join(FILE_NAME);
+        let old = format!(
+            r#"{{"version":1,"peers":[{{"id":"{}","name":"Mac","address":"mac.local"}}]}}"#,
+            "a".repeat(64)
+        );
+        fs::write(&path, &old).unwrap();
+        assert!(store.load().unwrap()[0].alternates.is_empty());
+        fs::write(
+            &path,
+            old.replace(
+                r#""address":"mac.local""#,
+                r#""address":"mac.local","alternates":["mac.local"]"#,
+            ),
+        )
+        .unwrap();
+        assert_eq!(store.load(), Err(Error::Storage));
+    }
+
+    #[test]
     fn remembered_peers_round_trip_most_recent_first() {
         let directory = Directory::new();
         assert!(directory.store().load().unwrap().is_empty());
         let first = directory
             .store()
-            .remember(&peer_code(1), "Studio.Local")
+            .remember(&peer_code(1), &["Studio.Local".into()])
             .unwrap();
         assert_eq!(first.address, "studio.local");
         directory
             .store()
-            .remember(&peer_code(2), "192.168.1.25")
+            .remember(&peer_code(2), &["192.168.1.25".into()])
             .unwrap();
         let moved = directory
             .store()
-            .remember(&peer_code(1), "office.local")
+            .remember(&peer_code(1), &["office.local".into()])
             .unwrap();
         let peers = directory.store().load().unwrap();
         assert_eq!(peers.len(), 2);
@@ -225,7 +316,7 @@ mod tests {
         for index in 0..40 {
             directory
                 .store()
-                .remember(&peer_code(index), "studio.local")
+                .remember(&peer_code(index), &["studio.local".into()])
                 .unwrap();
         }
         let peers = directory.store().load().unwrap();
@@ -237,7 +328,10 @@ mod tests {
             0o600
         );
         let saved = code();
-        directory.store().remember(&saved, "studio.local").unwrap();
+        directory
+            .store()
+            .remember(&saved, &["studio.local".into()])
+            .unwrap();
         let text = fs::read_to_string(&path).unwrap();
         let credential = String::from_utf8(saved.credential().unwrap().to_vec()).unwrap();
         let object: Value = serde_json::from_str(&credential).unwrap();
@@ -257,7 +351,7 @@ mod tests {
         assert_eq!(
             directory
                 .store()
-                .remember(&peer_code(1), "vnc://studio.local"),
+                .remember(&peer_code(1), &["vnc://studio.local".into()]),
             Err(Error::Invalid)
         );
         assert!(!directory.0.join(FILE_NAME).exists());
@@ -284,7 +378,7 @@ mod tests {
         ] {
             fs::write(&path, &content).unwrap();
             assert_eq!(directory.store().load(), Err(Error::Storage));
-            assert!(directory.store().remember(&peer_code(1), "mac.local").is_err());
+            assert!(directory.store().remember(&peer_code(1), &["mac.local".into()]).is_err());
             assert_eq!(fs::read_to_string(&path).unwrap(), content);
         }
     }
@@ -331,11 +425,11 @@ mod tests {
         let directory = Directory::new();
         let first = directory
             .store()
-            .remember(&peer_code(1), "mac.local")
+            .remember(&peer_code(1), &["mac.local".into()])
             .unwrap();
         directory
             .store()
-            .remember(&peer_code(2), "mac.local")
+            .remember(&peer_code(2), &["mac.local".into()])
             .unwrap();
         assert_eq!(directory.store().forget(&first.id), Ok(true));
         assert_eq!(directory.store().forget(&first.id), Ok(false));
@@ -359,7 +453,7 @@ mod tests {
                 let path = directory.0.clone();
                 scope.spawn(move || {
                     PeerStore::new(path)
-                        .remember(&peer_code(index), "mac.local")
+                        .remember(&peer_code(index), &["mac.local".into()])
                         .unwrap()
                 });
             }

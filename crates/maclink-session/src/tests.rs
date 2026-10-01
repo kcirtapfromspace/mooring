@@ -961,6 +961,7 @@ fn empty_code() -> MLPairingCode {
         public_key: [0; 32],
         secret: [0; 32],
         kind: 0,
+        alternates: [0; ML_ALTERNATES_CAPACITY],
     }
 }
 
@@ -976,6 +977,7 @@ fn pairing_abi_round_trips_codes_and_credentials() {
             public.as_ptr(),
             psk.as_ptr(),
             1,
+            std::ptr::null(),
             &mut code,
         )
     };
@@ -1077,6 +1079,7 @@ fn peers_abi_loads_remembers_and_imports() {
             id: [0; 65],
             name: [0; 256],
             address: [0; 256],
+            alternates: [0; ML_ALTERNATES_CAPACITY],
         })
         .collect();
     let mut count = 99;
@@ -1106,6 +1109,7 @@ fn peers_abi_loads_remembers_and_imports() {
                 public.as_ptr(),
                 psk.as_ptr(),
                 1,
+                std::ptr::null(),
                 &mut code
             ),
             0
@@ -1114,6 +1118,7 @@ fn peers_abi_loads_remembers_and_imports() {
             id: [0; 65],
             name: [0; 256],
             address: [0; 256],
+            alternates: [0; ML_ALTERNATES_CAPACITY],
         };
         assert_eq!(
             ml_peers_remember(path.as_ptr(), &code, c"10.0.0.2".as_ptr(), &mut saved),
@@ -2349,6 +2354,7 @@ fn host_code(public: &[u8; 32], secret: &[u8; 32], kind: u8) -> MLPairingCode {
                 public.as_ptr(),
                 secret.as_ptr(),
                 kind,
+                std::ptr::null(),
                 &mut code,
             )
         },
@@ -2386,20 +2392,38 @@ fn exchange<T>(listener: u64, viewer: impl FnOnce() -> T) -> (T, Vec<Result<Owne
     (result, host.join().unwrap())
 }
 fn connect_paired(port: u16, code: &MLPairingCode, device: &[u8; 32]) -> (i32, Option<Owned>, u8) {
+    let (status, session, mode, _) = connect_via(c"127.0.0.1", port, code, device, 5000);
+    (status, session, mode)
+}
+/// Also returns the address that connected.
+fn connect_via(
+    addresses: &std::ffi::CStr,
+    port: u16,
+    code: &MLPairingCode,
+    device: &[u8; 32],
+    timeout: u32,
+) -> (i32, Option<Owned>, u8, String) {
     let (mut out, mut mode) = (0, 0);
+    let mut used = [0 as c_char; ML_TEXT_CAPACITY];
     let status = unsafe {
         ml_session_connect_paired(
-            c"127.0.0.1".as_ptr(),
+            addresses.as_ptr(),
             port,
             code,
             device.as_ptr(),
             c" MacBook\u{200b} Pro\n".as_ptr(),
-            5000,
+            timeout,
             &mut out,
             &mut mode,
+            used.as_mut_ptr(),
         )
     };
-    (status, (status == 0).then_some(Owned(out)), mode)
+    (
+        status,
+        (status == 0).then_some(Owned(out)),
+        mode,
+        text(&used),
+    )
 }
 fn peer_device(host: u64) -> String {
     let mut out = [0 as c_char; ML_PEER_ID_CAPACITY];
@@ -2826,4 +2850,224 @@ fn the_mode_is_bound_into_the_handshake_and_refusals_come_before_an_answer() {
         "an unfinished handshake approves no one"
     );
     paired(&host, &code, &device, MODE_PAIR);
+}
+
+// Several addresses for one sharing Mac. The real host listens on 127.0.0.1;
+// the same port on ::1 stands in for another machine at a stale address.
+
+/// A device pairing with this sharing Mac, as saved after approval.
+fn saved_pairing(public: &[u8; 32]) -> MLPairingCode {
+    let mut saved = empty_code();
+    let once = host_code(public, &[9; 32], PAIRING_ONE_TIME);
+    assert_eq!(unsafe { ml_pairing_device(&once, &mut saved) }, 0);
+    saved
+}
+fn stand_in(port: u16) -> std::net::TcpListener {
+    std::net::TcpListener::bind(("::1", port)).expect("IPv6 loopback")
+}
+fn closed_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+#[test]
+fn an_address_that_never_answers_doesnt_stop_the_one_that_does() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let host = device_host(false);
+    // Connections complete into its backlog, and nothing ever answers.
+    let _hang = stand_in(host.port());
+    let (device, id) = device_key();
+    let code = host.one_time_code();
+    let started = Instant::now();
+    let ((status, viewer, mode, used), results) = exchange(host.listener.0, || {
+        connect_via(c"::1 127.0.0.1", host.port(), &code, &device, 4500)
+    });
+    assert_eq!((status, mode, used.as_str()), (0, MODE_PAIR, "127.0.0.1"));
+    assert!(started.elapsed() < Duration::from_millis(4500));
+    let session = results.into_iter().find_map(Result::ok).unwrap();
+    assert_eq!(peer_device(session.0), id);
+    assert_eq!(hello(viewer.unwrap().0), TEST_CAPABILITIES);
+}
+
+#[test]
+fn an_address_that_closes_at_once_isnt_taken_as_a_refusal() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let host = device_host(false);
+    let closer = stand_in(host.port());
+    let closing = std::thread::spawn(move || {
+        if let Ok((socket, _)) = closer.accept() {
+            drop(socket);
+        }
+    });
+    let (device, _) = device_key();
+    let code = host.one_time_code();
+    let ((status, _viewer, mode, used), _) = exchange(host.listener.0, || {
+        connect_via(c"::1 127.0.0.1", host.port(), &code, &device, 5000)
+    });
+    assert_eq!((status, mode, used.as_str()), (0, MODE_PAIR, "127.0.0.1"));
+    closing.join().unwrap();
+}
+
+#[test]
+fn refused_only_when_every_address_that_answered_refused() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let host = device_host(false);
+    let closer = stand_in(host.port());
+    std::thread::spawn(move || {
+        if let Ok((socket, _)) = closer.accept() {
+            drop(socket);
+        }
+    });
+    // Neither the stand-in nor the real host accepts this Mac.
+    let (unknown, _) = device_key();
+    let saved = saved_pairing(&host.public);
+    let ((status, ..), _) = exchange(host.listener.0, || {
+        connect_via(c"::1 127.0.0.1", host.port(), &saved, &unknown, 5000)
+    });
+    assert_eq!(status, Error::Auth as i32);
+    // Nothing reached at all is no refusal: reconnecting continues.
+    let (status, ..) = connect_via(c"127.0.0.1 ::1", closed_port(), &saved, &unknown, 3000);
+    assert_ne!(status, 0);
+    assert_ne!(status, Error::Auth as i32);
+}
+
+#[test]
+fn moving_over_falls_back_on_the_address_that_reached_an_older_host() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    crate::transport::TEST_OFFER.with(|value| value.set(5));
+    let (private, public, psk) = identity();
+    let listener = bind(&private, &psk);
+    let port = ml_session_listener_port(listener.0);
+    let (device, _) = device_key();
+    let old = host_code(&public, &psk, PAIRING_LEGACY);
+    // Nothing listens on ::1 at this port.
+    let ((status, viewer, mode, used), _) = exchange(listener.0, || {
+        connect_via(c"::1 127.0.0.1", port, &old, &device, 5000)
+    });
+    assert_eq!((status, mode, used.as_str()), (0, MODE_LEGACY, "127.0.0.1"));
+    assert_eq!(hello(viewer.unwrap().0), TEST_CAPABILITIES);
+}
+
+#[test]
+fn address_lists_cross_the_c_abi_strictly() {
+    let (device, _) = device_key();
+    let saved = saved_pairing(&[3; 32]);
+    for bad in [
+        c"",
+        c" ",
+        c"vnc://studio.local",
+        c"a.local b.local c.local d.local e.local f.local g.local h.local i.local",
+    ] {
+        let (status, ..) = connect_via(bad, 45_900, &saved, &device, 1000);
+        assert_eq!(status, Error::Invalid as i32, "{bad:?}");
+    }
+    let mut local = vec![0 as c_char; ML_ALTERNATES_CAPACITY];
+    assert_eq!(
+        unsafe { ml_local_addresses(local.as_mut_ptr(), 1023) },
+        Error::Invalid as i32
+    );
+    assert_eq!(
+        unsafe { ml_local_addresses(local.as_mut_ptr(), local.len()) },
+        0
+    );
+    let listed = text(&<[c_char; ML_ALTERNATES_CAPACITY]>::try_from(local.as_slice()).unwrap());
+    assert!(listed.split(' ').filter(|entry| !entry.is_empty()).count() < ML_ADDRESSES_MAX);
+
+    // A one-time code carries this Mac's other addresses; Keychain never does.
+    let (_, public, psk) = identity();
+    let mut code = empty_code();
+    assert_eq!(
+        unsafe {
+            ml_pairing_code_for_host(
+                c"studio.local".as_ptr(),
+                c"Studio".as_ptr(),
+                public.as_ptr(),
+                psk.as_ptr(),
+                PAIRING_ONE_TIME,
+                c"192.168.25.201 studio.local 100.122.9.8 not//valid 192.168.25.201".as_ptr(),
+                &mut code,
+            )
+        },
+        0
+    );
+    assert_eq!(text(&code.alternates), "192.168.25.201 100.122.9.8");
+    let mut encoded = vec![0 as c_char; ML_PAIRING_CODE_CAPACITY];
+    assert_eq!(
+        unsafe { ml_pairing_code_encode(&code, encoded.as_mut_ptr(), encoded.len()) },
+        0
+    );
+    let mut parsed = empty_code();
+    assert_eq!(
+        unsafe { ml_pairing_code_parse(encoded.as_ptr(), &mut parsed) },
+        0
+    );
+    assert_eq!(text(&parsed.alternates), "192.168.25.201 100.122.9.8");
+    let mut device_code = empty_code();
+    assert_eq!(unsafe { ml_pairing_device(&parsed, &mut device_code) }, 0);
+    let mut credential = vec![0; ML_CREDENTIAL_CAPACITY];
+    let mut length = 0;
+    assert_eq!(
+        unsafe {
+            ml_pairing_credential_encode(
+                &device_code,
+                credential.as_mut_ptr(),
+                credential.len(),
+                &mut length,
+            )
+        },
+        0
+    );
+    let stored = String::from_utf8(credential[..length].to_vec()).unwrap();
+    assert!(
+        !stored.contains("100.122.9.8") && !stored.contains("addresses"),
+        "{stored}"
+    );
+
+    // Saved Macs keep every address, the one that connected first.
+    let directory = Scratch::new();
+    let mut peer = unsafe { std::mem::zeroed::<MLPeer>() };
+    assert_eq!(
+        unsafe {
+            ml_peers_remember(
+                directory.1.as_ptr(),
+                &parsed,
+                c"100.122.9.8".as_ptr(),
+                &mut peer,
+            )
+        },
+        0
+    );
+    assert_eq!(
+        (text(&peer.address), text(&peer.alternates)),
+        ("100.122.9.8".into(), "studio.local 192.168.25.201".into())
+    );
+    let id = CString::new(text(&peer.id)).unwrap();
+    assert_eq!(
+        unsafe { ml_peers_connected(directory.1.as_ptr(), id.as_ptr(), c"studio.local".as_ptr()) },
+        0
+    );
+    let mut peers: Vec<MLPeer> = (0..32).map(|_| unsafe { std::mem::zeroed() }).collect();
+    let mut count = 0;
+    assert_eq!(
+        unsafe {
+            ml_peers_load(
+                directory.1.as_ptr(),
+                peers.as_mut_ptr(),
+                peers.len(),
+                &mut count,
+            )
+        },
+        0
+    );
+    assert_eq!(
+        (count, text(&peers[0].address), text(&peers[0].alternates)),
+        (
+            1,
+            "studio.local".into(),
+            "100.122.9.8 192.168.25.201".into()
+        )
+    );
 }

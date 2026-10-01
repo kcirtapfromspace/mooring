@@ -26,6 +26,9 @@ use zeroize::{Zeroize, Zeroizing};
 
 pub const ML_TEXT_CAPACITY: usize = 256;
 pub const ML_PEER_ID_CAPACITY: usize = 65;
+/// A Mac's other addresses, joined by single spaces, and the NUL.
+pub const ML_ALTERNATES_CAPACITY: usize = crate::pairing::MAX_ALTERNATES_TEXT + 1;
+pub const ML_ADDRESSES_MAX: usize = crate::pairing::MAX_ADDRESSES;
 pub const ML_PAIRING_CODE_CAPACITY: usize = 2049;
 pub const ML_CREDENTIAL_CAPACITY: usize = 1024;
 
@@ -275,6 +278,8 @@ pub struct MLPairingCode {
     pub secret: [u8; 32],
     /// ML_PAIRING_* : old code, one-time code or device pairing.
     pub kind: u8,
+    /// The sharing Mac's other addresses, separated by single spaces.
+    pub alternates: [c_char; ML_ALTERNATES_CAPACITY],
 }
 /// A Mac approved to connect to this one: its ID (hex SHA-256 of its device
 /// key), name, when it paired and last connected (Unix seconds), and how it
@@ -301,7 +306,9 @@ pub struct MLLegacyState {
 pub struct MLPeer {
     pub id: [c_char; ML_PEER_ID_CAPACITY],
     pub name: [c_char; ML_TEXT_CAPACITY],
+    /// The address that last worked; the others are tried with it.
     pub address: [c_char; ML_TEXT_CAPACITY],
+    pub alternates: [c_char; ML_ALTERNATES_CAPACITY],
 }
 /// Opaque host input state; calls are serialized internally.
 pub struct MLInputState(Mutex<InputReducer>);
@@ -372,13 +379,15 @@ const _: () = {
     assert!(offset_of!(MLSessionMessage, video) == 8);
     assert!(offset_of!(MLSessionMessage, input) == 104);
     assert!(offset_of!(MLSessionMessage, control) == 152);
-    assert!(size_of::<MLPairingCode>() == 642);
+    assert!(size_of::<MLPairingCode>() == 1666);
     assert!(offset_of!(MLPairingCode, kind) == 641);
+    assert!(offset_of!(MLPairingCode, alternates) == 642);
     assert!(offset_of!(MLPairingCode, name) == 256);
     assert!(offset_of!(MLPairingCode, peer_id) == 512);
     assert!(offset_of!(MLPairingCode, public_key) == 577);
     assert!(offset_of!(MLPairingCode, secret) == 609);
-    assert!(size_of::<MLPeer>() == 577);
+    assert!(size_of::<MLPeer>() == 1601);
+    assert!(offset_of!(MLPeer, alternates) == 577);
     assert!(
         size_of::<MLDevice>() == 344
             && offset_of!(MLDevice, id) == 16
@@ -397,6 +406,7 @@ impl MLPairingCode {
         public_key: [0; 32],
         secret: [0; 32],
         kind: 0,
+        alternates: [0; ML_ALTERNATES_CAPACITY],
     };
 }
 impl MLPeer {
@@ -404,6 +414,7 @@ impl MLPeer {
         id: [0; ML_PEER_ID_CAPACITY],
         name: [0; ML_TEXT_CAPACITY],
         address: [0; ML_TEXT_CAPACITY],
+        alternates: [0; ML_ALTERNATES_CAPACITY],
     };
 }
 
@@ -617,7 +628,7 @@ fn code_out(code: &PairingCode, out: &mut MLPairingCode) -> Result<()> {
     out.public_key = code.public_key;
     out.secret = code.secret;
     out.kind = code.kind as u8;
-    Ok(())
+    write_text(&mut out.alternates, &code.alternates.join(" "))
 }
 /// Strictly re-validates a code that crossed the boundary; its peer ID is
 /// always recomputed from the public key.
@@ -628,12 +639,35 @@ fn code_in(raw: &MLPairingCode) -> Result<PairingCode> {
         raw.public_key,
         raw.secret,
         CodeKind::from_raw(raw.kind)?,
-    )
+    )?
+    .with_alternates(&split_list(&read_text(&raw.alternates)?))
 }
 fn peer_out(peer: &Peer, out: &mut MLPeer) -> Result<()> {
     write_text(&mut out.id, &peer.id)?;
     write_text(&mut out.name, &peer.name)?;
-    write_text(&mut out.address, &peer.address)
+    write_text(&mut out.address, &peer.address)?;
+    write_text(&mut out.alternates, &peer.alternates.join(" "))
+}
+fn split_list(text: &str) -> Vec<String> {
+    text.split(' ')
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+/// Addresses separated by spaces: one to ML_ADDRESSES_MAX, each normalized by
+/// the host rule, repeats dropped.
+fn address_list(text: &str) -> Result<Vec<String>> {
+    let mut list: Vec<String> = Vec::new();
+    for entry in split_list(text) {
+        let address = normalize_address(&entry)?;
+        if !list.contains(&address) {
+            list.push(address);
+        }
+    }
+    if list.is_empty() || list.len() > ML_ADDRESSES_MAX {
+        return Err(Error::Invalid);
+    }
+    Ok(list)
 }
 
 fn ffi(action: impl FnOnce() -> Result<()>) -> i32 {
@@ -946,7 +980,7 @@ pub unsafe extern "C" fn ml_listener_pairing_secret(id: u64, out: *mut u8) -> i3
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ml_session_connect_paired(
-    address: *const c_char,
+    addresses: *const c_char,
     port: u16,
     code: *const MLPairingCode,
     device_private: *const u8,
@@ -954,18 +988,27 @@ pub unsafe extern "C" fn ml_session_connect_paired(
     timeout_ms: u32,
     out: *mut u64,
     mode_out: *mut u8,
+    used_out: *mut c_char,
 ) -> i32 {
     ffi(|| {
         let out = unsafe { output(out)? };
         let mode_out = unsafe { output(mode_out)? };
         *out = 0;
         *mode_out = 0;
+        if used_out.is_null() {
+            return Err(Error::Invalid);
+        }
+        // SAFETY: caller promises ML_TEXT_CAPACITY writable bytes.
+        let used_out = unsafe { &mut *(used_out as *mut [c_char; ML_TEXT_CAPACITY]) };
+        used_out.fill(0);
         let end = deadline(timeout_ms)?;
-        let host = normalize_address(&unsafe { text(address)? })?;
+        let hosts = address_list(&unsafe { text(addresses)? })?;
         let code = code_in(unsafe { input_ref(code)? })?;
         let private = unsafe { key(device_private)? };
         let name = unsafe { text(device_name)? };
-        let (session, mode) = transport::connect_paired(&host, port, &code, &private, &name, end)?;
+        let (session, mode, used) =
+            transport::connect_paired(&hosts, port, &code, &private, &name, end)?;
+        write_text(used_out, &used)?;
         *out = transport::insert(Handle::Session(session), None)?;
         *mode_out = mode as u8;
         Ok(())
@@ -1715,19 +1758,46 @@ pub unsafe extern "C" fn ml_pairing_code_for_host(
     public_key: *const u8,
     secret: *const u8,
     kind: u8,
+    alternates: *const c_char,
     out: *mut MLPairingCode,
 ) -> i32 {
     ffi(|| {
         let out = unsafe { output(out)? };
         *out = MLPairingCode::EMPTY;
+        let alternates = if alternates.is_null() {
+            vec![]
+        } else {
+            split_list(&unsafe { text(alternates)? })
+        };
         let code = PairingCode::for_host(
             &unsafe { text(address)? },
             &unsafe { text(computer_name)? },
             *unsafe { key(public_key)? },
             *unsafe { key(secret)? },
             CodeKind::from_raw(kind)?,
+            &alternates,
         )?;
         code_out(&code, out)
+    })
+}
+/// This Mac's network addresses for its pairing codes, best first, separated
+/// by single spaces (see addresses.rs); empty if there are none.
+/// # Safety
+/// `out` writable for `capacity` bytes, at least ML_ALTERNATES_CAPACITY.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_local_addresses(out: *mut c_char, capacity: usize) -> i32 {
+    ffi(|| {
+        if out.is_null() || capacity < ML_ALTERNATES_CAPACITY {
+            return Err(Error::Invalid);
+        }
+        // SAFETY: caller promises `capacity` writable bytes.
+        let target = unsafe { &mut *(out as *mut [c_char; ML_ALTERNATES_CAPACITY]) };
+        target.fill(0);
+        let addresses = crate::addresses::local_addresses();
+        write_text(
+            target,
+            &crate::pairing::fitted_alternates("", &addresses).join(" "),
+        )
     })
 }
 /// The saved pairing once this Mac is approved: the same sharing Mac,
@@ -1866,7 +1936,7 @@ pub unsafe extern "C" fn ml_peers_load(
 pub unsafe extern "C" fn ml_peers_remember(
     directory: *const c_char,
     code: *const MLPairingCode,
-    address: *const c_char,
+    addresses: *const c_char,
     out: *mut MLPeer,
 ) -> i32 {
     ffi(|| {
@@ -1874,11 +1944,30 @@ pub unsafe extern "C" fn ml_peers_remember(
             *out = MLPeer::EMPTY;
         }
         let code = code_in(unsafe { input_ref(code)? })?;
-        let peer = unsafe { store(directory)? }.remember(&code, &unsafe { text(address)? })?;
+        let tried = address_list(&unsafe { text(addresses)? })?;
+        let peer = unsafe { store(directory)? }.remember(&code, &tried)?;
         match unsafe { out.as_mut() } {
             Some(out) => peer_out(&peer, out),
             None => Ok(()),
         }
+    })
+}
+/// After a saved peer connected through `address`: it goes first among the
+/// peer's addresses, and the peer to the top of the list. An unknown peer is
+/// left alone.
+/// # Safety
+/// `directory` null or NUL terminated; `id` and `address` NUL terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_peers_connected(
+    directory: *const c_char,
+    id: *const c_char,
+    address: *const c_char,
+) -> i32 {
+    ffi(|| {
+        let (id, address) = (unsafe { text(id)? }, unsafe { text(address)? });
+        unsafe { store(directory)? }
+            .connected(&id, &address)
+            .map(|_| ())
     })
 }
 /// Forget a saved peer by ID; forgetting an absent peer succeeds.

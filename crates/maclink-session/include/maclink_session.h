@@ -118,6 +118,8 @@ enum {
 #define ML_INPUT_MAX_EVENTS 132u
 #define ML_TEXT_CAPACITY 256u
 #define ML_PEER_ID_CAPACITY 65u
+#define ML_ALTERNATES_CAPACITY 1024u /* a Mac's other addresses, separated by single spaces */
+#define ML_ADDRESSES_MAX 8u /* a code or saved Mac lists at most this many addresses */
 #define ML_PAIRING_CODE_CAPACITY 2049u
 #define ML_CREDENTIAL_CAPACITY 1024u
 #define ML_PEERS_MAX 32u
@@ -339,7 +341,9 @@ typedef struct {
 
 /* Strings are NUL-terminated UTF-8. peer_id is lowercase hex SHA-256 of the
  * public key, recomputed whenever a code crosses back into Rust. kind is an
- * ML_PAIRING_* value; a device pairing's secret is all zero. */
+ * ML_PAIRING_* value; a device pairing's secret is all zero. alternates are
+ * the sharing Mac's other addresses, separated by single spaces, at most
+ * seven; only one-time codes carry them in their text, never Keychain. */
 typedef struct {
     char address[ML_TEXT_CAPACITY];
     char name[ML_TEXT_CAPACITY];
@@ -347,6 +351,7 @@ typedef struct {
     uint8_t public_key[32];
     uint8_t secret[32];
     uint8_t kind;
+    char alternates[ML_ALTERNATES_CAPACITY];
 } MLPairingCode;
 
 /* A Mac approved to connect to this one. Times are Unix seconds. */
@@ -366,10 +371,13 @@ typedef struct {
     uint64_t closes_at, last_used;
 } MLLegacyState;
 
+/* A saved Mac: address is the one that last worked; alternates, separated by
+ * single spaces, are tried with it. */
 typedef struct {
     char id[ML_PEER_ID_CAPACITY];
     char name[ML_TEXT_CAPACITY];
     char address[ML_TEXT_CAPACITY];
+    char alternates[ML_ALTERNATES_CAPACITY];
 } MLPeer;
 
 typedef struct MLInputState MLInputState;
@@ -416,14 +424,15 @@ _Static_assert(sizeof(MLClipboardMessage) == 80 && offsetof(MLClipboardMessage, 
 _Static_assert(offsetof(MLSessionMessage, video) == 8, "MLSessionMessage.video layout");
 _Static_assert(offsetof(MLSessionMessage, input) == 104, "MLSessionMessage.input layout");
 _Static_assert(offsetof(MLSessionMessage, control) == 152, "MLSessionMessage.control layout");
-_Static_assert(sizeof(MLPairingCode) == 642 && offsetof(MLPairingCode, kind) == 641, "MLPairingCode layout");
+_Static_assert(sizeof(MLPairingCode) == 1666 && offsetof(MLPairingCode, kind) == 641, "MLPairingCode layout");
+_Static_assert(offsetof(MLPairingCode, alternates) == 642, "MLPairingCode.alternates layout");
 _Static_assert(sizeof(MLDevice) == 344 && offsetof(MLDevice, id) == 16 && offsetof(MLDevice, via) == 337, "MLDevice layout");
 _Static_assert(sizeof(MLLegacyState) == 24 && offsetof(MLLegacyState, closes_at) == 8, "MLLegacyState layout");
 _Static_assert(offsetof(MLPairingCode, name) == 256, "MLPairingCode.name layout");
 _Static_assert(offsetof(MLPairingCode, peer_id) == 512, "MLPairingCode.peer_id layout");
 _Static_assert(offsetof(MLPairingCode, public_key) == 577, "MLPairingCode.public_key layout");
 _Static_assert(offsetof(MLPairingCode, secret) == 609, "MLPairingCode.secret layout");
-_Static_assert(sizeof(MLPeer) == 577, "MLPeer layout");
+_Static_assert(sizeof(MLPeer) == 1601 && offsetof(MLPeer, alternates) == 577, "MLPeer layout");
 _Static_assert(sizeof(MLMetric) == 16, "MLMetric layout");
 _Static_assert(offsetof(MLMetric, value) == 8, "MLMetric.value layout");
 _Static_assert(sizeof(MLTuning) == 16, "MLTuning layout");
@@ -564,21 +573,33 @@ int32_t ml_input_state_stop(MLInputState *state, MLInputEvent *out, size_t capac
 
 /* Pairing. Addresses use the project's shared host rule and are normalized. */
 int32_t ml_address_normalize(const char *address, char *out, size_t capacity);
-/* kind is ML_PAIRING_LEGACY or ML_PAIRING_ONE_TIME. */
+/* kind is ML_PAIRING_LEGACY or ML_PAIRING_ONE_TIME. alternates (NULL or
+ * space-separated) are this Mac's other addresses, as ml_local_addresses
+ * lists them; those that don't qualify or fit are left out. */
 int32_t ml_pairing_code_for_host(const char *address, const char *computer_name, const uint8_t public_key[32], const uint8_t secret[32],
-                                 uint8_t kind, MLPairingCode *out);
+                                 uint8_t kind, const char *alternates, MLPairingCode *out);
+/* This Mac's IPv4 addresses on Ethernet and Wi-Fi, then on tunnels such as a
+ * VPN, at most seven, separated by single spaces. capacity must be at least
+ * ML_ALTERNATES_CAPACITY. */
+int32_t ml_local_addresses(char *out, size_t capacity);
 /* The saved pairing once this Mac is approved: same sharing Mac, no secret. */
 int32_t ml_pairing_device(const MLPairingCode *code, MLPairingCode *out);
 /* Connects with a pasted code or saved pairing, proving this Mac's device key
  * and name: a one-time code pairs, a device pairing connects, and an old
  * pairing moves over, or with a sharing Mac from before per-device keys uses
  * the old handshake. mode_out is ML_MODE_*; after PAIR or MIGRATE save
- * ml_pairing_device in place of the code. A sharing Mac that refuses this Mac
- * closes without answering, returned as ML_SESSION_AUTH: a used, expired or
- * wrong code, a removed Mac, or an old code no longer accepted. device_name
- * is this computer's name, made valid rather than refused. */
-int32_t ml_session_connect_paired(const char *address, uint16_t port, const MLPairingCode *code, const uint8_t device_private[32],
-                                  const char *device_name, uint32_t timeout_ms, uint64_t *out_session, uint8_t *mode_out);
+ * ml_pairing_device in place of the code.
+ * addresses: one to ML_ADDRESSES_MAX, separated by spaces, the preferred
+ * first. All are tried at once, 200 ms apart, and each that connects gets the
+ * handshake in turn, at most 2 s while others are pending, until one
+ * succeeds. used_out (ML_TEXT_CAPACITY bytes) receives the one that did.
+ * A sharing Mac that refuses this Mac closes without answering, returned as
+ * ML_SESSION_AUTH only when every address that answered refused: a used,
+ * expired or wrong code, a removed Mac, or an old code no longer accepted.
+ * device_name is this computer's name, made valid rather than refused. */
+int32_t ml_session_connect_paired(const char *addresses, uint16_t port, const MLPairingCode *code, const uint8_t device_private[32],
+                                  const char *device_name, uint32_t timeout_ms, uint64_t *out_session, uint8_t *mode_out,
+                                  char *used_out);
 /* Host: the approved device's ID on this session, or "" for the old code.
  * out must hold ML_PEER_ID_CAPACITY bytes. */
 int32_t ml_session_peer_device(uint64_t session, char *out);
@@ -599,7 +620,12 @@ int32_t ml_pairing_credential_decode(const uint8_t *data, size_t length, MLPairi
 /* Saved peer metadata (never secrets). NULL directory selects MACLINK_HOME or
  * ~/Library/Application Support/MacLink. Most recent first; at most 32. */
 int32_t ml_peers_load(const char *directory, MLPeer *out, size_t capacity, size_t *count);
-int32_t ml_peers_remember(const char *directory, const MLPairingCode *code, const char *address, MLPeer *out);
+/* addresses: those the connection tried, separated by spaces, the one that
+ * connected first; the code's own follow, at most ML_ADDRESSES_MAX in all. */
+int32_t ml_peers_remember(const char *directory, const MLPairingCode *code, const char *addresses, MLPeer *out);
+/* After a saved Mac connected through address: it goes first among the
+ * Mac's addresses, and the Mac to the top of the list. */
+int32_t ml_peers_connected(const char *directory, const char *id, const char *address);
 int32_t ml_peers_forget(const char *directory, const char *id);
 int32_t ml_peers_import_legacy(const char *directory, const uint8_t *json, size_t length, size_t *imported);
 

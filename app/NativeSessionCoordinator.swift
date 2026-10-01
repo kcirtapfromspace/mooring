@@ -878,7 +878,7 @@ final class NativeSessionCoordinator {
         }
         let localName = SCDynamicStoreCopyLocalHostName(nil) as String? ?? "localhost"
         return try NativePairingCode.forHost(address: localName + ".local", computerName: NativeDeviceKey.computerName, identity: identity,
-                                             oneTimeSecret: listener.newPairingSecret())
+                                             oneTimeSecret: listener.newPairingSecret(), alternates: NativePairingCode.localAddresses())
     }
     private func copyPairingCode() {
         do {
@@ -941,8 +941,9 @@ final class NativeSessionCoordinator {
                 guard let self else { return }
                 do {
                     let code = try NativePairingCode.parse(rawCode)
+                    // An address typed in is tried first, with every address in the code.
                     let address = override.trimmingCharacters(in: .whitespacesAndNewlines)
-                    self.connect(code: code, address: address.isEmpty ? code.address : address, pairing: true)
+                    self.connect(code: code, addresses: address.isEmpty ? code.addresses : [address] + code.addresses, pairing: true)
                 } catch { self.pairWindow?.error.stringValue = error.localizedDescription }
             }
             controller.onClose = { [weak self] in if self?.connecting?.pairing == true { self?.cancelConnect() } }
@@ -974,22 +975,30 @@ final class NativeSessionCoordinator {
                 openViewerWindow(for: peerID)?.showEnded(reason: "This Mac's saved pairing is missing. Pair again with a new code.")
                 showConnect(); return
             }
-            connect(code: code, address: peer.address, automatic: automatic)
+            connect(code: code, addresses: peer.addresses, automatic: automatic)
         } catch { connectFailed(error, peerID: peerID) }
     }
     /// `automatic` attempts come from the reconnect budget: they never bring
     /// MacLink forward or take keyboard focus from another app.
-    private func connect(code: NativePairingCode, address: String, pairing: Bool = false, automatic: Bool = false) {
+    /// `addresses` are tried together, the first preferred.
+    private func connect(code: NativePairingCode, addresses: [String], pairing: Bool = false, automatic: Bool = false) {
         guard !isConnected else { return }
         guard whenCapabilitiesReady({ [weak self] in
-            self?.connect(code: code, address: address, pairing: pairing, automatic: automatic)
+            self?.connect(code: code, addresses: addresses, pairing: pairing, automatic: automatic)
         }) else { return }
         if let current = connecting {
             // A new pairing takes over from automatic reconnecting; anything else waits.
             guard pairing, !current.pairing else { return }
             endReconnecting(reason: lastViewerEnd.isEmpty ? "Reconnecting stopped for a new pairing." : lastViewerEnd)
         }
-        guard let address = NativePairingCode.normalizedAddress(address) else { pairWindow?.error.stringValue = "Enter a hostname or IP address without a port."; return }
+        var candidates: [String] = []
+        for entry in addresses {
+            guard let address = NativePairingCode.normalizedAddress(entry) else {
+                pairWindow?.error.stringValue = "Enter a hostname or IP address without a port."; return
+            }
+            if !candidates.contains(address) { candidates.append(address) }
+        }
+        let addresses = Array(candidates.prefix(Int(ML_ADDRESSES_MAX)))
         let deviceKey: NativeDeviceKey
         do { deviceKey = try keychain.deviceKey() } catch { connectFailed(error, peerID: code.peerID, pairing: pairing); return }
         let attempt = NativeRunToken(), peerID = code.peerID
@@ -1001,12 +1010,14 @@ final class NativeSessionCoordinator {
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                let (transport, mode) = try NativeTransport.connect(address: address, code: code, deviceKey: deviceKey)
+                let (transport, mode, used) = try NativeTransport.connect(addresses: addresses, code: code, deviceKey: deviceKey)
                 DispatchQueue.main.async {
                     guard let self, attempt.isActive, self.connecting?.token === attempt else { transport.close(); return }
                     self.connecting = nil
                     if pairing { self.pairWindow?.setBusy(false) }
-                    NativeLog.session.notice("viewer connected with \(String(describing: mode), privacy: .public)")
+                    // Which address, by position only: addresses are never logged.
+                    let position = (addresses.firstIndex(of: used) ?? 0) + 1
+                    NativeLog.session.notice("viewer connected with \(String(describing: mode), privacy: .public) by address \(position) of \(addresses.count)")
                     // Once the sharing Mac approved this Mac's key, the device
                     // pairing replaces the code: a one-time code is used up, and
                     // the old code stops a week after the first Mac moves over.
@@ -1019,7 +1030,11 @@ final class NativeSessionCoordinator {
                                 try self.keychain.savePeerCode(saved)
                             } catch { NativeLog.session.error("the device pairing couldn't be saved; the next connection moves over again") }
                         }
-                        let peer = self.peers.first(where: { $0.id == peerID }) ?? NativePeer(code: code, address: address)
+                        // The address that worked is tried first next time.
+                        if (try? self.peerStore.connected(peerID, through: used)) != nil {
+                            self.peers = (try? self.peerStore.load()) ?? self.peers
+                        }
+                        let peer = self.peers.first(where: { $0.id == peerID }) ?? NativePeer(code: code, address: used)
                         self.beginViewer(transport, peer: peer, activate: !automatic)
                         return
                     }
@@ -1028,7 +1043,8 @@ final class NativeSessionCoordinator {
                         // Keychain is required to reconnect later. The menu list is a
                         // convenience: an unwritable peer file must not block this session.
                         try self.keychain.savePeerCode(saved)
-                        let peer = (try? self.peerStore.remember(code, address: address)) ?? NativePeer(code: code, address: address)
+                        let tried = [used] + addresses.filter { $0 != used }
+                        let peer = (try? self.peerStore.remember(code, tried: tried)) ?? NativePeer(code: code, address: used)
                         self.peers = (try? self.peerStore.load()) ?? self.peers
                         self.pairWindow?.code.stringValue = ""; self.pairWindow?.close()
                         self.beginViewer(transport, peer: peer, activate: true, pairing: true)

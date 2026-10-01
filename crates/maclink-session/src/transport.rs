@@ -13,7 +13,7 @@ use crate::control::ControlMessage;
 use crate::cursor::{self, CursorPacket, CursorShape, MAX_CURSOR};
 use crate::devices::{DeviceStore, Via};
 use crate::input::InputEvent;
-use crate::pairing::{CodeKind, PairingCode, local_name, validate_name};
+use crate::pairing::{CodeKind, MAX_ADDRESSES, PairingCode, local_name, validate_name};
 use crate::policy::{
     AUDIO, Admission, CAPABILITY_AUDIO, CAPABILITY_CURSOR, CAPABILITY_GESTURES,
     CAPABILITY_HEVC_444, CAPABILITY_LATENCY, CAPABILITY_REMOTE_UPDATE, CAPABILITY_VERSION,
@@ -178,6 +178,16 @@ fn io_error(error: io::Error) -> Error {
     }
 }
 
+/// Setting an option on a connected socket fails only once the connection is
+/// gone: macOS reports a connection the other end reset as an invalid
+/// argument.
+fn option_error(error: io::Error) -> Error {
+    match error.kind() {
+        io::ErrorKind::InvalidInput => Error::Closed,
+        _ => io_error(error),
+    }
+}
+
 /// The first byte of a message extends `end` to at least `grace` from now.
 fn read_exact(
     stream: &TcpStream,
@@ -190,7 +200,7 @@ fn read_exact(
     while !output.is_empty() {
         stream
             .set_read_timeout(Some(remaining(*end)?))
-            .map_err(io_error)?;
+            .map_err(option_error)?;
         match reader.read(output) {
             Ok(0) => return Err(Error::Closed),
             Ok(count) => {
@@ -211,7 +221,7 @@ pub(crate) fn write_exact(stream: &TcpStream, mut input: &[u8], end: Instant) ->
     while !input.is_empty() {
         stream
             .set_write_timeout(Some(remaining(end)?))
-            .map_err(io_error)?;
+            .map_err(option_error)?;
         match writer.write(input) {
             Ok(0) => return Err(Error::Closed),
             Ok(count) => input = &input[count..],
@@ -382,10 +392,15 @@ fn device_initiate(
     offer: u32,
     name: &str,
 ) -> std::result::Result<(StatelessTransportState, u32), (Reached, Error)> {
-    let unanswered = |error| (Reached::Unanswered, error);
-    stream
-        .set_nodelay(true)
-        .map_err(|error| unanswered(io_error(error)))?;
+    // Closing before answering, as a refusing host does, is a refusal however
+    // it surfaces: on a write, or on the read below.
+    let unanswered = |error| match error {
+        Error::Closed => (Reached::Unanswered, Error::Auth),
+        other => (Reached::Unanswered, other),
+    };
+    // Only for latency: on a connection the other end already reset, macOS
+    // refuses it, and the write or read below reports the close.
+    let _ = stream.set_nodelay(true);
     let mut incoming = [0_u8; 1024];
     let mut outgoing = [0_u8; 1024];
     let mut payload = [0_u8; 1024];
@@ -394,10 +409,7 @@ fn device_initiate(
         .map_err(|_| unanswered(Error::Auth))?;
     write_record(stream, &outgoing[..size], end).map_err(unanswered)?;
     // The host answers only a Mac it accepts; closing instead is its refusal.
-    let size = read_record(stream, &mut incoming, end, &mut 0).map_err(|error| match error {
-        Error::Closed => unanswered(Error::Auth),
-        other => unanswered(other),
-    })?;
+    let size = read_record(stream, &mut incoming, end, &mut 0).map_err(unanswered)?;
     let answered = |error| (Reached::Answered, error);
     let count = noise
         .read_message(&incoming[..size], &mut payload)
@@ -1311,6 +1323,91 @@ pub(crate) fn connect(
     }
 }
 
+/// Candidates start this far apart, so an earlier one wins when several are
+/// reachable.
+const CANDIDATE_STAGGER: Duration = Duration::from_millis(200);
+/// While other candidates may still connect, one handshake gets at most this
+/// long: a real sharing Mac answers well within it, and one that doesn't
+/// mustn't use up the others' time.
+const CANDIDATE_HANDSHAKE: Duration = Duration::from_secs(2);
+/// A sharing Mac gives an accepted connection about a second to start its
+/// handshake. A candidate that waited longer than this for its turn connects
+/// again first, to the address that worked.
+const CANDIDATE_FRESH: Duration = Duration::from_millis(500);
+
+/// A TCP connection to one candidate, or why that candidate failed.
+enum Candidate {
+    Reached {
+        stream: TcpStream,
+        host: String,
+        address: SocketAddr,
+        at: Instant,
+    },
+    Failed(Error),
+}
+
+/// Connects to every candidate at once, the earlier ones a little sooner.
+/// Each candidate reports its first TCP connection, or its failure, in the
+/// order they happen. Setting `stop` ends the attempts still running; a late
+/// connection is then just dropped.
+fn race(
+    hosts: &[String],
+    port: u16,
+    end: Instant,
+    stop: &Arc<AtomicBool>,
+) -> (mpsc::Receiver<Candidate>, usize) {
+    let (sender, outcomes) = mpsc::channel();
+    let mut started = 0;
+    for (index, host) in hosts.iter().take(MAX_ADDRESSES).enumerate() {
+        let (sender, host, stop) = (sender.clone(), host.clone(), Arc::clone(stop));
+        let spawned = std::thread::Builder::new()
+            .name("maclink-candidate".into())
+            .spawn(move || {
+                let delay = CANDIDATE_STAGGER * index as u32;
+                std::thread::sleep(remaining(end).map_or(Duration::ZERO, |left| delay.min(left)));
+                let mut last = Error::Timeout;
+                if !stop.load(Ordering::Acquire) {
+                    match resolve(&host, port, end) {
+                        Err(error) => last = error,
+                        Ok(addresses) => {
+                            for address in addresses {
+                                let Ok(left) = remaining(end) else { break };
+                                if stop.load(Ordering::Acquire) {
+                                    break;
+                                }
+                                match TcpStream::connect_timeout(&address, left) {
+                                    Ok(stream) => {
+                                        let _ = sender.send(Candidate::Reached {
+                                            stream,
+                                            host,
+                                            address,
+                                            at: Instant::now(),
+                                        });
+                                        return;
+                                    }
+                                    Err(error) => last = io_error(error),
+                                }
+                            }
+                        }
+                    }
+                }
+                let _ = sender.send(Candidate::Failed(last));
+            });
+        if spawned.is_ok() {
+            started += 1;
+        }
+    }
+    (outcomes, started)
+}
+
+/// Ends a race's remaining attempts when connecting returns.
+struct StopRace(Arc<AtomicBool>);
+impl Drop for StopRace {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 /// Connects with a saved pairing or a pasted code, using this Mac's device
 /// key and name:
 /// - a one-time code approves the device key (pair);
@@ -1319,70 +1416,132 @@ pub(crate) fn connect(
 ///   before per-device keys, which closes on the mode record, uses the old
 ///   handshake (legacy).
 ///
-/// A host that refuses this Mac closes without answering, reported as Auth.
-/// `name` is this computer's name; it is made valid rather than refused.
+/// `hosts` are the sharing Mac's addresses, the preferred first, at most
+/// eight. All are tried at once (see `race`), and each that connects gets the
+/// handshake in turn until one succeeds, so an address that leads to some
+/// other machine doesn't stop the one that leads home. A host that refuses
+/// this Mac closes without answering: that is Auth, but only when every
+/// candidate that answered refused.
 ///
-/// Returns the session and the mode that succeeded, so the caller can save a
-/// device pairing after pair or migrate.
+/// `name` is this computer's name; it is made valid rather than refused.
+/// Returns the session, the mode that succeeded, so the caller can save a
+/// device pairing after pair or migrate, and the address that connected.
 pub(crate) fn connect_paired(
-    host: &str,
+    hosts: &[String],
     port: u16,
     code: &PairingCode,
     device_private: &[u8; 32],
     name: &str,
     end: Instant,
-) -> Result<(Arc<Session>, Mode)> {
+) -> Result<(Arc<Session>, Mode, String)> {
     let name = local_name(name);
+    if hosts.is_empty() || hosts.len() > MAX_ADDRESSES || port == 0 {
+        return Err(Error::Invalid);
+    }
     let (mode, psk) = match code.kind {
         CodeKind::OneTime => (Mode::Pair, Some(&code.secret)),
         CodeKind::Device => (Mode::Device, None),
         CodeKind::Legacy => (Mode::Migrate, Some(&code.secret)),
     };
-    match connect_mode(
-        host,
-        port,
-        &code.public_key,
-        mode,
-        psk,
-        device_private,
-        &name,
-        end,
-    ) {
-        Ok(session) => Ok((session, mode)),
+    let stop = StopRace(Arc::new(AtomicBool::new(false)));
+    let (outcomes, mut pending) = race(hosts, port, end, &stop.0);
+    let (mut refused, mut answered_other, mut unreachable) = (false, None, None);
+    let mut first_reached: Option<SocketAddr> = None;
+    while pending > 0 {
+        let Ok(outcome) = outcomes.recv_timeout(remaining(end)?) else {
+            unreachable = Some(Error::Timeout);
+            break;
+        };
+        pending -= 1;
+        let (stream, host, address, at) = match outcome {
+            Candidate::Failed(error) => {
+                unreachable = Some(error);
+                continue;
+            }
+            Candidate::Reached {
+                stream,
+                host,
+                address,
+                at,
+            } => (stream, host, address, at),
+        };
+        first_reached.get_or_insert(address);
+        let stream = if at.elapsed() > CANDIDATE_FRESH {
+            drop(stream);
+            match TcpStream::connect_timeout(&address, remaining(end)?) {
+                Ok(fresh) => fresh,
+                Err(error) => {
+                    unreachable = Some(io_error(error));
+                    continue;
+                }
+            }
+        } else {
+            stream
+        };
+        let slice = if pending > 0 {
+            end.min(Instant::now() + CANDIDATE_HANDSHAKE)
+        } else {
+            end
+        };
+        match connect_mode(
+            stream,
+            &code.public_key,
+            mode,
+            psk,
+            device_private,
+            &name,
+            slice,
+        ) {
+            Ok(session) => return Ok((session, mode, host)),
+            Err((Reached::Unanswered, Error::Auth)) => refused = true,
+            Err((Reached::Unanswered, error)) => answered_other = Some(error),
+            // The host answered: it may have recorded an approval, so no
+            // other path is tried.
+            Err((_, error)) => return Err(error),
+        }
+    }
+    drop(stop);
+    let error = match (refused, answered_other, unreachable) {
+        (true, None, _) => Error::Auth,
+        (_, Some(error), _) | (false, None, Some(error)) => error,
+        (false, None, None) => Error::Io,
+    };
+    match (mode, first_reached, error) {
         // A host from before per-device keys closes on the mode record. One
         // that answered is new: no fallback, so a dropped connection can't
         // turn a move-over into the old handshake.
-        Err((Reached::Unanswered, Error::Auth | Error::Closed | Error::Protocol))
-            if mode == Mode::Migrate =>
-        {
+        (Mode::Migrate, Some(address), Error::Auth | Error::Closed | Error::Protocol) => {
             // Either host refuses the old handshake by closing: an old one for
             // a wrong code, a new one once the old code stopped.
-            connect(host, port, &code.public_key, &code.secret, end)
-                .map(|session| (session, Mode::Legacy))
-                .map_err(|error| match error {
-                    Error::Closed => Error::Auth,
-                    other => other,
-                })
+            connect(
+                &address.ip().to_string(),
+                address.port(),
+                &code.public_key,
+                &code.secret,
+                end,
+            )
+            .map(|session| (session, Mode::Legacy, address.ip().to_string()))
+            .map_err(|error| match error {
+                Error::Closed => Error::Auth,
+                other => other,
+            })
         }
-        Err((_, error)) => Err(error),
+        (_, _, error) => Err(error),
     }
 }
 
 /// How far a per-device attempt got before it failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Reached {
-    /// No connection.
-    Nothing,
     /// Connected, but the host never answered the first message.
     Unanswered,
     /// The host answered.
     Answered,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The per-device handshake on a connected socket.
 fn connect_mode(
-    host: &str,
-    port: u16,
+    socket: TcpStream,
     public: &[u8; 32],
     mode: Mode,
     psk: Option<&[u8; 32]>,
@@ -1394,54 +1553,39 @@ fn connect_mode(
     let offer = TEST_OFFER.with(std::cell::Cell::get);
     #[cfg(not(test))]
     let offer = PROTOCOL_MAX;
-    if port == 0 {
-        return Err((Reached::Nothing, Error::Invalid));
-    }
-    let mut last = Error::Io;
-    for address in resolve(host, port, end).map_err(|error| (Reached::Nothing, error))? {
-        let socket = match TcpStream::connect_timeout(
-            &address,
-            remaining(end).map_err(|error| (Reached::Nothing, error))?,
-        ) {
-            Ok(socket) => socket,
-            Err(error) => {
-                last = io_error(error);
-                continue;
-            }
+    let prologue = mode_prologue(mode);
+    let noise = (|| -> Result<HandshakeState> {
+        let pattern = if psk.is_some() {
+            PAIRING_PATTERN
+        } else {
+            DEVICE_PATTERN
         };
-        let prologue = mode_prologue(mode);
-        let noise = (|| -> Result<HandshakeState> {
-            let pattern = if psk.is_some() {
-                PAIRING_PATTERN
-            } else {
-                DEVICE_PATTERN
-            };
-            let mut builder = Builder::new(pattern.parse().map_err(|_| Error::Internal)?)
-                .local_private_key(device_private)
-                .map_err(|_| Error::Auth)?
-                .remote_public_key(public)
-                .map_err(|_| Error::Auth)?
-                .prologue(&prologue)
-                .map_err(|_| Error::Auth)?;
-            if let Some(psk) = psk {
-                builder = builder.psk(1, psk).map_err(|_| Error::Auth)?;
-            }
-            builder.build_initiator().map_err(|_| Error::Auth)
-        })()
-        .map_err(|error| (Reached::Nothing, error))?;
-        write_record(&socket, &mode_hello(mode), end)
-            .map_err(|error| (Reached::Unanswered, error))?;
-        let (crypto, version) = device_initiate(noise, &socket, end, offer, name)?;
-        // The host recorded any approval before its last answer, so the
-        // session is returned even if it drops now: the caller then saves
-        // what was approved and finds it closed.
-        let session = Arc::new(Session::new(socket, crypto, Role::Viewer, version));
-        if session.hello(end).is_err() {
-            session.close();
+        let mut builder = Builder::new(pattern.parse().map_err(|_| Error::Internal)?)
+            .local_private_key(device_private)
+            .map_err(|_| Error::Auth)?
+            .remote_public_key(public)
+            .map_err(|_| Error::Auth)?
+            .prologue(&prologue)
+            .map_err(|_| Error::Auth)?;
+        if let Some(psk) = psk {
+            builder = builder.psk(1, psk).map_err(|_| Error::Auth)?;
         }
-        return Ok(session);
+        builder.build_initiator().map_err(|_| Error::Auth)
+    })()
+    .map_err(|error| (Reached::Unanswered, error))?;
+    write_record(&socket, &mode_hello(mode), end).map_err(|error| match error {
+        Error::Closed => (Reached::Unanswered, Error::Auth),
+        other => (Reached::Unanswered, other),
+    })?;
+    let (crypto, version) = device_initiate(noise, &socket, end, offer, name)?;
+    // The host recorded any approval before its last answer, so the session
+    // is returned even if it drops now: the caller then saves what was
+    // approved and finds it closed.
+    let session = Arc::new(Session::new(socket, crypto, Role::Viewer, version));
+    if session.hello(end).is_err() {
+        session.close();
     }
-    Err((Reached::Nothing, last))
+    Ok(session)
 }
 
 /// On failure, also says whether a TCP connection reached the handshake.

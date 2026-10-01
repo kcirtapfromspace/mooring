@@ -74,7 +74,7 @@ final class NativePairWindow: NSWindowController, NSWindowDelegate {
         let heading = label("Pair once. Connect anytime.", size: 22, weight: .semibold)
         let note = label("On your other Mac, open MacLink → Share This Mac → Start Sharing, then copy its pairing code here.", color: .secondaryLabelColor)
         code.placeholderString = "Paste pairing code"; code.setAccessibilityLabel("Pairing code")
-        address.placeholderString = "Optional — uses the address in the code"; address.setAccessibilityLabel("Mac address override")
+        address.placeholderString = "Optional — the code lists the Mac's addresses"; address.setAccessibilityLabel("Mac address override")
         let form = NSGridView(views: [[label("Pairing code"), code], [label("Address"), address]])
         form.rowSpacing = 14; form.columnSpacing = 14
         form.column(at: 1).xPlacement = .fill
