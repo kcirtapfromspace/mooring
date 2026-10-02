@@ -9,6 +9,8 @@ struct NativeSessionError: LocalizedError {
     var errorDescription: String? { message }
     /// Authentication failures mean the pairing changed; retrying cannot help.
     var isAuthenticationFailure: Bool { status == Int32(ML_SESSION_AUTH) }
+    /// The other Mac answered, but MacLink isn't sharing there.
+    var isNotSharing: Bool { status == Int32(ML_SESSION_UNAVAILABLE) }
 }
 
 /// The sharing Mac's Noise identity and pairing secret, stored only in Keychain.

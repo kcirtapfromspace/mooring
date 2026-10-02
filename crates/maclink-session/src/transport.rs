@@ -174,6 +174,7 @@ fn io_error(error: io::Error) -> Error {
         | io::ErrorKind::BrokenPipe
         | io::ErrorKind::ConnectionAborted
         | io::ErrorKind::ConnectionReset => Error::Closed,
+        io::ErrorKind::ConnectionRefused => Error::Unavailable,
         _ => Error::Io,
     }
 }
@@ -1241,7 +1242,7 @@ pub(crate) fn insert(value: Handle, parent: Option<&Listener>) -> Result<u64> {
         return Err(Error::Busy);
     }
     let id = NEXT_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
             value.checked_add(1)
         })
         .map_err(|_| Error::Internal)?;
@@ -1277,7 +1278,7 @@ fn resolve(host: &str, port: u16, end: Instant) -> Result<Vec<SocketAddr>> {
     // System DNS can block indefinitely. Bound detached resolver count and the
     // caller's wait; timed-out workers cannot accumulate without limit.
     RESOLVERS
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
             (count < MAX_RESOLVERS).then_some(count + 1)
         })
         .map_err(|_| Error::Busy)?;
@@ -1447,15 +1448,24 @@ pub(crate) fn connect_paired(
     let (outcomes, mut pending) = race(hosts, port, end, &stop.0);
     let (mut refused, mut answered_other, mut unreachable) = (false, None, None);
     let mut first_reached: Option<SocketAddr> = None;
+    // A Mac that answered but isn't sharing says more than an address that
+    // never answered, so that reason is kept over a later timeout.
+    let failed = |previous: Option<Error>, error: Error| match previous {
+        Some(Error::Unavailable) => Some(Error::Unavailable),
+        _ => Some(error),
+    };
     while pending > 0 {
-        let Ok(outcome) = outcomes.recv_timeout(remaining(end)?) else {
-            unreachable = Some(Error::Timeout);
+        let Some(outcome) = remaining(end)
+            .ok()
+            .and_then(|left| outcomes.recv_timeout(left).ok())
+        else {
+            unreachable = failed(unreachable, Error::Timeout);
             break;
         };
         pending -= 1;
         let (stream, host, address, at) = match outcome {
             Candidate::Failed(error) => {
-                unreachable = Some(error);
+                unreachable = failed(unreachable, error);
                 continue;
             }
             Candidate::Reached {
@@ -1468,10 +1478,12 @@ pub(crate) fn connect_paired(
         first_reached.get_or_insert(address);
         let stream = if at.elapsed() > CANDIDATE_FRESH {
             drop(stream);
-            match TcpStream::connect_timeout(&address, remaining(end)?) {
+            let fresh = remaining(end)
+                .and_then(|left| TcpStream::connect_timeout(&address, left).map_err(io_error));
+            match fresh {
                 Ok(fresh) => fresh,
                 Err(error) => {
-                    unreachable = Some(io_error(error));
+                    unreachable = failed(unreachable, error);
                     continue;
                 }
             }

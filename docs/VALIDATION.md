@@ -517,6 +517,20 @@ For `v0.3.0-preview.26`, the host's send-buffer limit fits a slow link across th
   Pacing counts the time the admission limit holds a frame as congestion. A smaller limit held frames on an uncongested link, the cuts lowered the sent rate, and that lowered the limit further. Preview 27 restores preview 25's `flow.rs`, header text, `NativeFlowLimit` and its test exactly.
 - **Lesson.** A change to the admission limit must be tested together with the bitrate rule. The tests checked the limit's value and that it couldn't starve the link at a steady rate, but not the loop through pacing.
 
+## The wait survives a relaunch, and "not sharing" is reported
+
+For `v0.3.0-preview.28`.
+
+- **Found.** The Mac Studio's log showed a wait start at 21:47 after an unexpected drop. Sparkle installed preview 27 at 01:10 with no session connected, which relaunched MacLink. The wait was held only in memory, so the display turned off and the screen locked at 01:15, and sharing stopped until Screen Sharing unlocked it at 08:08.
+- **Persistence.**
+  - The wait's end is saved in defaults (`native.waitForViewerUntil`) when it starts.
+  - `stopSharing` clears it unless `keepWait`. Only the update preparation passes that, and the quit after it.
+  - On launch, if sharing will restart by itself, the display assertion is taken back at once and the wait resumes from the saved end. Starting sharing resumes it too.
+  - A viewer reconnecting, Stop Sharing, the privacy guard, a user's quit, or the wait's own expiry clear it.
+  - This was traced against the log, not run on the live host.
+- **Error.** `ConnectionRefused` now maps to the new `ML_SESSION_UNAVAILABLE` (−13): the other Mac answered, but MacLink isn't sharing there. In a multi-address connect it's kept over a later timeout from other addresses. The viewer shows it with the likely cause and keeps reconnecting. The Rust tests cover two closed addresses, and a closed one next to an unroutable one within the deadline.
+- **Toolchain.** Rust 1.99 deprecates `AtomicU64::fetch_update` and `AtomicUsize::fetch_update` in favor of `try_update`, and the two uses were renamed.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

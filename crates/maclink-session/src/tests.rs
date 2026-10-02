@@ -2957,10 +2957,24 @@ fn refused_only_when_every_address_that_answered_refused() {
         connect_via(c"::1 127.0.0.1", host.port(), &saved, &unknown, 5000)
     });
     assert_eq!(status, Error::Auth as i32);
-    // Nothing reached at all is no refusal: reconnecting continues.
+    // A Mac that answers but isn't sharing is no refusal: reconnecting
+    // continues, and the viewer can say why.
     let (status, ..) = connect_via(c"127.0.0.1 ::1", closed_port(), &saved, &unknown, 3000);
-    assert_ne!(status, 0);
-    assert_ne!(status, Error::Auth as i32);
+    assert_eq!(status, Error::Unavailable as i32);
+    // Kept over an address that never answers, as one away from home.
+    let started = Instant::now();
+    let (status, ..) = connect_via(
+        c"192.0.2.1 127.0.0.1",
+        closed_port(),
+        &saved,
+        &unknown,
+        1500,
+    );
+    assert_eq!(status, Error::Unavailable as i32);
+    assert!(started.elapsed() < Duration::from_millis(2500));
+    let text =
+        unsafe { std::ffi::CStr::from_ptr(ml_session_error_string(Error::Unavailable as i32)) };
+    assert!(text.to_str().unwrap().contains("isn't sharing"));
 }
 
 #[test]

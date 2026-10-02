@@ -46,6 +46,9 @@ pub(crate) enum Error {
     RateLimited = -10,
     Stalled = -11,
     Storage = -12,
+    /// The other Mac answered, but nothing accepts connections there:
+    /// MacLink isn't sharing, as while that Mac is locked or asleep.
+    Unavailable = -13,
 }
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 

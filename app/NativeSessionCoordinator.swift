@@ -46,6 +46,11 @@ final class NativeSessionCoordinator {
     /// One-shot: sharing was on, but not automatic, when a viewer's requested
     /// update installed; share again after the relaunch.
     private static let resumeAfterUpdateKey = "native.resumeSharingAfterUpdate"
+    /// When a wait for a dropped viewer ends, so the wait survives MacLink
+    /// relaunching, as for an update.
+    private static let waitForViewerKey = "native.waitForViewerUntil"
+    /// An update is about to install: quitting keeps the saved wait.
+    private var installingUpdate = false
     private let defaults: UserDefaults
     private let keychain = NativeKeychain()
     private let peerStore = NativePeerStore()
@@ -265,6 +270,10 @@ final class NativeSessionCoordinator {
         NativeTelemetryServer.start()
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.telemetryTick() }
         RunLoop.main.add(timer, forMode: .common); telemetryTimer = timer
+        // Hold the display at once if a wait for a dropped viewer outlived the
+        // last run and sharing restarts by itself: macOS may otherwise turn it
+        // off, and lock, before sharing starts again.
+        if sharesAutomatically || defaults.bool(forKey: Self.resumeAfterUpdateKey) { resumeWaitAfterRelaunch() }
         privacyGuard = NativePrivacyGuard { [weak self] in
             guard let self else { return }
             self.stopSharing(reason: self.pausedReason("Sharing stopped because this Mac locked or its display went to sleep."))
@@ -415,6 +424,7 @@ final class NativeSessionCoordinator {
             NativeLog.session.notice("sharing started \(automatic ? "automatically" : "by the user", privacy: .public)")
             refreshShare("Copy the pairing code to your other Mac. Sharing continues after you close this window, until you stop it.")
             acceptNext(listener: listener, token: token)
+            resumeWaitAfterRelaunch()
             permissionTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.updateHostPermission() }
             if let permissionTimer { RunLoop.main.add(permissionTimer, forMode: .common) }
         } catch { refreshShare(error.localizedDescription) }
@@ -435,7 +445,8 @@ final class NativeSessionCoordinator {
     func prepareForUpdateInstall() {
         guard isSharing else { return }
         if !sharesAutomatically { defaults.set(true, forKey: Self.resumeAfterUpdateKey) }
-        stopSharing(reason: "Installing an update. Sharing resumes when MacLink restarts.")
+        installingUpdate = true
+        stopSharing(reason: "Installing an update. Sharing resumes when MacLink restarts.", keepWait: true)
     }
 
     private func acceptNext(listener: NativeTransport, token: NativeRunToken) {
@@ -480,7 +491,7 @@ final class NativeSessionCoordinator {
         if !isConnected { clipboard.start(includeCurrent: false) }
         let injector = NativeInputInjector(); hostInjector = injector
         hostAudioGate = NativeAudioSendGate()
-        stopWaitingForViewer()
+        stopWaitingForViewer(); defaults.removeObject(forKey: Self.waitForViewerKey)
         hostActivity = hostActivity ?? ProcessInfo.processInfo.beginActivity(
             options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled, .userInitiated],
             reason: "A paired Mac is viewing this display")
@@ -821,21 +832,40 @@ final class NativeSessionCoordinator {
     /// Keeps the session's display and sleep assertion after an unexpected
     /// end, until a viewer connects, sharing stops, or the wait runs out.
     private func waitForViewerToReturn() {
-        viewerWait?.cancel()
         let seconds = TimeInterval(ML_VIEWER_WAIT_SECONDS)
+        waitForViewer(until: Date().addingTimeInterval(seconds))
+        NativeLog.session.notice("the viewer dropped without leaving; the display stays on for up to \(Int(seconds / 3600)) h while it comes back")
+    }
+    /// Saved, so a relaunch keeps waiting (resumeWaitAfterRelaunch).
+    private func waitForViewer(until ends: Date) {
+        viewerWait?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             NativeLog.session.notice("stopped waiting for the viewer; the display may turn off")
             self.viewerWait = nil; self.viewerWaitEnds = nil
+            self.defaults.removeObject(forKey: Self.waitForViewerKey)
             if self.hostChannel == nil { self.endHostActivity() }
             self.refreshShare()
         }
-        viewerWait = work; viewerWaitEnds = Date().addingTimeInterval(seconds)
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
-        NativeLog.session.notice("the viewer dropped without leaving; the display stays on for up to \(Int(seconds / 3600)) h while it comes back")
+        viewerWait = work; viewerWaitEnds = ends
+        defaults.set(ends, forKey: Self.waitForViewerKey)
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, ends.timeIntervalSinceNow), execute: work)
     }
+    /// In this run only; the saved end is cleared where sharing stops for good.
     private func stopWaitingForViewer() {
         viewerWait?.cancel(); viewerWait = nil; viewerWaitEnds = nil
+    }
+    /// After MacLink relaunched during a wait, as when an update installed
+    /// with no session connected: keep the display on until the saved end.
+    private func resumeWaitAfterRelaunch() {
+        guard let ends = defaults.object(forKey: Self.waitForViewerKey) as? Date else { return }
+        guard ends > Date(), hostChannel == nil else { defaults.removeObject(forKey: Self.waitForViewerKey); return }
+        hostActivity = hostActivity ?? ProcessInfo.processInfo.beginActivity(
+            options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled, .userInitiated],
+            reason: "Waiting for a paired Mac to come back")
+        waitForViewer(until: ends)
+        NativeLog.session.notice("still waiting for the viewer after MacLink relaunched; the display stays on")
+        refreshShare()
     }
 
     /// Stop Sharing in the window or menu. Automatic sharing stays off until
@@ -847,7 +877,11 @@ final class NativeSessionCoordinator {
             : "Sharing stopped. Your paired Macs can reconnect the next time you start sharing.")
     }
 
-    private func stopSharing(reason: String = "Sharing stopped. Your paired Macs can reconnect the next time you start sharing.") {
+    /// `keepWait`: an update is installing, so a wait for a dropped viewer
+    /// resumes after the relaunch. Any other stop ends it.
+    private func stopSharing(reason: String = "Sharing stopped. Your paired Macs can reconnect the next time you start sharing.",
+                             keepWait: Bool = false) {
+        if !keepWait { defaults.removeObject(forKey: Self.waitForViewerKey) }
         if hostChannel != nil { recordEnd("host", reason) }
         if sharingToken != nil { NativeLog.session.notice("sharing stopped: \(reason, privacy: .public)") }
         sharingToken?.cancel(); sharingToken = nil
@@ -1074,6 +1108,10 @@ final class NativeSessionCoordinator {
     private func connectFailed(_ error: Error, peerID: String, pairing: Bool = false, kind: NativePairingCode.Kind? = nil) {
         var message = error.localizedDescription
         let refused = (error as? NativeSessionError)?.isAuthenticationFailure == true
+        if (error as? NativeSessionError)?.isNotSharing == true {
+            message = "The sharing Mac answered, but MacLink isn't sharing there right now. It may be locked or asleep: "
+                + "unlock it, for example with Screen Sharing, and MacLink reconnects."
+        }
         if refused && pairing {
             message = kind == .oneTime
                 ? "The sharing Mac didn't accept this code. A code works once, on one Mac, within 10 minutes, and a newer code "
@@ -1748,7 +1786,7 @@ final class NativeSessionCoordinator {
         telemetryTimer?.invalidate(); telemetryTimer = nil
         clipboardTimer?.invalidate(); clipboardTimer = nil
         NativeTelemetryServer.stop()
-        stopSharing(); disconnectViewer(reason: "MacLink stopped.", leaving: true)
+        stopSharing(keepWait: installingUpdate); disconnectViewer(reason: "MacLink stopped.", leaving: true)
         systemKeys?.stop(); systemKeys = nil
         privacyGuard?.stop(); privacyGuard = nil
         observerTokens.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }; observerTokens.removeAll()

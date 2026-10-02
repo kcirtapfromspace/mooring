@@ -22,7 +22,10 @@ enum {
     ML_SESSION_TIMEOUT = -3, ML_SESSION_AUTH = -4, ML_SESSION_PROTOCOL = -5,
     ML_SESSION_CLOSED = -6, ML_SESSION_BUFFER = -7, ML_SESSION_BUSY = -8,
     ML_SESSION_INTERNAL = -9, ML_SESSION_RATE_LIMITED = -10,
-    ML_SESSION_STALLED = -11, ML_SESSION_STORAGE = -12
+    ML_SESSION_STALLED = -11, ML_SESSION_STORAGE = -12,
+    /* The other Mac answered, but nothing accepts connections there: MacLink
+     * isn't sharing, as while that Mac is locked or asleep. */
+    ML_SESSION_UNAVAILABLE = -13
 };
 enum { ML_SESSION_VIDEO = 1, ML_SESSION_INPUT = 2, ML_SESSION_CONTROL = 3, ML_SESSION_TELEMETRY = 4, ML_SESSION_CLIPBOARD = 5, ML_SESSION_CURSOR = 6, ML_SESSION_AUDIO = 7 };
 /* Clipboard representations: UTF-8 plain text, Rich Text Format, PNG. */

@@ -1106,6 +1106,7 @@ pub extern "C" fn ml_session_error_string(status: i32) -> *const c_char {
         -10 => c"The other Mac sent messages too quickly",
         -11 => c"The other Mac stopped responding",
         -12 => c"MacLink could not read or save paired Macs",
+        -13 => c"The other Mac answered, but MacLink isn't sharing there",
         _ => c"Internal session error",
     }
     .as_ptr()
