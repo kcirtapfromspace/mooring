@@ -525,9 +525,11 @@ For `v0.3.0-preview.28`.
 - **Persistence.**
   - The wait's end is saved in defaults (`native.waitForViewerUntil`) when it starts.
   - `stopSharing` clears it unless `keepWait`. Only the update preparation passes that, and the quit after it.
-  - On launch, if sharing will restart by itself, the display assertion is taken back at once and the wait resumes from the saved end. Starting sharing resumes it too.
+  - On launch, if sharing will restart by itself and the session isn't locked, the display assertion is taken back at once and the wait resumes from the saved end. Starting sharing resumes it too.
+  - If the display is already asleep, `IOPMAssertionDeclareUserActivity` (public IOKit) wakes it, since an assertion alone doesn't wake a dark display.
   - A viewer reconnecting, Stop Sharing, the privacy guard, a user's quit, or the wait's own expiry clear it.
-  - This was traced against the log, not run on the live host.
+  - This was traced against the log, not run on the live host. It's first exercised when an update after preview 28 installs during a wait.
+  - Last night's wait ran 3 h 23 min without the 3-hour screen saver locking the Mac Studio: one data point that the display assertion also holds off the screen saver.
 - **Error.** `ConnectionRefused` now maps to the new `ML_SESSION_UNAVAILABLE` (−13): the other Mac answered, but MacLink isn't sharing there. In a multi-address connect it's kept over a later timeout from other addresses. The viewer shows it with the likely cause and keeps reconnecting. The Rust tests cover two closed addresses, and a closed one next to an unroutable one within the deadline.
 - **Toolchain.** Rust 1.99 deprecates `AtomicU64::fetch_update` and `AtomicUsize::fetch_update` in favor of `try_update`, and the two uses were renamed.
 

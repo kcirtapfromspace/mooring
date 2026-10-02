@@ -1,4 +1,5 @@
 import AppKit
+import IOKit.pwr_mgt
 import ApplicationServices
 import SystemConfiguration
 import CoreVideo
@@ -859,10 +860,23 @@ final class NativeSessionCoordinator {
     /// with no session connected: keep the display on until the saved end.
     private func resumeWaitAfterRelaunch() {
         guard let ends = defaults.object(forKey: Self.waitForViewerKey) as? Date else { return }
-        guard ends > Date(), hostChannel == nil else { defaults.removeObject(forKey: Self.waitForViewerKey); return }
+        // A locked Mac can't share, so there's nothing to wait for.
+        guard ends > Date(), hostChannel == nil, NativePrivacyGuard.mayShareNow() else {
+            defaults.removeObject(forKey: Self.waitForViewerKey); return
+        }
         hostActivity = hostActivity ?? ProcessInfo.processInfo.beginActivity(
             options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled, .userInitiated],
             reason: "Waiting for a paired Mac to come back")
+        if !NativePrivacyGuard.displayIsAwake {
+            // Holding the display doesn't wake one that went dark during the
+            // relaunch; declaring user activity does, before it can lock.
+            var activity: IOPMAssertionID = 0
+            if IOPMAssertionDeclareUserActivity("A paired Mac is coming back" as CFString, kIOPMUserActiveLocal, &activity)
+                == kIOReturnSuccess {
+                IOPMAssertionRelease(activity)
+                NativeLog.session.notice("woke the display to keep waiting for the viewer")
+            }
+        }
         waitForViewer(until: ends)
         NativeLog.session.notice("still waiting for the viewer after MacLink relaunched; the display stays on")
         refreshShare()
