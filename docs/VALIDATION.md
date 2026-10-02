@@ -464,6 +464,29 @@ For `v0.3.0-preview.24`, the sharing Mac sends keyframes on demand, and pacing i
 - **Compatibility.** A viewer's `tune --keyframe-seconds 0` reaches an older host as 255, which it refuses as invalid tuning.
 - **Between two Macs.** Not yet measured after the change: `keyframes`, `skipped_fps`, `queue_wait_ms` and `bitrate_mbps` from away.
 
+## Pacing against the link's rate
+
+For `v0.3.0-preview.25`, pacing cuts against what the link carries rather than against the encoder's target.
+
+- **Measured first.**
+  - From away on preview 24, during busy content, the target stayed at 25 Mbps while the encoder sent 7.8–9.7 Mbps.
+  - About every 10–15 s, a burst overfilled the ~9.5 Mbps link, with waits of 140–250 ms and 6–14 skipped frames.
+  - Pacing cut the target to 18.75 Mbps, which changed nothing the encoder did, and climbed back to 25 within 13 s.
+- **Link meter.**
+  - Rust's `LinkMeter` takes each send-buffer reading: bytes queued, and the kernel's total sent.
+  - Time between two readings that both had 64 KiB or more queued counts, since the kernel is then sending as fast as the connection allows.
+  - The rate over at least 40 ms of such time each second is the link's rate. A counter that goes backwards is ignored.
+  - The host samples at every frame admission and at every few-millisecond retry while a frame waits.
+- **Rule.**
+  - A cut is `min(¾ × target, ¾ × measured link)`, and the measured rate is remembered.
+  - Raises stop at nine tenths of it.
+  - Each 30 clear seconds the remembered rate rises a tenth. A higher measured rate replaces it, and one whose nine tenths reaches the ceiling is forgotten.
+  - Without a measurement, the earlier rule applies unchanged.
+  - `MLFlowState` grows to 16 bytes, and `MLLinkMeter` is 40, asserted on both sides.
+- **Telemetry.** `link_mbps` (metric 21) is local only, like the other pacing figures. It is present only in seconds with a measurement.
+- **Checks.** Rust tests cover the cut, the stop, the probe, a faster link, forgetting, keyframe seconds and the meter's rules. The Swift check feeds real readings 100 ms apart through `NativeFlowLimit` to confirm units.
+- **Between two Macs.** Not yet measured after the change: `link_mbps` and `bitrate_mbps` from away with busy content.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

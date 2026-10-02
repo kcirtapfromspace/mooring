@@ -2102,18 +2102,39 @@ fn hosts_read_their_send_queue_and_pacing_crosses_the_c_abi() {
     // Slow seconds right after a keyframe are left out.
     for _ in 0..2 {
         assert_eq!(
-            unsafe { ml_flow_next_bitrate(25_000, 25_000, 200, 1, &mut state, &mut kbps) },
+            unsafe { ml_flow_next_bitrate(25_000, 25_000, 200, 1, 0, &mut state, &mut kbps) },
             0
         );
     }
     assert_eq!((kbps, state.recent), (25_000, 0));
     for _ in 0..2 {
         assert_eq!(
-            unsafe { ml_flow_next_bitrate(25_000, 25_000, 200, 0, &mut state, &mut kbps) },
+            unsafe { ml_flow_next_bitrate(25_000, 25_000, 200, 0, 0, &mut state, &mut kbps) },
             0
         );
     }
     assert_eq!((kbps, state.recent, state.clear_seconds), (18_750, 0, 0));
+    // The link meter, fed send-buffer readings, sets where a cut goes.
+    let mut meter = MLLinkMeter::default();
+    for (now, sent) in [(0, 0), (100, 125_000)] {
+        let reading = MLSendQueue {
+            queued_bytes: 200_000,
+            sent_bytes: sent,
+            ..MLSendQueue::default()
+        };
+        assert_eq!(unsafe { ml_flow_link_sample(&mut meter, now, &reading) }, 0);
+    }
+    let link = unsafe { ml_flow_link_take_kbps(&mut meter) };
+    assert_eq!(link, 10_000);
+    assert_eq!(unsafe { ml_flow_link_take_kbps(std::ptr::null_mut()) }, 0);
+    let mut state = MLFlowState::default();
+    for _ in 0..2 {
+        assert_eq!(
+            unsafe { ml_flow_next_bitrate(25_000, 25_000, 200, 0, link, &mut state, &mut kbps) },
+            0
+        );
+    }
+    assert_eq!((kbps, state.limit_kbps), (7_500, 10_000));
     ml_session_close(viewer.0);
     assert_eq!(
         unsafe { ml_session_send_queue(viewer.0, &mut queue) },

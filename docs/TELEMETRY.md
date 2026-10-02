@@ -41,6 +41,7 @@ Sharing Mac:
 | `capture_ms` | Average time from a screen change reaching this Mac's display to ScreenCaptureKit delivering it (preview 14 and later). |
 | `bitrate_mbps` | The bitrate in use: the tuned one, or less while pacing has lowered it (preview 18 and later). |
 | `send_queue_kib`, `queue_wait_ms` | Most video held in this Mac's network send buffer in the interval, and milliseconds frames waited for it to drain. This Mac only; not sent to the viewer. |
+| `link_mbps` | The link's rate, measured while video waited in the send buffer; present only in seconds when it did. Pacing cuts to three quarters of it, and climbs back to nine tenths of the rate where the link last ran out. This Mac only. |
 
 Viewing Mac:
 

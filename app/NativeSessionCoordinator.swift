@@ -116,6 +116,8 @@ final class NativeSessionCoordinator {
     private var flowState = MLFlowState()
     /// A keyframe went out in the last pacing second.
     private var keyframeLastSecond = false
+    /// The link's rate measured in the last pacing second, kbit/s; 0 if not.
+    private var lastLinkKbps: UInt32 = 0
     /// Host: the send-buffer limit, read on the capture queue and updated
     /// once a second from the last ten seconds' fastest round trip.
     private let flowLimit = NativeFlowLimit()
@@ -471,7 +473,7 @@ final class NativeSessionCoordinator {
         let channel = NativeSessionChannel(transport)
         hostChannel = channel; lastHostMeasurements = channel.measurements
         retiredEncoderCounters = NativeEncoderCounters(); hostInputGate.invalidate()
-        flowKbps = UInt32(hostTuning.bitrate / 1000); flowState = MLFlowState(); keyframeLastSecond = false; flowLimit.reset()
+        flowKbps = UInt32(hostTuning.bitrate / 1000); flowState = MLFlowState(); keyframeLastSecond = false; lastLinkKbps = 0; flowLimit.reset()
         let version = channel.transport.protocolVersion
         let proof = transport.peerDevice.map { $0.isEmpty ? "the old pairing code" : "an approved Mac" } ?? "closed"
         NativeLog.session.notice("host session started, protocol \(version), \(proof, privacy: .public)")
@@ -523,6 +525,7 @@ final class NativeSessionCoordinator {
         capture.admitsFrame = { [weak channel] in
             guard let channel, let queue = channel.transport.sendQueue() else { return true }
             channel.measurements.recordMax("send_queue_bytes", Double(queue.queued_bytes))
+            limit.sample(queue)
             return ml_flow_admits_frame(queue.queued_bytes, limit.bytes) != 0
         }
         if let audioEncoder, let audioGate {
@@ -1676,14 +1679,18 @@ final class NativeSessionCoordinator {
         let keyframe = interval.delta("encoded_keyframes") > 0
         let afterKeyframe = hostTuning.keyframeSeconds == 0 && (keyframe || keyframeLastSecond)
         keyframeLastSecond = keyframe
-        guard ml_flow_next_bitrate(flowKbps, UInt32(hostTuning.bitrate / 1000), waited, afterKeyframe ? 1 : 0,
+        // What the link carried while video waited for it: where a cut goes.
+        let link = flowLimit.takeLinkKbps()
+        lastLinkKbps = link
+        guard ml_flow_next_bitrate(flowKbps, UInt32(hostTuning.bitrate / 1000), waited, afterKeyframe ? 1 : 0, link,
                                    &flowState, &kbps) == ML_SESSION_OK else { return }
         let previous = flowKbps
         flowKbps = kbps
         guard kbps != previous else { return }
         capture.setTargetBitrate(Int(kbps) * 1000)
         if kbps < previous {
-            NativeLog.session.notice("pacing: frames waited \(Int(waited)) ms for the network, up to \(Int(queued / 1024)) KiB queued; bitrate \(Int(kbps)) kbps")
+            let carried = link > 0 ? "; the link carried \(Int(link)) kbps" : ""
+            NativeLog.session.notice("pacing: frames waited \(Int(waited)) ms for the network, up to \(Int(queued / 1024)) KiB queued\(carried, privacy: .public); bitrate \(Int(kbps)) kbps")
         } else if kbps == UInt32(hostTuning.bitrate / 1000) {
             NativeLog.session.notice("pacing: connection clear; bitrate back to \(Int(kbps)) kbps")
         }
@@ -1704,6 +1711,7 @@ final class NativeSessionCoordinator {
         stats[.pixelWidth] = interval.values["capture_pixel_width"]
         stats[.pixelHeight] = interval.values["capture_pixel_height"]
         stats[.captureMs] = interval.average("capture_ms_total", per: "captured_frames")
+        if lastLinkKbps > 0 { stats[.linkMbps] = Double(lastLinkKbps) / 1000 }
         return stats
     }
     private func viewerStats(_ interval: NativeInterval) -> NativeStats {

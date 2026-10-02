@@ -213,6 +213,16 @@ enum NativeSessionTests {
         try require(flow.bytes == 131_072, "Idle, and on a home network, the floor applies")
         flow.reset()
         try require(flow.bytes == 131_072, "A new session starts at the floor")
+        // The link meter: 125 kB sent over about 100 ms while 200 kB waited is about 10 Mbit/s.
+        func backlog(_ sent: UInt64) -> MLSendQueue {
+            MLSendQueue(queued_bytes: 200_000, round_trip_ms: 20, sent_bytes: sent, retransmitted_bytes: 0)
+        }
+        flow.sample(backlog(0)); Thread.sleep(forTimeInterval: 0.1); flow.sample(backlog(125_000))
+        let link = flow.takeLinkKbps()
+        try require((7_000...10_500).contains(link), "The link meter reports kbit/s in real time: \(link)")
+        try require(flow.takeLinkKbps() == 0, "Each second's link rate starts again")
+        flow.sample(backlog(0)); flow.reset(); flow.sample(backlog(500_000)); Thread.sleep(forTimeInterval: 0.05)
+        try require(flow.takeLinkKbps() == 0, "A new session forgets the last one's readings")
         var window = NativeLatencyWindow()
         try require(window.summary == nil, "No summary without frames")
         for value in 1...100 { window.add((Double(value), Double(value) / 2, 1)) }

@@ -133,6 +133,7 @@ struct NativeMetric: Hashable {
     static let captureMs = Self(ML_METRIC_CAPTURE_MS)
     static let sendQueueKib = Self(ML_METRIC_SEND_QUEUE_KIB)
     static let queueWaitMs = Self(ML_METRIC_QUEUE_WAIT_MS)
+    static let linkMbps = Self(ML_METRIC_LINK_MBPS)
     static let latencyMs = Self(ML_METRIC_LATENCY_MS)
     static let latencyMsP95 = Self(ML_METRIC_LATENCY_MS_P95)
     static let toViewerMs = Self(ML_METRIC_TO_VIEWER_MS)
@@ -149,7 +150,20 @@ final class NativeFlowLimit: @unchecked Sendable {
     private var limit = ml_flow_queue_limit(0, 0)
     private var roundTrips: [UInt32] = []
     private var lastSent: UInt64?
+    /// Rust measures the link's rate while video waits for it.
+    private var meter = MLLinkMeter()
     var bytes: UInt32 { lock.lock(); defer { lock.unlock() }; return limit }
+    /// Each send-buffer reading, as frames are admitted.
+    func sample(_ queue: MLSendQueue) {
+        var queue = queue
+        let now = UInt64(ProcessInfo.processInfo.systemUptime * 1000)
+        lock.lock(); _ = ml_flow_link_sample(&meter, now, &queue); lock.unlock()
+    }
+    /// The link's rate since the last call, kbit/s, or 0 if it wasn't measured.
+    func takeLinkKbps() -> UInt32 {
+        lock.lock(); defer { lock.unlock() }
+        return ml_flow_link_take_kbps(&meter)
+    }
     func update(_ queue: MLSendQueue) {
         lock.lock(); defer { lock.unlock() }
         if queue.round_trip_ms > 0 {
@@ -161,7 +175,7 @@ final class NativeFlowLimit: @unchecked Sendable {
         limit = ml_flow_queue_limit(roundTrips.min() ?? 0, sent)
     }
     func reset() {
-        lock.lock(); roundTrips.removeAll(); lastSent = nil; limit = ml_flow_queue_limit(0, 0); lock.unlock()
+        lock.lock(); roundTrips.removeAll(); lastSent = nil; limit = ml_flow_queue_limit(0, 0); meter = MLLinkMeter(); lock.unlock()
     }
 }
 
