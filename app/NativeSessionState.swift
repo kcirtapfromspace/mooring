@@ -149,6 +149,9 @@ final class NativeFlowLimit: @unchecked Sendable {
     private let lock = NSLock()
     private var limit = ml_flow_queue_limit(0, 0)
     private var roundTrips: [UInt32] = []
+    /// Bytes sent in each recent second: the most of them sets the limit, so
+    /// one quiet second doesn't shrink it before a burst.
+    private var sentRates: [UInt64] = []
     private var lastSent: UInt64?
     /// Rust measures the link's rate while video waits for it.
     private var meter = MLLinkMeter()
@@ -172,10 +175,13 @@ final class NativeFlowLimit: @unchecked Sendable {
         }
         let sent = lastSent.map { queue.sent_bytes >= $0 ? queue.sent_bytes - $0 : 0 } ?? 0
         lastSent = queue.sent_bytes
-        limit = ml_flow_queue_limit(roundTrips.min() ?? 0, sent)
+        sentRates.append(sent)
+        if sentRates.count > Self.window { sentRates.removeFirst(sentRates.count - Self.window) }
+        limit = ml_flow_queue_limit(roundTrips.min() ?? 0, sentRates.max() ?? 0)
     }
     func reset() {
-        lock.lock(); roundTrips.removeAll(); lastSent = nil; limit = ml_flow_queue_limit(0, 0); meter = MLLinkMeter(); lock.unlock()
+        lock.lock(); roundTrips.removeAll(); sentRates.removeAll(); lastSent = nil; limit = ml_flow_queue_limit(0, 0); meter = MLLinkMeter()
+        lock.unlock()
     }
 }
 

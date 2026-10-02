@@ -211,6 +211,11 @@ enum NativeSessionTests {
         try require(flow.bytes == 225_000, "A slow round trip during a stall does not raise the limit")
         for _ in 0..<NativeFlowLimit.window { flow.update(queue(3, 7_000_000)) }
         try require(flow.bytes == 131_072, "Idle, and on a home network, the floor applies")
+        // Away at about 10 Mbit/s and 28 ms, less waits in the buffer; the busiest recent second counts.
+        flow.reset(); flow.update(queue(28, 0)); flow.update(queue(28, 1_250_000))
+        try require(flow.bytes == 77_500, "A slow link keeps what stays busy plus one frame's time: \(flow.bytes)")
+        flow.update(queue(28, 1_300_000))
+        try require(flow.bytes == 77_500, "A quiet second keeps the busiest recent one's limit")
         flow.reset()
         try require(flow.bytes == 131_072, "A new session starts at the floor")
         // The link meter: 125 kB sent over about 100 ms while 200 kB waited is about 10 Mbit/s.

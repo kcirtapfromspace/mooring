@@ -493,6 +493,22 @@ For `v0.3.0-preview.25`, pacing cuts against what the link carries rather than a
 - **Trade-off at home.** After a genuine slowdown, recovery to the ceiling is probe-paced (a tenth per 30 clear seconds), so it takes minutes rather than the earlier 13 s.
 - **Between two Macs.** Not yet measured after the change: `link_mbps` and `bitrate_mbps` from away with busy content.
 
+## A send-buffer limit for slow links
+
+For `v0.3.0-preview.26`, the host's send-buffer limit fits a slow link across the internet.
+
+- **Measured first.**
+  - From away on preview 25, with a busy screen at 9–10 Mbps, the kernel's smoothed round trip for the connection stayed at 20–48 ms (median 28), read with `nettop` once a second for a minute. That includes the one stall.
+  - The viewer's ping, which queues behind video in the host's send buffer, read up to 116 ms.
+  - So pacing on the network's round trip would not have detected these stalls, and was not built. The queue was the host's own.
+  - `send_queue_kib` stayed at 78–157 KiB. About 33 KiB of that was in flight (10 Mbit/s × 28 ms), leaving 45–125 KiB waiting.
+- **Rule.**
+  - With a minimum round trip of 10 ms or more and something sent, the limit is `max(48 KiB, 1.5 × in flight + 20 ms × rate)`, never above the earlier `max(128 KiB, 1.5 × in flight)`.
+  - The rate is the most sent in any of the last ten seconds.
+  - Under 10 ms, or before anything is sent, the earlier rule applies unchanged.
+- **Checks.** Rust: 77.5 kB at 10 Mbit/s and 28 ms; the 48 KiB floor; 128 KiB at 3 and 9 ms; and never above the earlier rule. Swift: `NativeFlowLimit` keeps the busiest recent second.
+- **Between two Macs.** Not yet measured after the change: `send_queue_kib` and ping time from away.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.
