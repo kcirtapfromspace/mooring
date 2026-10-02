@@ -524,9 +524,7 @@ int32_t ml_release_display(uint64_t packed, char *out, size_t capacity);
 /* Host pacing. Video in the kernel's send buffer can't be replaced by a newer
  * frame, so a host starts a frame only while the buffer holds at most the
  * queue limit: 1.5 times the bytes sent per fastest recent round trip, from
- * 128 KiB to 4 MiB. With a round trip of 10 ms or more, a slow link gets
- * less: that plus 20 ms of sending, from 48 KiB. Pass the most sent in a
- * recent second (0: nothing yet). Once a second it adapts its bitrate from how long frames
+ * 128 KiB to 4 MiB. Once a second it adapts its bitrate from how long frames
  * waited: a second with 150 ms or more of waiting is congested; two such
  * seconds of the last four lower the bitrate to three quarters, and each
  * three clear seconds raise it 10% (at least 500 kbps), between 4 Mbps (or a

@@ -508,7 +508,14 @@ For `v0.3.0-preview.26`, the host's send-buffer limit fits a slow link across th
   - Under 10 ms, or before anything is sent, the earlier rule applies unchanged.
 - **Checks.** Rust: 77.5 kB at 10 Mbit/s and 28 ms; the 48 KiB floor; 128 KiB at 3 and 9 ms; and never above the earlier rule. Swift: `NativeFlowLimit` keeps the busiest recent second.
 - **Expected effect.** In ordinary seconds the queue should sit around 60–95 KiB, against 80–130, which is about 10–20 ms less. During bursts, where it had reached 150+, it's up to about 50 ms less. A relayed connection over 10 ms counts as across the internet.
-- **Between two Macs.** Not yet measured after the change: `send_queue_kib`, `sent_mbps` (which must not fall) and ping time from away.
+- **Withdrawn in preview 27.** Measured from away right after both Macs updated, over a minute:
+  - `sent_mbps` fell from a median of 9.3 to 4.2;
+  - the bitrate target sat at the 4 Mbps floor;
+  - 25 seconds had waits of 100 ms or more, against one before, and 333 frames were skipped;
+  - the pacing log showed frames waiting 170–500 ms with only 55–85 KiB queued.
+
+  Pacing counts the time the admission limit holds a frame as congestion. A smaller limit held frames on an uncongested link, the cuts lowered the sent rate, and that lowered the limit further. Preview 27 restores preview 25's `flow.rs`, header text, `NativeFlowLimit` and its test exactly.
+- **Lesson.** A change to the admission limit must be tested together with the bitrate rule. The tests checked the limit's value and that it couldn't starve the link at a steady rate, but not the loop through pacing.
 
 ## Media feasibility
 

@@ -19,17 +19,6 @@
 /// longer connection gets more: see `queue_limit`.
 pub(crate) const QUEUE_LIMIT_BYTES: u32 = 128 * 1024;
 const MAX_QUEUE_LIMIT_BYTES: u32 = 4 * 1024 * 1024;
-/// On a slow link the 128 KiB floor is itself the delay: about 100 ms at
-/// 10 Mbit/s. There the limit is what keeps the link busy, plus this much
-/// time for the next frame, but never under the smaller floor. The next
-/// frame arrives about 17 ms after it is admitted; 20 ms of sending beyond
-/// what is in flight keeps the link from running dry meanwhile.
-const FRAME_HEADROOM_MS: u64 = 20;
-const MIN_QUEUE_LIMIT_BYTES: u32 = 48 * 1024;
-/// Below this round trip the connection is local, where 128 KiB drains in
-/// milliseconds and absorbs Wi-Fi's bursts: the smaller limit is for
-/// connections across the internet.
-const LOCAL_ROUND_TRIP_MS: u32 = 10;
 /// Floor for automatic reductions: text stays legible at this rate.
 pub(crate) const MIN_BITRATE_KBPS: u32 = 4_000;
 /// Clear seconds before each rise, and the smallest step.
@@ -104,28 +93,17 @@ impl LinkMeter {
     }
 }
 
-/// The most that may be queued before a frame starts, from the fastest
-/// recent round trip and the most sent in a recent second. On a fast or long
-/// connection: one and a half times what is in flight, so it stays busy, and
-/// at least 128 KiB. Over a 50 ms VPN at 3 MB/s that is 225 KiB; on a home
-/// network it stays at 128 KiB. Across the internet (a round trip of 10 ms or
-/// more), a slow link gets less: one and a half times what is in flight plus
-/// 20 ms of sending for the next frame, at least 48 KiB. At 10 Mbit/s and
-/// 28 ms that is about 77 kB rather than 128 KiB. Nothing sent yet: 128 KiB.
+/// The most that may be queued before a frame starts: one and a half times
+/// what the connection carries in its fastest recent round trip, so a long
+/// connection stays busy, and at least 128 KiB. Over a 50 ms VPN at 3 MB/s
+/// that is 225 KiB; on a home network it stays at 128 KiB.
 pub(crate) fn queue_limit(min_round_trip_ms: u32, sent_bytes_per_second: u64) -> u32 {
     let in_flight = sent_bytes_per_second.saturating_mul(u64::from(min_round_trip_ms)) / 1000;
-    let busy = in_flight.saturating_mul(3) / 2;
-    let fast = busy.clamp(
+    let limit = (in_flight.saturating_mul(3) / 2).clamp(
         u64::from(QUEUE_LIMIT_BYTES),
         u64::from(MAX_QUEUE_LIMIT_BYTES),
     );
-    if sent_bytes_per_second == 0 || min_round_trip_ms < LOCAL_ROUND_TRIP_MS {
-        return fast as u32;
-    }
-    let slow = busy
-        .saturating_add(sent_bytes_per_second.saturating_mul(FRAME_HEADROOM_MS) / 1000)
-        .max(u64::from(MIN_QUEUE_LIMIT_BYTES));
-    slow.min(fast) as u32
+    limit as u32
 }
 
 pub(crate) fn admits_frame(queued_bytes: u32, limit: u32) -> bool {
@@ -283,29 +261,6 @@ mod tests {
         // VPN: 3 MB/s at 50 ms is 150 kB in flight; one and a half times that.
         assert_eq!(queue_limit(50, 3_000_000), 225_000);
         assert_eq!(queue_limit(u32::MAX, u64::MAX), MAX_QUEUE_LIMIT_BYTES);
-        // Away at 10 Mbit/s and 28 ms: 35 kB in flight, 52.5 kB to stay busy,
-        // and 25 kB for the next frame, instead of 128 KiB.
-        assert_eq!(queue_limit(28, 1_250_000), 77_500);
-        // The link never runs dry: a frame admitted at the limit still has
-        // more queued than the 17 ms until the next one drains.
-        let (rate, round_trip) = (1_250_000_u64, 28_u32);
-        let drained_before_next = rate * 17 / 1000;
-        assert!(
-            u64::from(queue_limit(round_trip, rate))
-                > drained_before_next + rate * u64::from(round_trip) / 1000
-        );
-        // A slow, calm link keeps 48 KiB for a sudden large frame.
-        assert_eq!(queue_limit(28, 125_000), MIN_QUEUE_LIMIT_BYTES);
-        // At home, whatever the screen sends, 128 KiB as before.
-        assert_eq!(queue_limit(3, 2_000_000), QUEUE_LIMIT_BYTES);
-        assert_eq!(queue_limit(9, 125_000), QUEUE_LIMIT_BYTES);
-        // Never more than the fast-network rule, whatever the rate.
-        for (round_trip, rate) in [(10, 50_000_000), (12, 4_000_000), (80, 900_000)] {
-            let limit = queue_limit(round_trip, rate);
-            let in_flight = rate * u64::from(round_trip) / 1000;
-            assert!(u64::from(limit) <= (in_flight * 3 / 2).max(u64::from(QUEUE_LIMIT_BYTES)));
-            assert!(limit >= MIN_QUEUE_LIMIT_BYTES);
-        }
     }
 
     fn run(kbps: u32, ceiling: u32, seconds: &[u32]) -> (u32, FlowState) {
