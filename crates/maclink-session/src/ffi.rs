@@ -1321,8 +1321,9 @@ pub extern "C" fn ml_flow_admits_frame(queued_bytes: u32, limit: u32) -> i32 {
     i32::from(crate::flow::admits_frame(queued_bytes, limit))
 }
 /// The host's bitrate for the next second, from the milliseconds frames
-/// waited for the send buffer in the last one. The caller keeps `state`,
-/// zeroed at session start.
+/// waited for the send buffer in the last one, and whether a keyframe went out
+/// in it or the one before (see flow::next_bitrate). The caller keeps
+/// `state`, zeroed at session start.
 /// # Safety
 /// `state` and `kbps_out` must be writable.
 #[unsafe(no_mangle)]
@@ -1330,6 +1331,7 @@ pub unsafe extern "C" fn ml_flow_next_bitrate(
     current_kbps: u32,
     ceiling_kbps: u32,
     waited_ms: u32,
+    after_keyframe: u8,
     state: *mut MLFlowState,
     kbps_out: *mut u32,
 ) -> i32 {
@@ -1340,8 +1342,13 @@ pub unsafe extern "C" fn ml_flow_next_bitrate(
             recent: state.recent,
             clear_seconds: state.clear_seconds,
         };
-        let (kbps, next) =
-            crate::flow::next_bitrate(current_kbps, ceiling_kbps, previous, waited_ms);
+        let (kbps, next) = crate::flow::next_bitrate(
+            current_kbps,
+            ceiling_kbps,
+            previous,
+            waited_ms,
+            after_keyframe != 0,
+        );
         *state = MLFlowState {
             recent: next.recent,
             clear_seconds: next.clear_seconds,
@@ -1539,6 +1546,7 @@ pub const ML_LEGACY_GRACE_SECONDS: u64 = crate::devices::LEGACY_GRACE_SECONDS;
 pub const ML_CAPABILITY_VERSION: u64 = crate::policy::CAPABILITY_VERSION;
 pub const ML_CAPABILITY_REMOTE_UPDATE: u64 = crate::policy::CAPABILITY_REMOTE_UPDATE;
 pub const ML_CAPABILITY_WAITS: u64 = crate::policy::CAPABILITY_WAITS;
+pub const ML_KEYFRAMES_ON_DEMAND: u8 = crate::telemetry::KEYFRAMES_ON_DEMAND;
 pub const ML_VIEWER_WAIT_SECONDS: u64 = crate::policy::VIEWER_WAIT.as_secs();
 pub const ML_RELEASE_CAPACITY: usize = 64;
 pub const ML_AUDIO_MAX_PAYLOAD: usize = crate::audio::MAX_AUDIO_PAYLOAD;

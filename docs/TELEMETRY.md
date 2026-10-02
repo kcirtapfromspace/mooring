@@ -18,7 +18,7 @@ Tuning typed on the viewing Mac during a session is sent to the sharing Mac; tun
 ## Snapshot
 
 ```json
-{"t":42.1,"role":"viewer","tuning":{"bitrate_mbps":25.0,"max_width":3840,"fps":60,"in_flight":2,"keyframe_seconds":2},
+{"t":42.1,"role":"viewer","tuning":{"bitrate_mbps":25.0,"max_width":3840,"fps":60,"in_flight":2,"keyframe_seconds":0},
  "local":{"received_fps":38.0,"rtt_ms":9.0,...},"peer":{"capture_fps":41.0,"encode_ms":24.5,...},"peer_age_s":0.4,"last_end":null}
 ```
 
@@ -73,6 +73,6 @@ In zsh, `log` alone is a shell built-in; use `/usr/bin/log`.
 - `skipped_fps` high with `encode_ms` above the frame interval (16.7 ms at 60 fps): the encoder is the limit. Lower `max_width`, or `fps`.
 - `in_flight 1` versus `2`: two overlaps encoding with sending for throughput; one lowers latency when the link is fast.
 - `decoder_overflows` or `presented_fps` below `decoded_fps`: the viewing Mac is the limit.
-- Frequent `keyframes` or `keyframe_requests` means recovery; a larger `keyframe_seconds` reduces periodic keyframes on a stable link.
+- Keyframes come only when needed (`keyframe_seconds` 0, the default): at the start, when the screen size changes, and when the viewer asks. Frequent `keyframes` or `keyframe_requests` means recovery. `keyframe_seconds` 1–10 asks for one every N seconds instead. Each costs a burst, which on a slow link means skipped frames.
 
-Bounds: `bitrate_mbps` 1–80, `max_width` 640–3840 and even, `fps` 1–60, `in_flight` 1–2, `keyframe_seconds` 1–10. The app validates every command in Rust and replies with an acknowledgement or an error; the socket accepts at most four clients and 1 KiB per command line.
+Bounds: `bitrate_mbps` 1–80, `max_width` 640–3840 and even, `fps` 1–60, `in_flight` 1–2, `keyframe_seconds` 0–10 (0: only when needed). The app validates every command in Rust and replies with an acknowledgement or an error; the socket accepts at most four clients and 1 KiB per command line.

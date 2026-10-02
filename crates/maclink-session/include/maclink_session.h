@@ -152,6 +152,9 @@ enum { ML_CODEC_H264 = 1, ML_CODEC_HEVC = 2 };
 #define ML_CAPABILITY_REMOTE_UPDATE 128ull /* a sharing Mac that updates itself when a viewer asks */
 #define ML_CAPABILITY_WAITS 256ull /* a sharing Mac that waits for a viewer whose session dropped */
 #define ML_VIEWER_WAIT_SECONDS 43200u /* it keeps its display on and takes connections this long */
+/* MLTuning.keyframe_seconds: keyframes only when needed (the default); 1-10
+ * means one every N seconds. Local JSON shows and takes it as 0. */
+#define ML_KEYFRAMES_ON_DEMAND 255u
 #define ML_RELEASE_CAPACITY 64u
 enum { ML_UPDATE_CHECKING = 1, ML_UPDATE_UP_TO_DATE = 2, ML_UPDATE_READY = 3, ML_UPDATE_FAILED = 4 };
 #define ML_AUDIO_MAX_PAYLOAD 1500u /* bytes in one Opus packet */
@@ -516,12 +519,13 @@ int32_t ml_release_display(uint64_t packed, char *out, size_t capacity);
  * waited: a second with 150 ms or more of waiting is congested; two such
  * seconds of the last four lower the bitrate to three quarters, and each
  * three clear seconds raise it 10% (at least 500 kbps), between 4 Mbps (or a
- * lower ceiling) and the tuned ceiling. */
+ * lower ceiling) and the tuned ceiling. after_keyframe (1): a keyframe went
+ * out this second or the one before; if congested, the second is left out. */
 int32_t ml_session_send_queue(uint64_t session, MLSendQueue *out);
 uint32_t ml_flow_queue_limit(uint32_t min_round_trip_ms, uint64_t sent_bytes_per_second);
 int32_t ml_flow_admits_frame(uint32_t queued_bytes, uint32_t limit);
-int32_t ml_flow_next_bitrate(uint32_t current_kbps, uint32_t ceiling_kbps, uint32_t waited_ms, MLFlowState *state,
-                             uint32_t *kbps_out);
+int32_t ml_flow_next_bitrate(uint32_t current_kbps, uint32_t ceiling_kbps, uint32_t waited_ms, uint8_t after_keyframe,
+                             MLFlowState *state, uint32_t *kbps_out);
 /* Pass an ML_SESSION_MAX_VIDEO buffer: video, pointers and sound (to viewers)
  * and clipboard (to either side) arrive in it. TIMEOUT is retryable when no message bytes were
  * read; the deadline bounds only the wait for a new message, and a message

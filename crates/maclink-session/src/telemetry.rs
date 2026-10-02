@@ -117,6 +117,13 @@ pub(crate) fn validate_stats(stats: &[(Metric, f64)]) -> Result<()> {
     if valid { Ok(()) } else { Err(Error::Invalid) }
 }
 
+/// Keyframes only when one is needed: at the start, when the screen size
+/// changes, after an encoder failure, or when the viewer asks. The session's
+/// transport loses nothing, so a periodic keyframe repairs nothing, and over a
+/// slow connection a sharp 4:4:4 keyframe holds up the stream. Shown and set
+/// as 0 in local JSON.
+pub(crate) const KEYFRAMES_ON_DEMAND: u8 = 255;
+
 /// Zero means "unchanged" in an update. Only the sharing host applies tuning.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Tuning {
@@ -133,7 +140,7 @@ impl Tuning {
         max_width: 3840,
         fps: 60,
         in_flight: 2,
-        keyframe_seconds: 2,
+        keyframe_seconds: KEYFRAMES_ON_DEMAND,
     };
     /// Every present field is within the bounds the host can apply.
     pub(crate) fn validate(&self) -> Result<()> {
@@ -144,7 +151,8 @@ impl Tuning {
             && self.max_width.is_multiple_of(2)
             && within(self.fps.into(), 1..=60)
             && within(self.in_flight.into(), 1..=2)
-            && within(self.keyframe_seconds.into(), 1..=10);
+            && (within(self.keyframe_seconds.into(), 1..=10)
+                || self.keyframe_seconds == KEYFRAMES_ON_DEMAND);
         if valid { Ok(()) } else { Err(Error::Invalid) }
     }
     /// Present fields of `update` replace this value's fields.
@@ -179,6 +187,9 @@ impl Tuning {
             if value != 0 {
                 object.insert(key.into(), json!(value));
             }
+        }
+        if self.keyframe_seconds == KEYFRAMES_ON_DEMAND {
+            object.insert("keyframe_seconds".into(), json!(0));
         }
         Value::Object(object)
     }
@@ -354,13 +365,18 @@ pub(crate) fn parse_command(line: &str) -> Result<Tuning> {
         max_width: request.max_width.unwrap_or(0),
         fps: request.fps.unwrap_or(0),
         in_flight: request.in_flight.unwrap_or(0),
-        keyframe_seconds: request.keyframe_seconds.unwrap_or(0),
+        // 0 asks for keyframes only when needed; 1–10 for one every N seconds.
+        keyframe_seconds: match request.keyframe_seconds {
+            None => 0,
+            Some(0) => KEYFRAMES_ON_DEMAND,
+            Some(seconds @ 1..=10) => seconds,
+            Some(_) => return Err(Error::Invalid),
+        },
     };
     if [
         request.max_width.map(u64::from),
         request.fps.map(u64::from),
         request.in_flight.map(u64::from),
-        request.keyframe_seconds.map(u64::from),
     ]
     .contains(&Some(0))
     {
@@ -508,7 +524,7 @@ impl Server {
                     json!({"ack": {"pending": merged.to_json()}})
                 }
                 Err(_) => {
-                    json!({"error": "Expected {\"tune\": {...}} with bitrate_mbps 1–80, max_width 640–3840 (even), fps 1–60, in_flight 1–2, keyframe_seconds 1–10, or reset."})
+                    json!({"error": "Expected {\"tune\": {...}} with bitrate_mbps 1–80, max_width 640–3840 (even), fps 1–60, in_flight 1–2, keyframe_seconds 1–10 (or 0: only when needed), or reset."})
                 }
             };
             if client
@@ -572,6 +588,40 @@ mod tests {
             (Metric::EncodeMs, 23.0),
             (Metric::PixelWidth, 3456.0),
         ]
+    }
+
+    #[test]
+    fn keyframes_come_only_when_needed_unless_tuned() {
+        assert_eq!(Tuning::DEFAULT.keyframe_seconds, KEYFRAMES_ON_DEMAND);
+        let on_demand = Tuning {
+            keyframe_seconds: KEYFRAMES_ON_DEMAND,
+            ..Tuning::default()
+        };
+        let message = TelemetryMessage::Tuning(on_demand);
+        assert_eq!(
+            TelemetryMessage::decode(&message.encode().unwrap()).unwrap(),
+            message
+        );
+        assert_eq!(on_demand.to_json(), json!({"keyframe_seconds": 0}));
+        assert_eq!(
+            parse_command(r#"{"tune": {"keyframe_seconds": 0}}"#),
+            Ok(on_demand)
+        );
+        assert_eq!(
+            parse_command(r#"{"tune": {"keyframe_seconds": 3}}"#)
+                .map(|tuning| tuning.keyframe_seconds),
+            Ok(3)
+        );
+        for bad in [11, 255] {
+            assert_eq!(
+                parse_command(&format!(r#"{{"tune": {{"keyframe_seconds": {bad}}}}}"#)),
+                Err(Error::Invalid)
+            );
+        }
+        assert_eq!(
+            parse_command(r#"{"tune": {"reset": true}}"#).map(|tuning| tuning.keyframe_seconds),
+            Ok(KEYFRAMES_ON_DEMAND)
+        );
     }
 
     #[test]
@@ -642,6 +692,10 @@ mod tests {
             },
             Tuning {
                 keyframe_seconds: 11,
+                ..Tuning::default()
+            },
+            Tuning {
+                keyframe_seconds: 254,
                 ..Tuning::default()
             },
         ] {

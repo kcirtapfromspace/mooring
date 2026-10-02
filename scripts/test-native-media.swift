@@ -158,6 +158,7 @@ struct NativeMediaTests {
         try require(stopped.wait(timeout: .now() + 3) == .success, "Encoder stop completion")
         let fourK = try testFourK()
         let hevc444 = try testHEVC444()
+        let keyframes = try testKeyframeInterval()
         let sound = try testAudio()
         let stats: [String: Any] = ["scope": "Synthetic paced encode/decode only; no screen capture, network or presentation test.",
             "frames": frames, "decoded": decoded, "pixel_width": width, "pixel_height": height,
@@ -166,12 +167,46 @@ struct NativeMediaTests {
             "paced_seconds": elapsed, "measured_roundtrip_fps": Double(frames - 1) / elapsed,
             "average_encode_ms": encoded.map { $0.metrics.encode_ms }.reduce(0, +) / Double(frames),
             "maximum_encode_send_inflight": NativeVideoEncoder.maxInFlight, "maximum_decoder_pending": NativeVideoDecoder.maxPending,
-            "hevc_444": hevc444, "opus_sound": sound,
+            "hevc_444": hevc444, "keyframe_interval": keyframes, "opus_sound": sound,
             "decoder_failure_budget": "passed",
             "backpressure_capture_skips": encoder.snapshot.skipped_capture_frames, "ffprobe": inspected,
             "four_k_smoke": fourK, "gap_and_overflow_recovery": "passed"]
         let json = try JSONSerialization.data(withJSONObject: stats, options: [.prettyPrinted, .sortedKeys])
         print(String(decoding: json, as: UTF8.self))
+    }
+    /// Keyframes only when requested, unless an interval is set: over 3.5 s of
+    /// changing frames, on demand gives only the first one and a requested
+    /// one; one every second gives more.
+    static func testKeyframeInterval() throws -> [String: Any] {
+        var counts: [Int: Int] = [:]
+        for seconds in [0, 1] {
+            let encoder = try NativeVideoEncoder(width: 640, height: 360, framesPerSecond: 60, bitrate: 4_000_000,
+                                                 keyframeSeconds: seconds, codec: .hevc)
+            defer { encoder.stop() }
+            let lock = NSLock(), encoded = DispatchSemaphore(value: 0)
+            var keyframes: [Int] = [], errors: [String] = [], index = 0
+            encoder.onError = { message in lock.lock(); errors.append(message); lock.unlock(); encoded.signal() }
+            encoder.onEncodedFrame = { frame, release in
+                lock.lock(); if frame.keyframe { keyframes.append(index) }; lock.unlock()
+                release(); encoded.signal()
+            }
+            for frame in 0..<210 {
+                lock.lock(); index = frame; lock.unlock()
+                if frame == 150 { encoder.requestKeyframe() }
+                let pixels = try image(index: frame, width: 640, height: 360)
+                try require(encoder.encode(pixels, presentationTime: CMTime(value: Int64(frame), timescale: 60)),
+                            "Keyframe interval admission \(frame)")
+                try require(encoded.wait(timeout: .now() + 3) == .success, "Keyframe interval encode timed out")
+            }
+            lock.lock(); let found = keyframes, failures = errors; lock.unlock()
+            try require(failures.isEmpty, failures.first ?? "Keyframe interval error")
+            if seconds == 0 {
+                try require(found == [0, 150], "On demand, only the first and the requested frames are keyframes: \(found)")
+            }
+            counts[seconds] = found.count
+        }
+        try require((counts[1] ?? 0) >= 4, "One every second still gives periodic keyframes: \(counts[1] ?? -1)")
+        return ["on_demand": counts[0] ?? 0, "every_second": counts[1] ?? 0, "seconds": 3.5]
     }
     /// Sharper text: 120 paced 1080p frames through the HEVC 4:4:4 hardware
     /// encoder and decoder, one at a time, as the host streams them.

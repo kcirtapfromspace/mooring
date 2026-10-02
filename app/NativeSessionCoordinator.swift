@@ -114,6 +114,8 @@ final class NativeSessionCoordinator {
     /// how many seconds the connection has been clear.
     private var flowKbps: UInt32 = 0
     private var flowState = MLFlowState()
+    /// A keyframe went out in the last pacing second.
+    private var keyframeLastSecond = false
     /// Host: the send-buffer limit, read on the capture queue and updated
     /// once a second from the last ten seconds' fastest round trip.
     private let flowLimit = NativeFlowLimit()
@@ -469,7 +471,7 @@ final class NativeSessionCoordinator {
         let channel = NativeSessionChannel(transport)
         hostChannel = channel; lastHostMeasurements = channel.measurements
         retiredEncoderCounters = NativeEncoderCounters(); hostInputGate.invalidate()
-        flowKbps = UInt32(hostTuning.bitrate / 1000); flowState = MLFlowState(); flowLimit.reset()
+        flowKbps = UInt32(hostTuning.bitrate / 1000); flowState = MLFlowState(); keyframeLastSecond = false; flowLimit.reset()
         let version = channel.transport.protocolVersion
         let proof = transport.peerDevice.map { $0.isEmpty ? "the old pairing code" : "an approved Mac" } ?? "closed"
         NativeLog.session.notice("host session started, protocol \(version), \(proof, privacy: .public)")
@@ -604,13 +606,13 @@ final class NativeSessionCoordinator {
         let previous = hostTuning
         hostTuning = tuning
         if tuning != previous {
-            NativeLog.session.notice("tuning: \(tuning.bitrate / 1000) kbps, width \(tuning.maxWidth), \(tuning.fps) fps, in flight \(tuning.inFlight), keyframe \(tuning.keyframeSeconds) s")
+            NativeLog.session.notice("tuning: \(tuning.bitrate / 1000) kbps, width \(tuning.maxWidth), \(tuning.fps) fps, in flight \(tuning.inFlight), keyframe \(tuning.keyframeSeconds == 0 ? "when needed" : "every \(tuning.keyframeSeconds) s", privacy: .public)")
         }
         guard let channel = hostChannel, channel.token.isActive, let capture else { return }
         if tuning.maxWidth != captureMaxWidth { scheduleCaptureRestart() }
         if tuning.bitrate != previous.bitrate {
             // A new tuned bitrate is the new ceiling; pacing starts from it.
-            flowKbps = UInt32(tuning.bitrate / 1000); flowState = MLFlowState()
+            flowKbps = UInt32(tuning.bitrate / 1000); flowState = MLFlowState(); keyframeLastSecond = false
             capture.setTargetBitrate(tuning.bitrate)
         }
         if tuning.fps != previous.fps { capture.setFrameRate(tuning.fps) }
@@ -1669,7 +1671,13 @@ final class NativeSessionCoordinator {
         var kbps: UInt32 = 0
         let waited = UInt32(min(interval.delta("queue_wait_ms"), Double(UInt32.max)))
         let queued = UInt32(min(interval.maxima["send_queue_bytes"] ?? 0, Double(UInt32.max)))
-        guard ml_flow_next_bitrate(flowKbps, UInt32(hostTuning.bitrate / 1000), waited, &flowState, &kbps) == ML_SESSION_OK else { return }
+        // An on-demand keyframe's drain, this second or spilling from the last,
+        // isn't a slow connection. Periodic keyframes, when tuned, still count.
+        let keyframe = interval.delta("encoded_keyframes") > 0
+        let afterKeyframe = hostTuning.keyframeSeconds == 0 && (keyframe || keyframeLastSecond)
+        keyframeLastSecond = keyframe
+        guard ml_flow_next_bitrate(flowKbps, UInt32(hostTuning.bitrate / 1000), waited, afterKeyframe ? 1 : 0,
+                                   &flowState, &kbps) == ML_SESSION_OK else { return }
         let previous = flowKbps
         flowKbps = kbps
         guard kbps != previous else { return }

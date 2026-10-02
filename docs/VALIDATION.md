@@ -453,6 +453,17 @@ For `v0.3.0-preview.23`, a pairing code lists the sharing Mac's addresses, and t
 - **Known limit.** Another MacLink host at a stale address can refuse while the real one is unreachable. That reads as a refusal and stops reconnecting. **Reconnect** tries again.
 - **Checks.** Loopback tests put the sharing Mac on 127.0.0.1 and a stand-in on ::1 at the same port. They cover a stand-in that never answers, one that closes at once, every address refusing, none answering, and the move-over fallback. Unit tests cover the format, size and strictness, the address ordering, and saved-peer ordering. Three mutations were each caught: no per-candidate time slice, a close ending the attempt, and no reconnect after waiting.
 
+## Keyframes only when needed
+
+For `v0.3.0-preview.24`, the sharing Mac sends keyframes on demand, and pacing ignores their drain.
+
+- **Measured first.** In a session from away over Tailscale, at 3360×2032 HEVC 4:4:4, the old 2 s keyframes averaged about 48 KiB per frame over their second, about 1.2 MB for the keyframe itself. Each held the link for most of a second: waits up to 300 ms, 10–21 skipped frames a second, presented 25–42 fps. Pacing cut the bitrate from 18.75 to 4 Mbps in 90 s. Between keyframes the stream used about 1 Mbps.
+- **Default.** Tuning's `keyframe_seconds` defaults to `ML_KEYFRAMES_ON_DEMAND` (255; 0 in local JSON). Keyframes come at the start, on a display change (a new encoder), after an encoder failure, and on the viewer's request, which it retries every 0.75 s while it waits. The transport is TCP and never drops an encoded frame, so nothing else needs one. 1–10 s still works when tuned.
+- **Encoder.** VideoToolbox documents 0 as no limit, but Apple silicon's HEVC encoder then makes a keyframe every 32 frames. The new media test, on the hardware encoder, showed keyframes at frames 0, 32, 64, 96 and 128, plus the requested one. "On demand" is therefore an explicit one-hour limit. The test now checks that 3.5 s on demand gives only frame 0 and the requested frame, and that a 1 s interval gives four.
+- **Pacing.** `ml_flow_next_bitrate` takes `after_keyframe`. A congested second during or right after a keyframe is left out: shifted into the four-second window as not congested, and not counted as clear. The host passes it only while keyframes are on demand, so a tuned 1–2 s interval can't hide a slow connection. Rust tests cover a keyframe's two slow seconds, two keyframes close together, left-out seconds not counting toward a raise, and congestion between keyframes still cutting.
+- **Compatibility.** A viewer's `tune --keyframe-seconds 0` reaches an older host as 255, which it refuses as invalid tuning.
+- **Between two Macs.** Not yet measured after the change: `keyframes`, `skipped_fps`, `queue_wait_ms` and `bitrate_mbps` from away.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

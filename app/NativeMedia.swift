@@ -305,11 +305,12 @@ final class NativeVideoEncoder {
     /// bursts. Measured on an M1 Ultra at 3360×2032 with text, a frame after a
     /// 100-500 ms pause took 52-56 ms in real-time mode and 18-19 ms without
     /// it, and 23 ms against 17 ms at 60 fps, with frames no larger.
-    init(width: Int, height: Int, framesPerSecond: Int = 60, bitrate: Int = 25_000_000, keyframeSeconds: Int = 2,
+    init(width: Int, height: Int, framesPerSecond: Int = 60, bitrate: Int = 25_000_000, keyframeSeconds: Int = 0,
          codec: NativeVideoCodec = .h264) throws {
         guard NativeVideoPacket.validDimensions(width, height), (1...60).contains(framesPerSecond),
               (1_000_000...80_000_000).contains(bitrate) else { throw NativeMediaError("Unsupported video encoder configuration.") }
-        guard (1...10).contains(keyframeSeconds) else { throw NativeMediaError("Unsupported keyframe interval.") }
+        // 0: keyframes only when requested (VideoToolbox's "no limit").
+        guard (0...10).contains(keyframeSeconds) else { throw NativeMediaError("Unsupported keyframe interval.") }
         self.width = width; self.height = height; self.codec = codec
         targetBitrate = bitrate; appliedBitrate = bitrate
         targetFrameRate = framesPerSecond; appliedFrameRate = framesPerSecond
@@ -340,8 +341,8 @@ final class NativeVideoEncoder {
                 (kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse as CFTypeRef),
                 (kVTCompressionPropertyKey_AverageBitRate, bitrate as CFNumber),
                 (kVTCompressionPropertyKey_ExpectedFrameRate, framesPerSecond as CFNumber),
-                (kVTCompressionPropertyKey_MaxKeyFrameInterval, (framesPerSecond * keyframeSeconds) as CFNumber),
-                (kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, keyframeSeconds as CFNumber),
+                (kVTCompressionPropertyKey_MaxKeyFrameInterval, Self.keyframeInterval(keyframeSeconds, framesPerSecond).frames as CFNumber),
+                (kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, Self.keyframeInterval(keyframeSeconds, framesPerSecond).seconds as CFNumber),
                 (kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2 as CFTypeRef),
                 (kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_ITU_R_709_2 as CFTypeRef),
                 (kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2 as CFTypeRef)
@@ -387,8 +388,16 @@ final class NativeVideoEncoder {
     func setFrameRate(_ framesPerSecond: Int) {
         lock.lock(); targetFrameRate = min(60, max(1, framesPerSecond)); lock.unlock()
     }
+    /// 0: keyframes only when requested.
     func setKeyframeSeconds(_ seconds: Int) {
-        lock.lock(); targetKeyframeSeconds = min(10, max(1, seconds)); lock.unlock()
+        lock.lock(); targetKeyframeSeconds = min(10, max(0, seconds)); lock.unlock()
+    }
+    /// The encoder's limits for `seconds` (0: only when requested). Zero, which
+    /// VideoToolbox documents as no limit, gives a keyframe every 32 frames on
+    /// Apple silicon's HEVC encoder, so "only when requested" is an hour.
+    static func keyframeInterval(_ seconds: Int, _ framesPerSecond: Int) -> (frames: Int, seconds: Int) {
+        let interval = seconds == 0 ? 3600 : seconds
+        return (framesPerSecond * interval, interval)
     }
     /// 1 serializes encoding and sending; 2 overlaps them.
     func setInFlightLimit(_ limit: Int) {
@@ -458,8 +467,10 @@ final class NativeVideoEncoder {
             if frameRate != self.appliedFrameRate || keyframeSeconds != self.appliedKeyframeSeconds {
                 let applied = [
                     VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: frameRate as CFNumber),
-                    VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: (frameRate * keyframeSeconds) as CFNumber),
-                    VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: keyframeSeconds as CFNumber)
+                    VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                                         value: Self.keyframeInterval(keyframeSeconds, frameRate).frames as CFNumber),
+                    VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
+                                         value: Self.keyframeInterval(keyframeSeconds, frameRate).seconds as CFNumber)
                 ].allSatisfy { $0 == noErr }
                 if applied { self.appliedFrameRate = frameRate; self.appliedKeyframeSeconds = keyframeSeconds }
             }
@@ -624,12 +635,12 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var displayChangeReported = false
 
     init(maxPixelWidth: Int = 3840, maxPixelHeight: Int = 2160, framesPerSecond: Int = 60, showsCursor: Bool = true,
-         bitrate: Int = 25_000_000, keyframeSeconds: Int = 2, inFlightLimit: Int = NativeVideoEncoder.maxInFlight,
+         bitrate: Int = 25_000_000, keyframeSeconds: Int = 0, inFlightLimit: Int = NativeVideoEncoder.maxInFlight,
          codec: NativeVideoCodec = .h264, capturesAudio: Bool = false) {
         requestedCodec = codec
         self.capturesAudio = capturesAudio
         self.bitrate = min(80_000_000, max(1_000_000, bitrate))
-        self.keyframeSeconds = min(10, max(1, keyframeSeconds))
+        self.keyframeSeconds = min(10, max(0, keyframeSeconds))
         self.inFlightLimit = min(NativeVideoEncoder.maxInFlight, max(1, inFlightLimit))
         self.showsCursor = showsCursor
         self.maxPixelWidth = min(3840, max(16, maxPixelWidth))
@@ -740,7 +751,7 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     func setKeyframeSeconds(_ seconds: Int) {
         precondition(Thread.isMainThread)
-        keyframeSeconds = min(10, max(1, seconds)); currentEncoder()?.setKeyframeSeconds(keyframeSeconds)
+        keyframeSeconds = min(10, max(0, seconds)); currentEncoder()?.setKeyframeSeconds(keyframeSeconds)
     }
     func setInFlightLimit(_ limit: Int) {
         precondition(Thread.isMainThread)

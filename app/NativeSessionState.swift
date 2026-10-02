@@ -289,7 +289,8 @@ struct NativeTuning: Equatable {
     var maxWidth: Int { Int(raw.max_width) }
     var fps: Int { Int(raw.fps) }
     var inFlight: Int { Int(raw.in_flight) }
-    var keyframeSeconds: Int { Int(raw.keyframe_seconds) }
+    /// 0: keyframes only when needed, Rust's ML_KEYFRAMES_ON_DEMAND.
+    var keyframeSeconds: Int { raw.keyframe_seconds == UInt8(ML_KEYFRAMES_ON_DEMAND) ? 0 : Int(raw.keyframe_seconds) }
     static func == (left: Self, right: Self) -> Bool {
         left.bitrate == right.bitrate && left.maxWidth == right.maxWidth && left.fps == right.fps
             && left.inFlight == right.inFlight && left.keyframeSeconds == right.keyframeSeconds

@@ -97,7 +97,8 @@ An accepted session is the sharing host; a connected session is the viewer.
 - **Telemetry**: stats (up to 32 distinct metric IDs with finite values from 0 to
   1e9) from either side about once a second, and tuning from the viewer only:
   bitrate 1–80 Mbps, maximum capture width 640–3840 (even), frame rate 1–60,
-  frames in flight 1–2 and keyframe interval 1–10 s, where zero means unchanged.
+  frames in flight 1–2 and keyframe interval 1–10 s or `ML_KEYFRAMES_ON_DEMAND` (255,
+  the default: only when needed), where zero means unchanged.
 
 Fields a kind does not use must be zero. Invalid or misdirected sends return
 `INVALID` before any byte is written and leave the session open. On receive, a

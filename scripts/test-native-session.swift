@@ -423,7 +423,7 @@ extension NativeSessionTests {
     static func testTelemetry() throws {
         let defaults = NativeTuning.defaults
         try require(defaults.bitrate == 25_000_000 && defaults.maxWidth == 3840 && defaults.fps == 60
-                    && defaults.inFlight == 2 && defaults.keyframeSeconds == 2, "Rust supplies the tuning defaults")
+                    && defaults.inFlight == 2 && defaults.keyframeSeconds == 0, "Rust supplies the tuning defaults")
         var change = MLTuning(); change.fps = 30; change.bitrate_kbps = 12_000
         let merged = defaults.merged(NativeTuning(raw: change))
         try require(merged?.fps == 30 && merged?.bitrate == 12_000_000 && merged?.maxWidth == 3840, "Tuning merges present fields")

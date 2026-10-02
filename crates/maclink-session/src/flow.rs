@@ -53,18 +53,33 @@ pub(crate) struct FlowState {
 /// Once a second, from the milliseconds frames waited for the send buffer:
 /// the bitrate for the next second, never above the tuned `ceiling_kbps`.
 /// Two congested seconds of the last four lower it to three quarters; each
-/// three clear seconds raise it 10% (at least 500 kbps). A single slow second,
-/// as for one large keyframe, changes nothing.
+/// three clear seconds raise it 10% (at least 500 kbps). A single slow second
+/// changes nothing.
+///
+/// `after_keyframe`: a keyframe went out this second or the one before. A
+/// keyframe of a sharp 4:4:4 screen can be a megabyte, and draining it is the
+/// keyframe's cost, not a sign of a slow connection: such a second, if
+/// congested, is left out, neither lowering the bitrate nor counting as clear.
 pub(crate) fn next_bitrate(
     current_kbps: u32,
     ceiling_kbps: u32,
     state: FlowState,
     waited_ms: u32,
+    after_keyframe: bool,
 ) -> (u32, FlowState) {
     let floor = MIN_BITRATE_KBPS.min(ceiling_kbps);
     let ceiling = ceiling_kbps.max(floor);
     let current = current_kbps.clamp(floor, ceiling);
     let congested = waited_ms >= CONGESTED_WAIT_MS;
+    if congested && after_keyframe {
+        return (
+            current,
+            FlowState {
+                recent: (state.recent << 1) & 0b1111,
+                clear_seconds: state.clear_seconds,
+            },
+        );
+    }
     let recent = ((state.recent << 1) | u32::from(congested)) & 0b1111;
     if recent.count_ones() >= CONGESTED_OF_FOUR {
         return ((current / 4 * 3).max(floor), FlowState::default());
@@ -117,12 +132,64 @@ mod tests {
         assert_eq!(queue_limit(u32::MAX, u64::MAX), MAX_QUEUE_LIMIT_BYTES);
     }
 
-    fn run(mut kbps: u32, ceiling: u32, seconds: &[u32]) -> (u32, FlowState) {
+    fn run(kbps: u32, ceiling: u32, seconds: &[u32]) -> (u32, FlowState) {
+        let plain: Vec<(u32, bool)> = seconds.iter().map(|waited| (*waited, false)).collect();
+        run_keyed(kbps, ceiling, &plain)
+    }
+    /// Each second: how long frames waited, and whether it follows a keyframe.
+    fn run_keyed(mut kbps: u32, ceiling: u32, seconds: &[(u32, bool)]) -> (u32, FlowState) {
         let mut state = FlowState::default();
-        for waited in seconds {
-            (kbps, state) = next_bitrate(kbps, ceiling, state, *waited);
+        for (waited, keyframe) in seconds {
+            (kbps, state) = next_bitrate(kbps, ceiling, state, *waited, *keyframe);
         }
         (kbps, state)
+    }
+
+    #[test]
+    fn a_keyframes_slow_seconds_are_left_out() {
+        let slow = CONGESTED_WAIT_MS;
+        // A megabyte keyframe drains across its second and the next: no cut.
+        assert_eq!(
+            run_keyed(25_000, 25_000, &[(slow, true), (slow, true), (0, false)]).0,
+            25_000
+        );
+        // Two keyframes close together, as at a session's start and its first
+        // resize, cost nothing either.
+        assert_eq!(
+            run_keyed(
+                25_000,
+                25_000,
+                &[
+                    (slow, true),
+                    (slow, true),
+                    (0, false),
+                    (slow, true),
+                    (slow, true)
+                ]
+            )
+            .0,
+            25_000
+        );
+        // Left out, not clear: they don't count toward raising it.
+        assert_eq!(
+            run_keyed(
+                10_000,
+                25_000,
+                &[(0, false), (slow, true), (0, false), (slow, true)]
+            )
+            .0,
+            10_000
+        );
+        // A slow connection still shows between keyframes.
+        assert_eq!(
+            run_keyed(
+                25_000,
+                25_000,
+                &[(slow, true), (slow, false), (slow, false)]
+            )
+            .0,
+            18_750
+        );
     }
 
     #[test]
@@ -181,7 +248,7 @@ mod tests {
             clear_seconds: u32::MAX,
         };
         assert_eq!(
-            next_bitrate(u32::MAX, u32::MAX, state, 0).0,
+            next_bitrate(u32::MAX, u32::MAX, state, 0, false).0,
             u32::MAX / 4 * 3
         );
         let clear = FlowState {
@@ -190,7 +257,7 @@ mod tests {
         };
         // One slow second after a clear history keeps the bitrate.
         assert_eq!(
-            next_bitrate(u32::MAX, u32::MAX, clear, u32::MAX).0,
+            next_bitrate(u32::MAX, u32::MAX, clear, u32::MAX, false).0,
             u32::MAX
         );
     }
