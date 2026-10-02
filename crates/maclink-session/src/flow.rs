@@ -35,6 +35,10 @@ const CONGESTED_OF_FOUR: u32 = 2;
 const BACKLOG_BYTES: u32 = 64 * 1024;
 /// A second's link rate needs at least this much time backlogged.
 const MIN_BACKLOG_MS: u64 = 40;
+/// Nothing sent for this long while backlogged is a stall, as when Wi-Fi
+/// pauses, not the link's pace: that time doesn't count. Shorter gaps, as
+/// between packets on a slow link, do.
+const STALL_MS: u64 = 50;
 /// Clear seconds after which the remembered link rate rises a tenth.
 const PROBE_SECONDS: u32 = 30;
 
@@ -45,6 +49,8 @@ pub(crate) struct LinkMeter {
     pub last_sent: u64,
     pub busy_ms: u64,
     pub busy_bytes: u64,
+    /// Backlogged time since bytes were last sent, not yet counted.
+    pub idle_ms: u64,
     pub last_queued: u32,
     pub started: u32,
 }
@@ -52,14 +58,22 @@ pub(crate) struct LinkMeter {
 impl LinkMeter {
     /// One reading of the send buffer: what is queued in it, and the bytes
     /// the connection has sent so far. Time between two backlogged readings
-    /// counts toward the link's rate.
+    /// counts toward the link's rate, except a stall.
     pub(crate) fn sample(&mut self, now_ms: u64, sent_bytes: u64, queued_bytes: u32) {
-        if self.started != 0
+        let backlogged = self.started != 0
             && now_ms > self.last_ms
             && sent_bytes >= self.last_sent
             && self.last_queued >= BACKLOG_BYTES
-            && queued_bytes >= BACKLOG_BYTES
-        {
+            && queued_bytes >= BACKLOG_BYTES;
+        if !backlogged {
+            self.idle_ms = 0;
+        } else if sent_bytes == self.last_sent {
+            self.idle_ms = self.idle_ms.saturating_add(now_ms - self.last_ms);
+        } else {
+            if self.idle_ms < STALL_MS {
+                self.busy_ms = self.busy_ms.saturating_add(self.idle_ms);
+            }
+            self.idle_ms = 0;
             self.busy_ms = self.busy_ms.saturating_add(now_ms - self.last_ms);
             self.busy_bytes = self.busy_bytes.saturating_add(sent_bytes - self.last_sent);
         }
@@ -107,6 +121,9 @@ pub(crate) struct FlowState {
     pub limit_kbps: u32,
     /// Clear seconds since the last cut or probe.
     pub held_seconds: u32,
+    /// What the host sent, as a maximum that decays an eighth each clear second,
+    /// kbit/s.
+    pub peak_kbps: u32,
 }
 
 /// Once a second, from the milliseconds frames waited for the send buffer:
@@ -121,8 +138,11 @@ pub(crate) struct FlowState {
 /// congested, is left out, neither lowering the bitrate nor counting as clear.
 ///
 /// `link_kbps`: the link's rate measured this second while video waited for
-/// it (LinkMeter), or 0. A cut goes to three quarters of it when that is
-/// lower than three quarters of the bitrate, and the link's rate is
+/// it (LinkMeter), or 0. `sent_kbps`: what the host sent this second. The
+/// link carries at least what it recently carried, so the link's rate is
+/// taken as no less than the recent peak of what was sent: a slow trickle
+/// after a stall isn't the link. A cut goes to three quarters of that rate
+/// when that is lower than three quarters of the bitrate, and the rate is
 /// remembered: climbing back stops at nine tenths of it. Each 30 clear
 /// seconds the remembered rate rises a tenth; a measured rate above it
 /// replaces it, and one the ceiling no longer reaches is forgotten.
@@ -133,11 +153,18 @@ pub(crate) fn next_bitrate(
     waited_ms: u32,
     after_keyframe: bool,
     link_kbps: u32,
+    sent_kbps: u32,
 ) -> (u32, FlowState) {
     let floor = MIN_BITRATE_KBPS.min(ceiling_kbps);
     let ceiling = ceiling_kbps.max(floor);
     let current = current_kbps.clamp(floor, ceiling);
     let congested = waited_ms >= CONGESTED_WAIT_MS;
+    // Decays only in clear seconds: a stall's trickle wears nothing down.
+    let peak = if congested {
+        sent_kbps.max(state.peak_kbps)
+    } else {
+        sent_kbps.max(state.peak_kbps - state.peak_kbps / 8)
+    };
     let mut limit = state.limit_kbps;
     if limit > 0 && link_kbps > limit {
         limit = link_kbps;
@@ -148,6 +175,7 @@ pub(crate) fn next_bitrate(
             FlowState {
                 recent: (state.recent << 1) & 0b1111,
                 limit_kbps: limit,
+                peak_kbps: peak,
                 ..state
             },
         );
@@ -156,13 +184,15 @@ pub(crate) fn next_bitrate(
     if recent.count_ones() >= CONGESTED_OF_FOUR {
         let mut cut = current / 4 * 3;
         if link_kbps > 0 {
-            cut = cut.min(link_kbps / 4 * 3);
-            limit = link_kbps;
+            let link = link_kbps.max(peak);
+            cut = cut.min(link / 4 * 3);
+            limit = link;
         }
         return (
             cut.max(floor),
             FlowState {
                 limit_kbps: limit,
+                peak_kbps: peak,
                 ..FlowState::default()
             },
         );
@@ -189,6 +219,7 @@ pub(crate) fn next_bitrate(
         clear_seconds,
         limit_kbps: limit,
         held_seconds,
+        peak_kbps: peak,
     };
     if clear_seconds < CLEAR_SECONDS {
         return (current, next);
@@ -247,15 +278,44 @@ mod tests {
     /// Each second: how long frames waited, whether it follows a keyframe,
     /// and the link's measured rate.
     fn run_linked(
+        kbps: u32,
+        ceiling: u32,
+        state: FlowState,
+        seconds: &[(u32, bool, u32)],
+    ) -> (u32, FlowState) {
+        let sent: Vec<(u32, bool, u32, u32)> = seconds
+            .iter()
+            .map(|(waited, keyframe, link)| (*waited, *keyframe, *link, 0))
+            .collect();
+        run_sent(kbps, ceiling, state, &sent)
+    }
+    /// As run_linked, with what was sent each second.
+    fn run_sent(
         mut kbps: u32,
         ceiling: u32,
         mut state: FlowState,
-        seconds: &[(u32, bool, u32)],
+        seconds: &[(u32, bool, u32, u32)],
     ) -> (u32, FlowState) {
-        for (waited, keyframe, link) in seconds {
-            (kbps, state) = next_bitrate(kbps, ceiling, state, *waited, *keyframe, *link);
+        for (waited, keyframe, link, sent) in seconds {
+            (kbps, state) = next_bitrate(kbps, ceiling, state, *waited, *keyframe, *link, *sent);
         }
         (kbps, state)
+    }
+
+    #[test]
+    fn a_stall_isnt_taken_for_a_slow_link() {
+        let slow = CONGESTED_WAIT_MS;
+        // At home the content was sending 15 Mbps without trouble; then Wi-Fi
+        // paused and only a trickle went out while frames waited.
+        let mut seconds = vec![(0, false, 0, 15_000); 3];
+        seconds.extend([(slow, false, 2_000, 1_500), (slow, false, 2_000, 1_000)]);
+        let (kbps, state) = run_sent(25_000, 25_000, FlowState::default(), &seconds);
+        assert_eq!((kbps, state.limit_kbps), (11_250, 15_000));
+        // Away, what was sent and what was measured agree.
+        let mut seconds = vec![(0, false, 0, 9_000); 3];
+        seconds.extend([(slow, false, 9_500, 9_300), (slow, false, 9_400, 9_200)]);
+        let (kbps, state) = run_sent(25_000, 25_000, FlowState::default(), &seconds);
+        assert_eq!((kbps, state.limit_kbps), (7_050, 9_400));
     }
 
     #[test]
@@ -285,7 +345,7 @@ mod tests {
             limit_kbps: 9_400,
             ..FlowState::default()
         };
-        (_, faster) = next_bitrate(8_460, 25_000, faster, 50, false, 20_000);
+        (_, faster) = next_bitrate(8_460, 25_000, faster, 50, false, 20_000, 0);
         assert_eq!(faster.limit_kbps, 20_000);
         // One the ceiling no longer reaches is forgotten.
         let (kbps, state) = run_linked(
@@ -323,6 +383,25 @@ mod tests {
         meter.sample(1_400, 10, busy);
         meter.sample(1_500, 125_010, busy);
         assert_eq!(meter.take_kbps(), 10_000);
+        // A stall, nothing sent for 50 ms or more while frames wait, doesn't
+        // count; short gaps between packets do.
+        let mut meter = LinkMeter::default();
+        meter.sample(0, 0, busy);
+        meter.sample(50, 62_500, busy);
+        for now in (60..=400).step_by(10) {
+            meter.sample(now, 62_500, busy);
+        }
+        meter.sample(450, 125_000, busy);
+        assert_eq!(meter.take_kbps(), 10_000, "a 350 ms stall left out");
+        meter.sample(470, 125_000, busy);
+        meter.sample(500, 150_000, busy);
+        meter.sample(520, 150_000, busy);
+        meter.sample(550, 162_500, busy);
+        assert_eq!(
+            meter.take_kbps(),
+            3_000,
+            "gaps under 50 ms are the link's pace"
+        );
     }
 
     #[test]
@@ -428,9 +507,10 @@ mod tests {
             clear_seconds: u32::MAX,
             limit_kbps: u32::MAX,
             held_seconds: u32::MAX,
+            peak_kbps: u32::MAX,
         };
         assert_eq!(
-            next_bitrate(u32::MAX, u32::MAX, state, 0, false, 0).0,
+            next_bitrate(u32::MAX, u32::MAX, state, 0, false, 0, 0).0,
             u32::MAX / 4 * 3
         );
         let clear = FlowState {
@@ -440,7 +520,16 @@ mod tests {
         };
         // One slow second after a clear history keeps the bitrate.
         assert_eq!(
-            next_bitrate(u32::MAX, u32::MAX, clear, u32::MAX, false, u32::MAX).0,
+            next_bitrate(
+                u32::MAX,
+                u32::MAX,
+                clear,
+                u32::MAX,
+                false,
+                u32::MAX,
+                u32::MAX
+            )
+            .0,
             u32::MAX
         );
     }

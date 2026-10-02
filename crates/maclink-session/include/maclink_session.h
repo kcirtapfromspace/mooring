@@ -289,12 +289,12 @@ typedef struct {
 /* Pacing history kept by the host between bitrate updates; start zeroed.
  * limit_kbps is the link's rate when it last ran out (0: unknown). */
 typedef struct {
-    uint32_t recent, clear_seconds, limit_kbps, held_seconds;
+    uint32_t recent, clear_seconds, limit_kbps, held_seconds, peak_kbps;
 } MLFlowState;
 /* Measures the link's rate while video waits in the send buffer; start
  * zeroed and leave the fields to the meter. */
 typedef struct {
-    uint64_t last_ms, last_sent, busy_ms, busy_bytes;
+    uint64_t last_ms, last_sent, busy_ms, busy_bytes, idle_ms;
     uint32_t last_queued, started;
 } MLLinkMeter;
 
@@ -421,8 +421,8 @@ _Static_assert(offsetof(MLVideoPacket, avcc_length) == 72, "MLVideoPacket.avcc_l
 _Static_assert(sizeof(MLSessionMessage) == 872, "MLSessionMessage layout");
 _Static_assert(sizeof(MLClockSample) == 24 && offsetof(MLClockSample, host_us) == 16, "MLClockSample layout");
 _Static_assert(sizeof(MLSendQueue) == 24 && offsetof(MLSendQueue, sent_bytes) == 8, "MLSendQueue layout");
-_Static_assert(sizeof(MLFlowState) == 16, "MLFlowState layout");
-_Static_assert(sizeof(MLLinkMeter) == 40 && offsetof(MLLinkMeter, last_queued) == 32, "MLLinkMeter layout");
+_Static_assert(sizeof(MLFlowState) == 20, "MLFlowState layout");
+_Static_assert(sizeof(MLLinkMeter) == 48 && offsetof(MLLinkMeter, last_queued) == 40, "MLLinkMeter layout");
 _Static_assert(sizeof(MLClockEstimate) == 16 && offsetof(MLClockEstimate, error_us) == 8, "MLClockEstimate layout");
 _Static_assert(offsetof(MLSessionMessage, audio) == 848, "MLSessionMessage.audio layout");
 _Static_assert(sizeof(MLAudioMessage) == 24 && offsetof(MLAudioMessage, frames) == 4
@@ -530,16 +530,19 @@ int32_t ml_release_display(uint64_t packed, char *out, size_t capacity);
  * three clear seconds raise it 10% (at least 500 kbps), between 4 Mbps (or a
  * lower ceiling) and the tuned ceiling. after_keyframe (1): a keyframe went
  * out this second or the one before; if congested, the second is left out.
- * link_kbps: the link's rate this second from ml_flow_link_take_kbps, or 0.
- * A cut then goes no higher than three quarters of it, and climbing back
- * stops at nine tenths of the rate where the link last ran out, which rises
- * a tenth for each 30 clear seconds. Sample the meter with each send-buffer
- * reading: only time with 64 KiB or more queued counts. */
+ * link_kbps: the link's rate this second from ml_flow_link_take_kbps, or 0;
+ * sent_kbps: what was sent this second. The link's rate is taken as no less
+ * than the recent peak of what was sent. A cut then goes no higher than
+ * three quarters of it, and climbing back stops at nine tenths of the rate
+ * where the link last ran out, which rises a tenth for each 30 clear
+ * seconds. Sample the meter with each send-buffer reading: only time with
+ * 64 KiB or more queued counts, and not a stall of 50 ms or more with nothing
+ * sent. */
 int32_t ml_session_send_queue(uint64_t session, MLSendQueue *out);
 uint32_t ml_flow_queue_limit(uint32_t min_round_trip_ms, uint64_t sent_bytes_per_second);
 int32_t ml_flow_admits_frame(uint32_t queued_bytes, uint32_t limit);
 int32_t ml_flow_next_bitrate(uint32_t current_kbps, uint32_t ceiling_kbps, uint32_t waited_ms, uint8_t after_keyframe,
-                             uint32_t link_kbps, MLFlowState *state, uint32_t *kbps_out);
+                             uint32_t link_kbps, uint32_t sent_kbps, MLFlowState *state, uint32_t *kbps_out);
 int32_t ml_flow_link_sample(MLLinkMeter *meter, uint64_t now_ms, const MLSendQueue *queue);
 uint32_t ml_flow_link_take_kbps(MLLinkMeter *meter);
 /* Pass an ML_SESSION_MAX_VIDEO buffer: video, pointers and sound (to viewers)

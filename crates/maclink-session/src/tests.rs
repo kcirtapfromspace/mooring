@@ -2102,14 +2102,14 @@ fn hosts_read_their_send_queue_and_pacing_crosses_the_c_abi() {
     // Slow seconds right after a keyframe are left out.
     for _ in 0..2 {
         assert_eq!(
-            unsafe { ml_flow_next_bitrate(25_000, 25_000, 200, 1, 0, &mut state, &mut kbps) },
+            unsafe { ml_flow_next_bitrate(25_000, 25_000, 200, 1, 0, 0, &mut state, &mut kbps) },
             0
         );
     }
     assert_eq!((kbps, state.recent), (25_000, 0));
     for _ in 0..2 {
         assert_eq!(
-            unsafe { ml_flow_next_bitrate(25_000, 25_000, 200, 0, 0, &mut state, &mut kbps) },
+            unsafe { ml_flow_next_bitrate(25_000, 25_000, 200, 0, 0, 0, &mut state, &mut kbps) },
             0
         );
     }
@@ -2130,7 +2130,7 @@ fn hosts_read_their_send_queue_and_pacing_crosses_the_c_abi() {
     let mut state = MLFlowState::default();
     for _ in 0..2 {
         assert_eq!(
-            unsafe { ml_flow_next_bitrate(25_000, 25_000, 200, 0, link, &mut state, &mut kbps) },
+            unsafe { ml_flow_next_bitrate(25_000, 25_000, 200, 0, link, 0, &mut state, &mut kbps) },
             0
         );
     }

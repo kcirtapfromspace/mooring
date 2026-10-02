@@ -149,6 +149,8 @@ pub struct MLFlowState {
     /// The link's rate when it last ran out, kbit/s; 0 if unknown.
     pub limit_kbps: u32,
     pub held_seconds: u32,
+    /// Recent peak of what was sent, kbit/s.
+    pub peak_kbps: u32,
 }
 /// Measures the link's rate while video waits in the send buffer; start
 /// zeroed. Fields are the meter's own.
@@ -159,6 +161,7 @@ pub struct MLLinkMeter {
     pub last_sent: u64,
     pub busy_ms: u64,
     pub busy_bytes: u64,
+    pub idle_ms: u64,
     pub last_queued: u32,
     pub started: u32,
 }
@@ -374,8 +377,8 @@ const _: () = {
     assert!(size_of::<MLSessionMessage>() == 872);
     assert!(size_of::<MLClockSample>() == 24 && offset_of!(MLClockSample, host_us) == 16);
     assert!(size_of::<MLSendQueue>() == 24 && offset_of!(MLSendQueue, sent_bytes) == 8);
-    assert!(size_of::<MLFlowState>() == 16);
-    assert!(size_of::<MLLinkMeter>() == 40 && offset_of!(MLLinkMeter, last_queued) == 32);
+    assert!(size_of::<MLFlowState>() == 20);
+    assert!(size_of::<MLLinkMeter>() == 48 && offset_of!(MLLinkMeter, last_queued) == 40);
     assert!(size_of::<MLClockEstimate>() == 16 && offset_of!(MLClockEstimate, error_us) == 8);
     assert!(offset_of!(MLSessionMessage, audio) == 848);
     assert!(size_of::<MLAudioMessage>() == 24);
@@ -1375,6 +1378,7 @@ fn link_meter(raw: &MLLinkMeter) -> crate::flow::LinkMeter {
         last_sent: raw.last_sent,
         busy_ms: raw.busy_ms,
         busy_bytes: raw.busy_bytes,
+        idle_ms: raw.idle_ms,
         last_queued: raw.last_queued,
         started: raw.started,
     }
@@ -1385,14 +1389,16 @@ fn link_meter_out(meter: crate::flow::LinkMeter) -> MLLinkMeter {
         last_sent: meter.last_sent,
         busy_ms: meter.busy_ms,
         busy_bytes: meter.busy_bytes,
+        idle_ms: meter.idle_ms,
         last_queued: meter.last_queued,
         started: meter.started,
     }
 }
 /// The host's bitrate for the next second, from the milliseconds frames
 /// waited for the send buffer in the last one, whether a keyframe went out in
-/// it or the one before, and the link's rate measured in it, or 0 (see
-/// flow::next_bitrate). The caller keeps `state`, zeroed at session start.
+/// it or the one before, the link's rate measured in it (or 0), and what was
+/// sent in it, in kbit/s (see flow::next_bitrate). The caller keeps `state`,
+/// zeroed at session start.
 /// # Safety
 /// `state` and `kbps_out` must be writable.
 #[unsafe(no_mangle)]
@@ -1402,6 +1408,7 @@ pub unsafe extern "C" fn ml_flow_next_bitrate(
     waited_ms: u32,
     after_keyframe: u8,
     link_kbps: u32,
+    sent_kbps: u32,
     state: *mut MLFlowState,
     kbps_out: *mut u32,
 ) -> i32 {
@@ -1413,6 +1420,7 @@ pub unsafe extern "C" fn ml_flow_next_bitrate(
             clear_seconds: state.clear_seconds,
             limit_kbps: state.limit_kbps,
             held_seconds: state.held_seconds,
+            peak_kbps: state.peak_kbps,
         };
         let (kbps, next) = crate::flow::next_bitrate(
             current_kbps,
@@ -1421,12 +1429,14 @@ pub unsafe extern "C" fn ml_flow_next_bitrate(
             waited_ms,
             after_keyframe != 0,
             link_kbps,
+            sent_kbps,
         );
         *state = MLFlowState {
             recent: next.recent,
             clear_seconds: next.clear_seconds,
             limit_kbps: next.limit_kbps,
             held_seconds: next.held_seconds,
+            peak_kbps: next.peak_kbps,
         };
         *kbps_out = kbps;
         Ok(())

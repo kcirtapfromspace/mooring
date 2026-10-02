@@ -1680,9 +1680,11 @@ final class NativeSessionCoordinator {
         let afterKeyframe = hostTuning.keyframeSeconds == 0 && (keyframe || keyframeLastSecond)
         keyframeLastSecond = keyframe
         // What the link carried while video waited for it: where a cut goes.
+        // What was sent keeps a stall from passing for a slow link.
         let link = flowLimit.takeLinkKbps()
         lastLinkKbps = link
-        guard ml_flow_next_bitrate(flowKbps, UInt32(hostTuning.bitrate / 1000), waited, afterKeyframe ? 1 : 0, link,
+        let sent = UInt32(min(max(interval.rate("sent_video_bytes") * 8 / 1000, 0), Double(UInt32.max)))
+        guard ml_flow_next_bitrate(flowKbps, UInt32(hostTuning.bitrate / 1000), waited, afterKeyframe ? 1 : 0, link, sent,
                                    &flowState, &kbps) == ML_SESSION_OK else { return }
         let previous = flowKbps
         flowKbps = kbps

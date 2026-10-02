@@ -476,15 +476,21 @@ For `v0.3.0-preview.25`, pacing cuts against what the link carries rather than a
   - Rust's `LinkMeter` takes each send-buffer reading: bytes queued, and the kernel's total sent.
   - Time between two readings that both had 64 KiB or more queued counts, since the kernel is then sending as fast as the connection allows.
   - The rate over at least 40 ms of such time each second is the link's rate. A counter that goes backwards is ignored.
+  - A run of 50 ms or more with nothing sent is a stall, as when Wi-Fi pauses and no acknowledgments arrive, and doesn't count. Shorter gaps, as between packets on a slow link, do.
   - The host samples at every frame admission and at every few-millisecond retry while a frame waits.
 - **Rule.**
-  - A cut is `min(¾ × target, ¾ × measured link)`, and the measured rate is remembered.
+  - The link's rate is taken as no less than the recent peak of what was sent. That peak decays an eighth each clear second, not in congested ones, so a trickle after a stall can't pass for the link.
+  - A cut is `min(¾ × target, ¾ × link)`, and that rate is remembered.
   - Raises stop at nine tenths of it.
   - Each 30 clear seconds the remembered rate rises a tenth. A higher measured rate replaces it, and one whose nine tenths reaches the ceiling is forgotten.
   - Without a measurement, the earlier rule applies unchanged.
-  - `MLFlowState` grows to 16 bytes, and `MLLinkMeter` is 40, asserted on both sides.
+  - `MLFlowState` grows to 20 bytes, and `MLLinkMeter` is 48, asserted on both sides.
 - **Telemetry.** `link_mbps` (metric 21) is local only, like the other pacing figures. It is present only in seconds with a measurement.
-- **Checks.** Rust tests cover the cut, the stop, the probe, a faster link, forgetting, keyframe seconds and the meter's rules. The Swift check feeds real readings 100 ms apart through `NativeFlowLimit` to confirm units.
+- **Checks.**
+  - Rust tests cover the cut, the stop, the probe, a faster link, forgetting, keyframe seconds and the meter's rules.
+  - A home stall: 15 Mbps sent cleanly, then two congested seconds measuring 2 Mbps. That cuts to 11.25 Mbps and remembers 15, where a naive meter would remember 2 and drop to the floor. Removing the peak floor or the stall rule fails these tests.
+  - The Swift check feeds real readings 100 ms apart through `NativeFlowLimit` to confirm units.
+- **Trade-off at home.** After a genuine slowdown, recovery to the ceiling is probe-paced (a tenth per 30 clear seconds), so it takes minutes rather than the earlier 13 s.
 - **Between two Macs.** Not yet measured after the change: `link_mbps` and `bitrate_mbps` from away with busy content.
 
 ## Media feasibility
