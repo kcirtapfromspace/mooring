@@ -21,9 +21,11 @@ Now, across the internet (a round trip of 10 ms or more), the limit fits the lin
 - plus 20 ms of sending for the next frame, sized from the busiest of the last ten seconds;
 - and never less than 48 KiB, for a sudden large frame.
 
-Over your remote link at about 10 Mbps, that's about 77 KiB instead of 128. Frames that would have waited in the buffer now wait in the app instead, where a newer frame replaces them, so what you see is fresher.
+Over your remote link at about 10 Mbps, that's about 77 KiB instead of 128. Expect roughly 10–20 ms less delay in ordinary seconds. During bursts it's up to about 50 ms less: frames that would have piled up in the buffer now wait in the app, where a newer frame replaces them, so what you see is fresher.
 
-At home, with a round trip under 10 ms, nothing changes.
+At home, with a round trip under 10 ms, nothing changes. A connection through a relay, such as Tailscale's when it can't connect directly, counts as across the internet.
+
+Big screen changes, like switching windows, still make very large frames that can overfill a slow link for a moment. Capping frame size is the next step for that.
 
 ## Validation
 
@@ -36,6 +38,9 @@ Local validation passed with the full suite, including 155 Rust session tests.
   - At home, at 3 or 9 ms, it stays 128 KiB whatever is sent.
   - It never goes above the earlier rule.
 - **Swift:** the limit follows the busiest of the last ten seconds, so one quiet second doesn't shrink it.
-- **Between the two Macs, from away:** `send_queue_kib` in `maclink telemetry` on the sharing Mac should drop from about 80–130 to about 50–80. The ping time on the viewer should drop by a similar 20–40 ms, with frame rate unchanged.
+- **Between the two Macs, from away:**
+  - `send_queue_kib` in `maclink telemetry` on the sharing Mac should mostly sit around 60–95, and rarely above 100 during bursts. It was 80–130 normally and 150+ in bursts.
+  - The viewer's ping time should drop by about 10–20 ms.
+  - `sent_mbps` for a busy screen should stay where it was, about 9–10. If it falls, the smaller limit is starving the link.
 
 Apple silicon and macOS 14 or later. Developer ID signed, notarized and stapled. Published to the public update feed. All CI and builds run on the local host; GitHub Actions is disabled on both repositories.

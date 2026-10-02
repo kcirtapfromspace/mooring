@@ -21,7 +21,9 @@ pub(crate) const QUEUE_LIMIT_BYTES: u32 = 128 * 1024;
 const MAX_QUEUE_LIMIT_BYTES: u32 = 4 * 1024 * 1024;
 /// On a slow link the 128 KiB floor is itself the delay: about 100 ms at
 /// 10 Mbit/s. There the limit is what keeps the link busy, plus this much
-/// time for the next frame, but never under the smaller floor.
+/// time for the next frame, but never under the smaller floor. The next
+/// frame arrives about 17 ms after it is admitted; 20 ms of sending beyond
+/// what is in flight keeps the link from running dry meanwhile.
 const FRAME_HEADROOM_MS: u64 = 20;
 const MIN_QUEUE_LIMIT_BYTES: u32 = 48 * 1024;
 /// Below this round trip the connection is local, where 128 KiB drains in
@@ -284,6 +286,14 @@ mod tests {
         // Away at 10 Mbit/s and 28 ms: 35 kB in flight, 52.5 kB to stay busy,
         // and 25 kB for the next frame, instead of 128 KiB.
         assert_eq!(queue_limit(28, 1_250_000), 77_500);
+        // The link never runs dry: a frame admitted at the limit still has
+        // more queued than the 17 ms until the next one drains.
+        let (rate, round_trip) = (1_250_000_u64, 28_u32);
+        let drained_before_next = rate * 17 / 1000;
+        assert!(
+            u64::from(queue_limit(round_trip, rate))
+                > drained_before_next + rate * u64::from(round_trip) / 1000
+        );
         // A slow, calm link keeps 48 KiB for a sudden large frame.
         assert_eq!(queue_limit(28, 125_000), MIN_QUEUE_LIMIT_BYTES);
         // At home, whatever the screen sends, 128 KiB as before.

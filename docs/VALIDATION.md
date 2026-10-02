@@ -507,7 +507,8 @@ For `v0.3.0-preview.26`, the host's send-buffer limit fits a slow link across th
   - The rate is the most sent in any of the last ten seconds.
   - Under 10 ms, or before anything is sent, the earlier rule applies unchanged.
 - **Checks.** Rust: 77.5 kB at 10 Mbit/s and 28 ms; the 48 KiB floor; 128 KiB at 3 and 9 ms; and never above the earlier rule. Swift: `NativeFlowLimit` keeps the busiest recent second.
-- **Between two Macs.** Not yet measured after the change: `send_queue_kib` and ping time from away.
+- **Expected effect.** In ordinary seconds the queue should sit around 60–95 KiB, against 80–130, which is about 10–20 ms less. During bursts, where it had reached 150+, it's up to about 50 ms less. A relayed connection over 10 ms counts as across the internet.
+- **Between two Macs.** Not yet measured after the change: `send_queue_kib`, `sent_mbps` (which must not fall) and ping time from away.
 
 ## Media feasibility
 
