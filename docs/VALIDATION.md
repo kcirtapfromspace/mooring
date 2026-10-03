@@ -533,6 +533,32 @@ For `v0.3.0-preview.28`.
 - **Error.** `ConnectionRefused` now maps to the new `ML_SESSION_UNAVAILABLE` (−13): the other Mac answered, but MacLink isn't sharing there. In a multi-address connect it's kept over a later timeout from other addresses. The viewer shows it with the likely cause and keeps reconnecting. The Rust tests cover two closed addresses, and a closed one next to an unroutable one within the deadline.
 - **Toolchain.** Rust 1.99 deprecates `AtomicU64::fetch_update` and `AtomicUsize::fetch_update` in favor of `try_update`, and the two uses were renamed.
 
+## Waking for a returning viewer
+
+For `v0.3.0-preview.29`, which replaces the 12-hour wait of previews 22 to 28.
+
+- **Found (2026-10-02).**
+  - On the Mac Studio, the "lock" after display sleep is loginwindow's shield (`kLWLockFromDisplayDim`). It sets `CGSSessionScreenIsLocked`, but needs no password there: `sysadminctl -screenLock status` reports off.
+  - At 16:57:55, Screen Sharing declared user activity ("Remote user active"). loginwindow logged "Keybag was NOT locked" and lowered the shield 52 ms later, and MacLink resumed a second after that.
+  - The waits that day had been ended at 09:54 and 17:01 by the viewer's `Leaving`.
+- **Measured, with the user's consent.**
+  - `pmset displaysleepnow` raised the shield. A separate process's `IOPMAssertionDeclareUserActivity(kIOPMUserActiveRemote)` lowered it in 192 ms, with no password.
+  - 3.3 s later, Codex Computer Use's lock-screen guardian on that Mac locked the screen properly (`kAELockScreenEvent`). It does that for an unlock it didn't see a person cause. Screen Sharing's wakes hadn't triggered it.
+  - The user turned that feature off. MacLink does not try to look like a person to such tools.
+- **Host.**
+  - **Listening.** With automatic sharing, display sleep or a shield no longer stops sharing. A live session still ends at once, since a covered screen is never captured, but the listener stays open. `NativePrivacyGuard.mayListenNow` needs the user's session on the console and logged in, whatever the lock flag says. Pure checks cover it.
+  - **Waking.** An approved connection while the display sleeps or the screen is covered declares user activity; Rust has already authenticated it before Swift sees it. The host then checks every 100 ms, for up to `ML_HOST_WAKE_WAIT_MS` (5 s), until the session may share and the display is awake.
+    - The transport stays unread meanwhile, and the viewer's pings queue within `IDLE_LIMIT` (10 s). A Rust test keeps the wait at most half of it.
+    - Removal during the wait is checked again before the session starts.
+  - **A password.** A screen still asking for its password stops sharing. Later attempts are refused (`ML_SESSION_UNAVAILABLE`), so the display isn't woken again, and automatic sharing restarts only after an unlock: one wake per lock.
+  - **Starting.** Automatic sharing starts listening while the screen is covered, as after an update relaunched MacLink with the display off. Manual sharing still stops on a lock or display sleep.
+  - **The old wait.** Hosts no longer announce `ML_CAPABILITY_WAITS`, so viewers don't send them `Leaving`. Launch removes preview 28's saved wait (`native.waitForViewerUntil`). Viewers still send `Leaving` to previews 22–28.
+- **Viewer.** `ML_SESSION_UNAVAILABLE` switches reconnecting to the update schedule, every 3 s for two minutes, so an unlock is noticed within seconds.
+- **Cost.**
+  - A sharing Mac that asks for a password after its display sleeps stayed connectable through the 12-hour wait. Now it needs unlocking, with Screen Sharing for example, and MacLink says so.
+  - After a session drops, the display now turns off on its usual schedule.
+- **Not verified.** The wake was tested from a stand-alone process, not from MacLink, and not with a viewer connecting. Whether ScreenCaptureKit starts cleanly right after the wake is also untested. Both are checked in TESTING.md step 11.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

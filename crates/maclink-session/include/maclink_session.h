@@ -154,8 +154,11 @@ enum { ML_CODEC_H264 = 1, ML_CODEC_HEVC = 2 };
 #define ML_CAPABILITY_LATENCY 32ull /* clock replies and latency metrics; peers without it never receive them */
 #define ML_CAPABILITY_VERSION 64ull /* sends and reads the MacLink version and update status */
 #define ML_CAPABILITY_REMOTE_UPDATE 128ull /* a sharing Mac that updates itself when a viewer asks */
-#define ML_CAPABILITY_WAITS 256ull /* a sharing Mac that waits for a viewer whose session dropped */
-#define ML_VIEWER_WAIT_SECONDS 43200u /* it keeps its display on and takes connections this long */
+#define ML_CAPABILITY_WAITS 256ull /* previews 22-28: a sharing Mac that waits 12 h for a viewer whose session dropped */
+/* A sharing Mac whose display slept, or whose screen was covered, waits this
+ * long after waking it for an approved viewer; a screen still asking for its
+ * password then stops sharing until someone unlocks it. */
+#define ML_HOST_WAKE_WAIT_MS 5000u
 /* MLTuning.keyframe_seconds: keyframes only when needed (the default); 1-10
  * means one every N seconds. Local JSON shows and takes it as 0. */
 #define ML_KEYFRAMES_ON_DEMAND 255u
@@ -572,7 +575,8 @@ int32_t ml_input_keeps_local(uint16_t key_code, uint32_t modifiers);
  * before attempt 1...ML_RECONNECT_ATTEMPTS, then ML_SESSION_INVALID. A session
  * that stayed connected ML_RECONNECT_STABLE_SECONDS starts a new budget. */
 int32_t ml_reconnect_delay_ms(uint32_t attempt);
-/* While the sharing Mac installs an update: 3000 ms before attempts 1 to
+/* While the sharing Mac installs an update, or answers but isn't sharing
+ * (ML_SESSION_UNAVAILABLE): 3000 ms before attempts 1 to
  * ML_UPDATE_RECONNECT_ATTEMPTS (two minutes), then ML_SESSION_INVALID. */
 int32_t ml_update_reconnect_delay_ms(uint32_t attempt);
 

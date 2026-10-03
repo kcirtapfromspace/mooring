@@ -40,12 +40,18 @@ pub(crate) const CAPABILITY_VERSION: u64 = 1 << 6;
 /// This sharing Mac updates itself from the release feed, and checks when a
 /// viewer asks.
 pub(crate) const CAPABILITY_REMOTE_UPDATE: u64 = 1 << 7;
-/// This sharing Mac keeps its display on, and keeps taking connections, for a
-/// viewer whose session dropped without it saying it was leaving.
+/// Previews 22 to 28: this sharing Mac kept its display on for 12 hours, and
+/// kept taking connections, for a viewer whose session dropped without it
+/// saying it was leaving. Later hosts don't announce it: they keep listening
+/// while the display sleeps and wake it for a returning viewer instead.
+/// Viewers still tell an older host that announces it they are leaving.
 pub(crate) const CAPABILITY_WAITS: u64 = 1 << 8;
-/// How long a sharing Mac waits for a viewer whose session dropped: a night
-/// with the lid closed.
-pub(crate) const VIEWER_WAIT: Duration = Duration::from_secs(12 * 60 * 60);
+/// How long a sharing Mac whose display slept, or whose screen was covered,
+/// waits after waking it for an approved viewer before it can share. A cover
+/// that needs no password lifts in well under a second; one that asks for the
+/// password never does, and the host stops listening until someone unlocks
+/// it. The viewer's pings wait unread meanwhile, well within `IDLE_LIMIT`.
+pub(crate) const HOST_WAKE_WAIT: Duration = Duration::from_secs(5);
 /// Hosts send a cursor only when it changes; this stops a flood.
 const CURSORS_PER_WINDOW: u32 = 20;
 /// Four times the rate of 10 ms packets. Sound beyond it, as after a stall, is
@@ -82,7 +88,10 @@ pub(crate) const RECONNECT_DELAYS: [Duration; 5] = [
 pub(crate) const RECONNECT_STABLE: Duration = Duration::from_secs(20);
 
 /// After the viewer disconnects so the sharing Mac can install an update, it
-/// relaunches, runs its self-tests and shares again: try every 3 s for 2 minutes.
+/// relaunches, runs its self-tests and shares again: try every 3 s for 2
+/// minutes. Viewers also wait this way for a sharing Mac that answers but
+/// isn't sharing, as when its screen asks for a password, so they reconnect
+/// within seconds of someone unlocking it.
 pub(crate) const UPDATE_RECONNECT_INTERVAL: Duration = Duration::from_secs(3);
 pub(crate) const UPDATE_RECONNECT_ATTEMPTS: u32 = 40;
 
@@ -627,7 +636,13 @@ mod tests {
             Err(Error::Protocol),
             "hosts never leave this way"
         );
-        assert_eq!(VIEWER_WAIT, Duration::from_secs(43_200));
+    }
+
+    #[test]
+    fn a_waking_host_answers_before_the_viewer_gives_up() {
+        assert_eq!(HOST_WAKE_WAIT, Duration::from_secs(5));
+        // The host reads nothing while it waits; the viewer's pings queue.
+        assert!(HOST_WAKE_WAIT * 2 <= IDLE_LIMIT);
     }
 
     #[test]

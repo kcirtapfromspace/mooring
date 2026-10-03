@@ -77,8 +77,10 @@ enum NativeSessionTests {
     /// A one-time code approves this Mac's key, the saved pairing connects by
     /// it, and a removed Mac is refused. Loopback and a temporary list only.
     static func testDevicePairing() throws {
-        // Protocol 5 with what every build announces, so the viewer may say it's leaving.
-        ml_capabilities_set(NativeCapabilities.local(hevc444: false, virtualDisplay: false, audio: false))
+        // Protocol 5 with what every build announces, plus the wait of
+        // previews 22 to 28, so the viewer may say it's leaving as it does to
+        // such a host.
+        ml_capabilities_set(NativeCapabilities.local(hevc444: false, virtualDisplay: false, audio: false) | UInt64(ML_CAPABILITY_WAITS))
         defer { ml_capabilities_set(0) }
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("maclink-devices-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
@@ -167,9 +169,9 @@ enum NativeSessionTests {
     static func testLatency() throws {
         // Every build announces what it always supports; self-tests add the rest.
         let always = UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_GESTURES) | UInt64(ML_CAPABILITY_LATENCY)
-            | UInt64(ML_CAPABILITY_VERSION) | UInt64(ML_CAPABILITY_WAITS)
+            | UInt64(ML_CAPABILITY_VERSION)
         try require(NativeCapabilities.local(hevc444: false, virtualDisplay: false, audio: false) == always,
-                    "Pointer shapes, gestures, latency, versions and waiting for a dropped viewer are always announced")
+                    "Pointer shapes, gestures, latency and versions are always announced; the 12-hour wait no longer is")
         let everything = always | UInt64(ML_CAPABILITY_HEVC_444) | UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) | UInt64(ML_CAPABILITY_AUDIO)
             | UInt64(ML_CAPABILITY_REMOTE_UPDATE)
         try require(NativeCapabilities.local(hevc444: true, virtualDisplay: true, audio: true, updatesItself: true) == everything,

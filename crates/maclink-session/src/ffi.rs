@@ -1633,7 +1633,7 @@ pub const ML_CAPABILITY_VERSION: u64 = crate::policy::CAPABILITY_VERSION;
 pub const ML_CAPABILITY_REMOTE_UPDATE: u64 = crate::policy::CAPABILITY_REMOTE_UPDATE;
 pub const ML_CAPABILITY_WAITS: u64 = crate::policy::CAPABILITY_WAITS;
 pub const ML_KEYFRAMES_ON_DEMAND: u8 = crate::telemetry::KEYFRAMES_ON_DEMAND;
-pub const ML_VIEWER_WAIT_SECONDS: u64 = crate::policy::VIEWER_WAIT.as_secs();
+pub const ML_HOST_WAKE_WAIT_MS: u64 = crate::policy::HOST_WAKE_WAIT.as_millis() as u64;
 pub const ML_RELEASE_CAPACITY: usize = 64;
 pub const ML_AUDIO_MAX_PAYLOAD: usize = crate::audio::MAX_AUDIO_PAYLOAD;
 pub const ML_AUDIO_SAMPLE_RATE: u32 = crate::audio::SAMPLE_RATE;
@@ -1691,7 +1691,8 @@ pub extern "C" fn ml_reconnect_delay_ms(attempt: u32) -> i32 {
         .unwrap_or(Error::Invalid as i32)
 }
 pub const ML_UPDATE_RECONNECT_ATTEMPTS: u32 = crate::policy::UPDATE_RECONNECT_ATTEMPTS;
-/// As `ml_reconnect_delay_ms`, while the sharing Mac installs an update.
+/// As `ml_reconnect_delay_ms`, while the sharing Mac installs an update or
+/// answers but isn't sharing.
 #[unsafe(no_mangle)]
 pub extern "C" fn ml_update_reconnect_delay_ms(attempt: u32) -> i32 {
     crate::policy::update_reconnect_delay(attempt)

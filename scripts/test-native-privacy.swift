@@ -24,6 +24,20 @@ struct NativePrivacyTests {
                 fputs("Native privacy classification failed at case \(index).\n", stderr); exit(1)
             }
         }
-        print("NativePrivacyGuard: \(cases.count) pure checks passed; no live lock/unlock or notification behavior tested.")
+        // Listening ignores the lock flag, but never a session off the console
+        // or not yet logged in.
+        let listening: [([String: Any]?, Bool)] = [
+            (nil, false), ([:], false), ([console: true], false), ([login: true], false),
+            ([console: false, login: true, lock: false], false), ([console: true, login: false], false),
+            ([console: true, login: true], true), ([console: true, login: true, lock: false], true),
+            ([console: true, login: true, lock: true], true), ([console: true, login: true, lock: NSNull()], true),
+            ([console: "true", login: true], false), ([console: true, login: 1], false)
+        ]
+        for (index, test) in listening.enumerated() {
+            guard NativePrivacyGuard.sessionMayListen(test.0) == test.1 else {
+                fputs("Native privacy listening classification failed at case \(index).\n", stderr); exit(1)
+            }
+        }
+        print("NativePrivacyGuard: \(cases.count + listening.count) pure checks passed; no live lock/unlock or notification behavior tested.")
     }
 }

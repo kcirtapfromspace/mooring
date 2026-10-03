@@ -159,11 +159,14 @@ Hosts send `ML_SESSION_CURSOR` messages to such viewers, at most 20 per second:
 size and hotspot in points (at most 256), then a PNG (64 KiB at most).
 
 `ML_CAPABILITY_WAITS` means "this host waits for a viewer whose session
-dropped". A viewer that ends a session on purpose sends such a host
+dropped". Previews 22 to 28 announce it: after an end without
+`ML_CONTROL_LEAVING`, they keep their display on and keep taking connections for
+up to 12 hours. A viewer that ends a session on purpose sends such a host
 `ML_CONTROL_LEAVING`, all fields zero, just before closing. Rust refuses to send
 it to other hosts, and hosts without the capability treat one as a protocol
-violation. After an end without it, the host keeps its display on and keeps
-taking connections for up to `ML_VIEWER_WAIT_SECONDS` (12 hours).
+violation. Later hosts don't announce it. With automatic sharing they keep
+listening while their display sleeps or their screen is covered, and wake it for
+an approved viewer, waiting up to `ML_HOST_WAKE_WAIT_MS` for it to share.
 
 ## Shared clipboard
 

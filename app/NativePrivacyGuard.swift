@@ -7,7 +7,7 @@ import CoreGraphics
 /// signals, not documented Apple contracts. The lock flag is absent on this
 /// machine when unlocked. Real lock/unlock testing on supported OS releases is
 /// a release gate; absence of that field must not be described as proof of unlock.
-/// An unsafe notification only stops sharing. Unlock never resumes a session.
+/// An unsafe notification only ends a session. Unlock never resumes one.
 final class NativePrivacyGuard {
     private let lock = NSLock()
     private var active = true
@@ -20,7 +20,13 @@ final class NativePrivacyGuard {
     static func mayShareNow() -> Bool {
         sessionIsEligible(CGSessionCopyCurrentDictionary() as? [String: Any])
     }
-    /// Display sleep stops sharing, so automatic sharing waits for it to end.
+    /// Automatic sharing may keep listening, but never capture, while this
+    /// user's session is on the console with its display asleep or its screen
+    /// covered or locked; an approved Mac's connection then wakes it.
+    static func mayListenNow() -> Bool {
+        sessionMayListen(CGSessionCopyCurrentDictionary() as? [String: Any])
+    }
+    /// Display sleep ends a session; a viewer's connection wakes the display.
     static var displayIsAwake: Bool { CGDisplayIsAsleep(CGMainDisplayID()) == 0 }
     /// Pure classifier used by permission-free tests. Missing/ill-typed public
     /// session state fails closed; any present lock flag must be exactly false.
@@ -30,6 +36,12 @@ final class NativePrivacyGuard {
               boolean(session[kCGSessionLoginDoneKey as String]) == true else { return false }
         if let locked = session["CGSSessionScreenIsLocked"] { return boolean(locked) == false }
         return true
+    }
+    /// As sessionIsEligible, whatever the lock flag says.
+    static func sessionMayListen(_ session: [String: Any]?) -> Bool {
+        guard let session else { return false }
+        return boolean(session[kCGSessionOnConsoleKey as String]) == true
+            && boolean(session[kCGSessionLoginDoneKey as String]) == true
     }
     private static func boolean(_ value: Any?) -> Bool? {
         guard let value, CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID() else { return nil }

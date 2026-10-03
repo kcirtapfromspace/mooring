@@ -179,14 +179,15 @@ final class NativeFlowLimit: @unchecked Sendable {
     }
 }
 
-/// What this Mac announces in protocol 5. Pointer shapes, gestures, latency,
-/// versions and waiting for a dropped viewer need nothing beyond this build;
-/// the rest depend on launch self-tests, and remote updates on a release
-/// build with an update feed.
+/// What this Mac announces in protocol 5. Pointer shapes, gestures, latency
+/// and versions need nothing beyond this build; the rest depend on launch
+/// self-tests, and remote updates on a release build with an update feed.
+/// ML_CAPABILITY_WAITS is no longer announced: this Mac wakes for a returning
+/// viewer instead of keeping its display on for one.
 enum NativeCapabilities {
     static func local(hevc444: Bool, virtualDisplay: Bool, audio: Bool, updatesItself: Bool = false) -> UInt64 {
         var capabilities = UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_GESTURES) | UInt64(ML_CAPABILITY_LATENCY)
-            | UInt64(ML_CAPABILITY_VERSION) | UInt64(ML_CAPABILITY_WAITS)
+            | UInt64(ML_CAPABILITY_VERSION)
         if hevc444 { capabilities |= UInt64(ML_CAPABILITY_HEVC_444) }
         if virtualDisplay { capabilities |= UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) }
         if audio { capabilities |= UInt64(ML_CAPABILITY_AUDIO) }
@@ -469,12 +470,6 @@ final class NativeSessionChannel: @unchecked Sendable {
     private var openMove: PendingMove?
     private var peerStats = NativeStats()
     private var peerStatsTime: TimeInterval?
-    private var leaving = false
-    /// Host: the viewer said it was ending the session on purpose. Set on the
-    /// reader thread, since a queued main-thread update is skipped once the
-    /// connection closes right after.
-    var viewerLeft: Bool { lock.lock(); defer { lock.unlock() }; return leaving }
-    func noteViewerLeaving() { lock.lock(); leaving = true; lock.unlock() }
     var onFailure: ((String) -> Void)?
     func storePeerStats(_ stats: NativeStats) {
         lock.lock(); peerStats = stats; peerStatsTime = ProcessInfo.processInfo.systemUptime; lock.unlock()
