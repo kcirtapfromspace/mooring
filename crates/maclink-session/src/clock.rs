@@ -28,6 +28,43 @@ pub(crate) struct ClockEstimate {
     pub error_us: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FrameLatency {
+    pub total_us: u64,
+    pub to_viewer_us: u64,
+    pub display_wait_us: u64,
+}
+
+/// Untrusted host timestamps must never overflow when moved onto this clock.
+pub(crate) fn latency(
+    offset_us: i64,
+    host_us: u64,
+    decode_start_us: u64,
+    decoded_us: u64,
+    presented_us: u64,
+) -> Result<FrameLatency> {
+    if presented_us == 0 || presented_us < decoded_us {
+        return Err(Error::Invalid);
+    }
+    let host_here = i64::try_from(host_us)
+        .ok()
+        .and_then(|host| host.checked_sub(offset_us))
+        .ok_or(Error::Invalid)?;
+    let since = |end: u64| -> Result<u64> {
+        let delta = i64::try_from(end)
+            .ok()
+            .and_then(|end| end.checked_sub(host_here))
+            .filter(|delta| (0..=2_000_000).contains(delta))
+            .ok_or(Error::Invalid)?;
+        Ok(delta as u64)
+    };
+    Ok(FrameLatency {
+        total_us: since(presented_us)?,
+        to_viewer_us: since(decode_start_us)?,
+        display_wait_us: presented_us - decoded_us,
+    })
+}
+
 pub(crate) fn estimate(samples: &[ClockSample]) -> Result<ClockEstimate> {
     if samples.len() > MAX_SAMPLES {
         return Err(Error::Invalid);
@@ -56,6 +93,33 @@ pub(crate) fn estimate(samples: &[ClockSample]) -> Result<ClockEstimate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_latency_rejects_overflow_and_preserves_ordinary_offsets() {
+        assert_eq!(
+            latency(5_000_000, 5_100_000, 112_000, 116_000, 130_000),
+            Ok(FrameLatency {
+                total_us: 30_000,
+                to_viewer_us: 12_000,
+                display_wait_us: 14_000
+            })
+        );
+        assert_eq!(latency(-100, 100, 210, 220, 230).unwrap().total_us, 30);
+        for (offset, host, end) in [
+            (-1, i64::MAX as u64, 100),
+            (i64::MAX, 0, i64::MAX as u64),
+            (i64::MIN, 0, 100),
+            (0, u64::MAX, 100),
+            (0, 100, u64::MAX),
+            (0, 200, 100),
+            (0, 0, 2_000_001),
+        ] {
+            assert_eq!(latency(offset, host, end, end, end), Err(Error::Invalid));
+        }
+        assert_eq!(latency(0, 0, 1, 2, 1), Err(Error::Invalid));
+        assert_eq!(latency(0, 0, 0, 0, 0), Err(Error::Invalid));
+        assert_eq!(latency(0, 0, u64::MAX, 1, 2), Err(Error::Invalid));
+    }
 
     fn sample(sent_us: u64, received_us: u64, host_us: u64) -> ClockSample {
         ClockSample {

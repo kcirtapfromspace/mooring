@@ -141,8 +141,8 @@ final class NativeSessionCoordinator {
     /// sharing and connecting wait for the launch self-tests (well under a
     /// second). Without this, a viewer that reconnected the moment this Mac
     /// relaunched after an update got H.264, no sound and no screen matching.
-    private var capabilitiesReady = false
-    private var waitingForCapabilities: [() -> Void] = []
+    private let capabilityGate = NativeCapabilityGate()
+    private var capabilitiesReady: Bool { capabilityGate.isReady }
     /// Host: numbers the viewer's sound packets and bounds those waiting.
     private var hostAudioGate: NativeAudioSendGate?
     /// Viewer: plays the sharing Mac's sound.
@@ -212,7 +212,7 @@ final class NativeSessionCoordinator {
         set {
             defaults.set(newValue, forKey: Self.sharedClipboardKey)
             NativeLog.session.notice("shared clipboard \(newValue ? "on" : "off", privacy: .public)")
-            if newValue { clipboard.start(includeCurrent: false) }
+            refreshClipboardScope(includeCurrent: false)
             shareWindow?.clipboard.state = newValue ? .on : .off
             onChange?()
         }
@@ -282,7 +282,7 @@ final class NativeSessionCoordinator {
             let hevc = NativeCodecSupport.probeHEVC444()
             let audio = NativeAudioSupport.probeOpus()
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, !self.capabilityGate.isStopped else { return }
                 self.hevc444Available = hevc
                 self.audioAvailable = audio
                 let virtualDisplay = NativeSharedDisplay.isAvailable
@@ -295,13 +295,12 @@ final class NativeSessionCoordinator {
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
-            guard let self, !self.capabilitiesReady else { return }
+            guard let self, !self.capabilityGate.isStopped, !self.capabilitiesReady else { return }
             NativeLog.session.error("launch self-tests still running after 5 s; sessions start without HEVC 4:4:4 and sound")
             ml_capabilities_set(NativeCapabilities.local(hevc444: false, virtualDisplay: NativeSharedDisplay.isAvailable, audio: false,
                                                          updatesItself: self.updatesItself))
             self.capabilitiesAreReady()
         }
-        clipboard.onSend = { [weak self] content in self?.sendClipboard(content) }
         cursorWatcher.onChange = { [weak self] image in
             guard let channel = self?.hostChannel, channel.token.isActive,
                   channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_CURSOR) != 0 else { return }
@@ -377,22 +376,24 @@ final class NativeSessionCoordinator {
     }
 
     private func capabilitiesAreReady() {
-        guard !capabilitiesReady else { return }
-        capabilitiesReady = true
-        let waiting = waitingForCapabilities; waitingForCapabilities = []
-        waiting.forEach { $0() }
+        capabilityGate.complete()
     }
     /// Runs `work` now, or once the launch self-tests finish. At most eight wait.
-    private func whenCapabilitiesReady(_ work: @escaping () -> Void) -> Bool {
-        if capabilitiesReady { return true }
-        if waitingForCapabilities.count < 8 { waitingForCapabilities.append(work) }
-        return false
+    private func whenCapabilitiesReady(token: NativeRunToken? = nil, _ work: @escaping () -> Void) -> Bool {
+        switch capabilityGate.admit(token: token, work) {
+        case .ready: return true
+        case .waiting: return false
+        case .rejected: token?.cancel(); return false
+        }
     }
 
     /// Automatic starts never show a permission prompt; the first manual start asks once.
     private func startSharing(automatic: Bool = false) {
         guard !isSharing else { return }
-        guard whenCapabilitiesReady({ [weak self] in self?.startSharing(automatic: automatic) }) else { return }
+        guard whenCapabilitiesReady({ [weak self] in
+            guard let self, !self.userStoppedSharing else { return }
+            self.startSharing(automatic: automatic)
+        }) else { return }
         guard NativePrivacyGuard.mayShareNow() || (automatic && listensWhileCovered && NativePrivacyGuard.mayListenNow()) else {
             refreshShare("Unlock this Mac and sign in before starting sharing.")
             return
@@ -430,12 +431,13 @@ final class NativeSessionCoordinator {
 
     /// Runs at launch and once a second. Retries are spaced five seconds apart.
     /// Automatic sharing listens while the display sleeps or the screen is
-    /// covered, as after an update installed then; once a wake found a
-    /// password, only after someone unlocks this Mac.
+    /// covered, as after an update installed then. A timed-out covered session
+    /// resumes once it becomes eligible, even if the display is still asleep.
     private func resumeSharingIfAutomatic() {
         let afterUpdate = defaults.bool(forKey: Self.resumeAfterUpdateKey)
-        let unlocked = NativePrivacyGuard.displayIsAwake && NativePrivacyGuard.mayShareNow()
-        if unlocked { needsUnlock = false }
+        let eligible = NativePrivacyGuard.mayShareNow()
+        needsUnlock = ml_host_needs_unlock(needsUnlock ? 1 : 0, eligible ? 1 : 0) != 0
+        let unlocked = NativePrivacyGuard.displayIsAwake && eligible
         let covered = listensWhileCovered && !needsUnlock && NativePrivacyGuard.mayListenNow()
         guard sharesAutomatically || afterUpdate, !userStoppedSharing, !isSharing, uptime >= nextAutomaticShare,
               unlocked || covered else { return }
@@ -491,7 +493,7 @@ final class NativeSessionCoordinator {
         let version = channel.transport.protocolVersion
         let proof = transport.peerDevice.map { $0.isEmpty ? "the old pairing code" : "an approved Mac" } ?? "closed"
         NativeLog.session.notice("host session started, protocol \(version), \(proof, privacy: .public)")
-        if !isConnected { clipboard.start(includeCurrent: false) }
+        refreshClipboardScope(includeCurrent: false)
         let injector = NativeInputInjector(); hostInjector = injector
         hostAudioGate = NativeAudioSendGate()
         hostActivity = hostActivity ?? ProcessInfo.processInfo.beginActivity(
@@ -711,7 +713,6 @@ final class NativeSessionCoordinator {
                 } else {
                     NativeLog.session.notice("viewer-sized display \(request.width)×\(request.height) points at \(request.scale)x: \(applied ? "active" : "refused, sharing this Mac's own display", privacy: .public)")
                 }
-                if !applied { self.sharedDisplay.release() }
                 guard let channel, self.hostChannel === channel, channel.token.isActive, self.capture == nil else { return }
                 self.startCapture(for: channel)
             }
@@ -806,9 +807,10 @@ final class NativeSessionCoordinator {
                             self.applyTuning(tuning)
                         }
                     case .clipboard(let content):
+                        guard let scope = self.clipboard.scopeToken else { continue }
                         channel.deliverControl { [weak self, weak channel] in
                             guard let self, let channel, self.hostChannel === channel else { return }
-                            self.applyClipboard(content, from: channel)
+                            self.applyClipboard(content, from: channel, within: scope)
                         }
                     case .control, .video, .cursor, .audio:
                         throw NativeSessionError(message: "The viewer sent an unexpected session message.")
@@ -821,6 +823,7 @@ final class NativeSessionCoordinator {
     private func endHost(reason: String) {
         recordEnd("host", reason)
         hostChannel?.close(); hostChannel = nil; hostAudioGate = nil; hostPeerVersion = nil
+        refreshClipboardScope(includeCurrent: false)
         cursorWatcher.stop()
         sharedDisplay.release(); pendingDisplayRequest = nil; displayRestarts = []
         endHostActivity()
@@ -842,45 +845,69 @@ final class NativeSessionCoordinator {
     /// An approved Mac connected while this Mac's display slept or its screen
     /// was covered. Declaring user activity, as Screen Sharing does, wakes the
     /// display and lifts a cover that needs no password; the session starts
-    /// once this Mac may share. A screen still asking for its password after
-    /// ML_HOST_WAKE_WAIT_MS stops sharing, so later attempts are refused, and
-    /// say so, and nothing wakes it again until someone unlocks it.
+    /// once this Mac may share. Rust bounds activity renewals and the wait.
+    /// A screen still covered after the deadline waits for an unlock; an
+    /// eligible session with a sleeping display keeps accepting connections.
     private func wakeForViewer(_ transport: NativeTransport, sharingToken: NativeRunToken) {
+        guard sharingToken.isActive, self.sharingToken === sharingToken else { transport.close(); return }
         guard listensWhileCovered, NativePrivacyGuard.mayListenNow() else {
             transport.close()
             stopSharing(reason: pausedReason("Sharing stopped because this Mac is no longer active."))
             return
         }
-        var activity: IOPMAssertionID = 0
-        if IOPMAssertionDeclareUserActivity("A paired Mac is connecting" as CFString, kIOPMUserActiveRemote, &activity)
-            == kIOReturnSuccess {
-            IOPMAssertionRelease(activity)
-        }
         NativeLog.session.notice("an approved Mac connected while this display slept or was covered; waking it")
-        checkWake(transport, sharingToken: sharingToken, started: uptime)
+        let started = uptime
+        checkWake(transport, sharingToken: sharingToken, started: started, activity: NativeWakeActivity(), state: MLHostWake())
     }
-    private func checkWake(_ transport: NativeTransport, sharingToken: NativeRunToken, started: TimeInterval) {
-        guard sharingToken.isActive, self.sharingToken === sharingToken, hostChannel == nil else { transport.close(); return }
-        let elapsed = uptime - started
-        if NativePrivacyGuard.mayShareNow() && NativePrivacyGuard.displayIsAwake {
+    private func checkWake(_ transport: NativeTransport, sharingToken: NativeRunToken, started: TimeInterval,
+                           activity: NativeWakeActivity, state: MLHostWake) {
+        guard sharingToken.isActive, self.sharingToken === sharingToken, hostChannel == nil else {
+            transport.close(); activity.stop(); return
+        }
+        let elapsed = max(0, uptime - started)
+        let eligible = NativePrivacyGuard.mayShareNow()
+        var nextState = state
+        let action = ml_host_wake_step(&nextState, UInt32(clamping: Int(min(elapsed * 1000, Double(UInt32.max)))),
+                                      listensWhileCovered && NativePrivacyGuard.mayListenNow() ? 1 : 0,
+                                      eligible ? 1 : 0, NativePrivacyGuard.displayIsAwake ? 1 : 0)
+        switch Int(action) {
+        case ML_HOST_WAKE_READY:
             NativeLog.session.notice("awake and unlocked \(Int(elapsed * 1000)) ms after waking for the approved Mac")
             // Removed, or the old code stopped, while it woke.
             guard stillAllowed(transport) else {
-                transport.close()
+                transport.close(); activity.stop()
                 if let listener { acceptNext(listener: listener, token: sharingToken) }
                 return
             }
             beginHost(transport, sharingToken: sharingToken)
+            activity.stop()
+            return
+        case ML_HOST_WAKE_DECLARE_ACTIVITY:
+            let succeeded = activity.request()
+            NativeLog.session.notice("remote wake activity \(nextState.attempts): \(succeeded ? "accepted" : "failed", privacy: .public)")
+        case ML_HOST_WAKE_WAIT: break
+        case ML_HOST_WAKE_TIMED_OUT:
+            transport.close(); activity.stop()
+            if eligible {
+                needsUnlock = false
+                refreshShare("This Mac's display didn't wake in time. Still listening for your paired Macs.")
+                NativeLog.session.notice("wake timed out with an eligible session; still listening")
+                if let listener { acceptNext(listener: listener, token: sharingToken) }
+            } else {
+                needsUnlock = true
+                stopSharing(reason: "This Mac's screen is still covered or its session is unavailable after the wake attempt. "
+                            + "Sharing resumes automatically once the session is unlocked and active.")
+            }
+            return
+        default:
+            transport.close(); activity.stop()
+            stopSharing(reason: pausedReason("Sharing stopped because this Mac is no longer active."))
             return
         }
-        guard elapsed < Double(ML_HOST_WAKE_WAIT_MS) / 1000 else {
-            transport.close(); needsUnlock = true
-            stopSharing(reason: "This Mac's screen is locked and asks for its password, so it couldn't wake for your other Mac. "
-                        + "Sharing resumes automatically once it's unlocked.")
-            return
-        }
+        let pendingState = nextState
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.checkWake(transport, sharingToken: sharingToken, started: started)
+            guard let self else { transport.close(); activity.stop(); return }
+            self.checkWake(transport, sharingToken: sharingToken, started: started, activity: activity, state: pendingState)
         }
     }
 
@@ -899,6 +926,7 @@ final class NativeSessionCoordinator {
         sharingToken?.cancel(); sharingToken = nil
         listener?.close(); listener = nil
         hostChannel?.close(); hostChannel = nil; hostAudioGate = nil; hostPeerVersion = nil
+        refreshClipboardScope(includeCurrent: false)
         cursorWatcher.stop()
         sharedDisplay.release(); pendingDisplayRequest = nil; displayRestarts = []
         endHostActivity()
@@ -1032,10 +1060,7 @@ final class NativeSessionCoordinator {
     /// MacLink forward or take keyboard focus from another app.
     /// `addresses` are tried together, the first preferred.
     private func connect(code: NativePairingCode, addresses: [String], pairing: Bool = false, automatic: Bool = false) {
-        guard !isConnected else { return }
-        guard whenCapabilitiesReady({ [weak self] in
-            self?.connect(code: code, addresses: addresses, pairing: pairing, automatic: automatic)
-        }) else { return }
+        guard !isConnected, !capabilityGate.isStopped else { return }
         if let current = connecting {
             // A new pairing takes over from automatic reconnecting; anything else waits.
             guard pairing, !current.pairing else { return }
@@ -1049,16 +1074,33 @@ final class NativeSessionCoordinator {
             if !candidates.contains(address) { candidates.append(address) }
         }
         let addresses = Array(candidates.prefix(Int(ML_ADDRESSES_MAX)))
-        let deviceKey: NativeDeviceKey
-        do { deviceKey = try keychain.deviceKey() } catch { connectFailed(error, peerID: code.peerID, pairing: pairing); return }
         let attempt = NativeRunToken(), peerID = code.peerID
         connecting = (attempt, peerID, pairing)
         if pairing { pairWindow?.setBusy(true); pairWindow?.error.stringValue = "" }
+        guard whenCapabilitiesReady(token: attempt, { [weak self] in
+            self?.beginConnect(code: code, addresses: addresses, pairing: pairing, automatic: automatic, attempt: attempt)
+        }) else {
+            if !attempt.isActive, connecting?.token === attempt { cancelConnect() }
+            return
+        }
+        beginConnect(code: code, addresses: addresses, pairing: pairing, automatic: automatic, attempt: attempt)
+    }
+
+    private func beginConnect(code: NativePairingCode, addresses: [String], pairing: Bool, automatic: Bool, attempt: NativeRunToken) {
+        guard attempt.isActive, connecting?.token === attempt, !capabilityGate.isStopped else { return }
+        let peerID = code.peerID
+        let deviceKey: NativeDeviceKey
+        do { deviceKey = try keychain.deviceKey() } catch {
+            connecting = nil
+            if pairing { pairWindow?.setBusy(false) }
+            connectFailed(error, peerID: peerID, pairing: pairing); return
+        }
         if let window = openViewerWindow(for: peerID) {
             window.status.stringValue = "Connecting…"
             if !window.isReconnecting { window.showConnecting() }
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard attempt.isActive else { return }
             do {
                 let (transport, mode, used) = try NativeTransport.connect(addresses: addresses, code: code, deviceKey: deviceKey)
                 DispatchQueue.main.async {
@@ -1213,7 +1255,7 @@ final class NativeSessionCoordinator {
         observedScreenRequest = nil; sentScreenRequest = nil
         viewerStarted = uptime; reconnectWork?.cancel(); reconnectWork = nil
         // What is already copied here is available to paste on the other Mac.
-        clipboard.start(includeCurrent: sharesClipboard && !pairing)
+        refreshClipboardScope(includeCurrent: !pairing)
         if sharesClipboard {
             NativeLog.session.notice("clipboard access: \(NativePasteboard.accessDescription(.general), privacy: .public)")
         }
@@ -1354,9 +1396,10 @@ final class NativeSessionCoordinator {
                     case .telemetry(.stats(let stats)):
                         channel.storePeerStats(stats)
                     case .clipboard(let content):
+                        guard let scope = self.clipboard.scopeToken else { continue }
                         channel.deliverControl { [weak self, weak channel] in
                             guard let self, let channel, self.viewerChannel === channel else { return }
-                            self.applyClipboard(content, from: channel)
+                            self.applyClipboard(content, from: channel, within: scope)
                         }
                     case .cursor(let image):
                         channel.deliverControl { [weak self, weak channel] in
@@ -1629,6 +1672,7 @@ final class NativeSessionCoordinator {
             channel.close()
         }
         viewerChannel = nil
+        refreshClipboardScope(includeCurrent: false)
         viewerPeerVersion = nil; peerUpdate = nil; viewerWindow?.setVersionNotice(nil)
         audioPlayer?.stop(); audioPlayer = nil
         systemKeys?.stop()
@@ -1657,19 +1701,29 @@ final class NativeSessionCoordinator {
         guard sharesClipboard, isConnected || hostChannel?.token.isActive == true else { return }
         clipboard.poll()
     }
-    private func sendClipboard(_ content: NativeClipboardContent) {
-        guard sharesClipboard else { return }
+    /// A new scope captures these recipients. A delayed copy can never select
+    /// a replacement channel or survive disconnect/disable/re-enable.
+    private func refreshClipboardScope(includeCurrent: Bool) {
+        clipboard.stop()
+        guard sharesClipboard, !capabilityGate.isStopped, isConnected || hostChannel?.token.isActive == true else { return }
+        clipboard.onSend = { [weak self, weak viewer = viewerChannel, weak host = hostChannel] content, scope in
+            self?.sendClipboard(content, to: [viewer, host].compactMap { $0 }, within: scope)
+        }
+        clipboard.start(includeCurrent: includeCurrent)
+    }
+    private func sendClipboard(_ content: NativeClipboardContent, to recipients: [NativeSessionChannel], within scope: NativeRunToken) {
+        guard sharesClipboard, scope.isActive else { return }
         var sent = false
-        for channel in [viewerChannel, hostChannel].compactMap({ $0 }) where channel.token.isActive {
-            channel.send(.clipboard(content))
+        for channel in recipients where channel.token.isActive {
+            channel.send(.clipboard(content), whileActive: scope)
             channel.measurements.add("clipboard_sent"); channel.measurements.add("clipboard_sent_bytes", Double(content.byteCount))
             sent = true
         }
         if sent { NativeLog.session.notice("clipboard sent: \(content.summary, privacy: .public)") }
     }
-    private func applyClipboard(_ content: NativeClipboardContent, from channel: NativeSessionChannel) {
-        guard sharesClipboard else { return }
-        clipboard.apply(content)
+    private func applyClipboard(_ content: NativeClipboardContent, from channel: NativeSessionChannel, within scope: NativeRunToken) {
+        guard sharesClipboard, scope.isActive else { return }
+        clipboard.apply(content, from: channel.token, within: scope)
         channel.measurements.add("clipboard_received"); channel.measurements.add("clipboard_received_bytes", Double(content.byteCount))
         NativeLog.session.notice("clipboard received: \(content.summary, privacy: .public)")
     }
@@ -1797,6 +1851,8 @@ final class NativeSessionCoordinator {
         let alert = NSAlert(); alert.messageText = "MacLink connection"; alert.informativeText = message; alert.runModal()
     }
     func stop() {
+        capabilityGate.stop()
+        clipboard.stop()
         telemetryTimer?.invalidate(); telemetryTimer = nil
         clipboardTimer?.invalidate(); clipboardTimer = nil
         NativeTelemetryServer.stop()

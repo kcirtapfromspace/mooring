@@ -11,23 +11,42 @@
 - (unsigned int)displayID;
 @end
 
-static Class MLClass(NSString *name) { return NSClassFromString(name); }
+#if defined(ML_VIRTUAL_DISPLAY_TESTING)
+static Class (^MLTestClassResolver)(NSString *);
+void MLVirtualDisplaySetClassResolver(Class (^resolver)(NSString *)) { MLTestClassResolver = [resolver copy]; }
+#endif
+static Class MLClass(NSString *name) {
+#if defined(ML_VIRTUAL_DISPLAY_TESTING)
+    if (MLTestClassResolver) return MLTestClassResolver(name);
+#endif
+    return NSClassFromString(name);
+}
 
 @implementation MLVirtualDisplay {
     id _display;
 }
 
 + (BOOL)isAvailable {
-    Class descriptor = MLClass(@"CGVirtualDisplayDescriptor"), display = MLClass(@"CGVirtualDisplay");
-    Class settings = MLClass(@"CGVirtualDisplaySettings"), mode = MLClass(@"CGVirtualDisplayMode");
-    return descriptor && display && settings && mode
-        && [display instancesRespondToSelector:@selector(initWithDescriptor:)]
-        && [display instancesRespondToSelector:@selector(applySettings:)]
-        && [display instancesRespondToSelector:@selector(displayID)]
-        && [mode instancesRespondToSelector:@selector(initWithWidth:height:refreshRate:)]
-        && [settings instancesRespondToSelector:NSSelectorFromString(@"setModes:")]
-        && [settings instancesRespondToSelector:NSSelectorFromString(@"setHiDPI:")]
-        && [descriptor instancesRespondToSelector:NSSelectorFromString(@"setMaxPixelsWide:")];
+    @try {
+        Class descriptor = MLClass(@"CGVirtualDisplayDescriptor"), display = MLClass(@"CGVirtualDisplay");
+        Class settings = MLClass(@"CGVirtualDisplaySettings"), mode = MLClass(@"CGVirtualDisplayMode");
+        return descriptor && display && settings && mode
+            && [display instancesRespondToSelector:@selector(initWithDescriptor:)]
+            && [display instancesRespondToSelector:@selector(applySettings:)]
+            && [display instancesRespondToSelector:@selector(displayID)]
+            && [mode instancesRespondToSelector:@selector(initWithWidth:height:refreshRate:)]
+            && [settings instancesRespondToSelector:NSSelectorFromString(@"setModes:")]
+            && [settings instancesRespondToSelector:NSSelectorFromString(@"setHiDPI:")]
+            && [descriptor instancesRespondToSelector:NSSelectorFromString(@"setMaxPixelsWide:")]
+            && [descriptor instancesRespondToSelector:NSSelectorFromString(@"setMaxPixelsHigh:")]
+            && [descriptor instancesRespondToSelector:NSSelectorFromString(@"setSizeInMillimeters:")]
+            && [descriptor instancesRespondToSelector:NSSelectorFromString(@"setName:")]
+            && [descriptor instancesRespondToSelector:NSSelectorFromString(@"setVendorID:")]
+            && [descriptor instancesRespondToSelector:NSSelectorFromString(@"setProductID:")]
+            && [descriptor instancesRespondToSelector:NSSelectorFromString(@"setSerialNum:")]
+            && [descriptor instancesRespondToSelector:NSSelectorFromString(@"setQueue:")]
+            && [descriptor instancesRespondToSelector:NSSelectorFromString(@"setTerminationHandler:")];
+    } @catch (__unused NSException *exception) { return NO; }
 }
 
 static BOOL MLValidSize(uint32_t width, uint32_t height, uint32_t scale) {
@@ -47,11 +66,13 @@ static BOOL MLValidSize(uint32_t width, uint32_t height, uint32_t scale) {
 
 - (nullable instancetype)initWithName:(NSString *)name pointWidth:(uint32_t)pointWidth
                           pointHeight:(uint32_t)pointHeight scale:(uint32_t)scale {
-    if (!(self = [super init]) || !MLVirtualDisplay.isAvailable || !MLValidSize(pointWidth, pointHeight, scale)) return nil;
-    // Private calls may autorelease; drain here so releasing this object
-    // removes the display at once.
-    @autoreleasepool { if (![self createNamed:name width:pointWidth height:pointHeight scale:scale]) return nil; }
-    return self;
+    @try {
+        if (!(self = [super init]) || !MLVirtualDisplay.isAvailable || !MLValidSize(pointWidth, pointHeight, scale)) return nil;
+        // Private calls may autorelease; drain here so releasing this object
+        // removes the display at once.
+        @autoreleasepool { if (![self createNamed:name width:pointWidth height:pointHeight scale:scale]) return nil; }
+        return self;
+    } @catch (__unused NSException *exception) { return nil; }
 }
 
 - (BOOL)createNamed:(NSString *)name width:(uint32_t)pointWidth height:(uint32_t)pointHeight scale:(uint32_t)scale {
@@ -73,15 +94,19 @@ static BOOL MLValidSize(uint32_t width, uint32_t height, uint32_t scale) {
 }
 
 - (BOOL)resizeToPointWidth:(uint32_t)pointWidth pointHeight:(uint32_t)pointHeight scale:(uint32_t)scale {
-    if (!_display || !MLValidSize(pointWidth, pointHeight, scale)) return NO;
-    @autoreleasepool {
-        id settings = [self settingsForWidth:pointWidth height:pointHeight scale:scale];
-        return settings && [_display applySettings:settings];
-    }
+    @try {
+        if (!_display || !MLVirtualDisplay.isAvailable || !MLValidSize(pointWidth, pointHeight, scale)) return NO;
+        @autoreleasepool {
+            id settings = [self settingsForWidth:pointWidth height:pointHeight scale:scale];
+            return settings && [_display applySettings:settings];
+        }
+    } @catch (__unused NSException *exception) { return NO; }
 }
 
 - (CGDirectDisplayID)displayID {
-    @autoreleasepool { return _display ? (CGDirectDisplayID)[_display displayID] : kCGNullDirectDisplay; }
+    @try {
+        @autoreleasepool { return _display ? (CGDirectDisplayID)[_display displayID] : kCGNullDirectDisplay; }
+    } @catch (__unused NSException *exception) { return kCGNullDirectDisplay; }
 }
 
 @end

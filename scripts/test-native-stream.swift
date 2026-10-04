@@ -132,22 +132,42 @@ struct NativeStreamIntegration {
         let decoded = DispatchSemaphore(value: 0), sendQueue = DispatchQueue(label: "hevc-writer")
         var failure: String?
         var latencies: [Double] = []
+        var discardedTimings: [UInt64] = []
+        let hostileClock = NativeClockSync()
+        hostileClock.add(sentUs: 1, receivedUs: 1, hostUs: 0) // offset -1 reproduces signed overflow
         decoder.onFrame = { buffer in
             // Decoded stands in for shown here: there is no display in this test.
-            if let timing = NativeFrameTiming.read(buffer),
-               let latency = clock.latency(NativeFrameTiming(hostUs: timing.0, decodeStartUs: timing.1, decodedUs: timing.2, presentedUs: timing.2)) {
-                lock.lock(); latencies.append(latency.total); lock.unlock()
+            if let timing = NativeFrameTiming.read(buffer) {
+                let frameTiming = NativeFrameTiming(hostUs: timing.0, decodeStartUs: timing.1, decodedUs: timing.2, presentedUs: timing.2)
+                if timing.0 == UInt64(Int64.max) || timing.0 == UInt64.max {
+                    lock.lock()
+                    if hostileClock.latency(frameTiming) == nil { discardedTimings.append(timing.0) }
+                    else { failure = "An extreme timestamp produced a usable latency" }
+                    lock.unlock()
+                } else if let latency = clock.latency(frameTiming) {
+                    lock.lock(); latencies.append(latency.total); lock.unlock()
+                }
             }
             decoded.signal()
         }
         decoder.onError = { message in lock.lock(); failure = message; lock.unlock(); decoded.signal() }
         encoder.onEncodedFrame = { frame, release in
-            sendQueue.async { defer { release() }; do { try host.send(.video(frame.packet)) } catch { lock.lock(); failure = error.localizedDescription; lock.unlock() } }
+            sendQueue.async {
+                defer { release() }
+                do {
+                    let original = frame.packet
+                    let timestamp = original.sequence == 31 ? UInt64(Int64.max) : original.sequence == 32 ? UInt64.max : original.timestamp
+                    let packet = NativeVideoPacket(codec: original.codec, width: original.width, height: original.height,
+                                                   sequence: original.sequence, timestamp: timestamp, keyframe: original.keyframe,
+                                                   vps: original.vps, sps: original.sps, pps: original.pps, avcc: original.avcc)
+                    try host.send(.video(packet))
+                } catch { lock.lock(); failure = error.localizedDescription; lock.unlock() }
+            }
         }
         try host.send(.control(.geometry(NativeDisplayGeometry(x: 0, y: 0, width: 1920, height: 1080, pixelWidth: 1920, pixelHeight: 1080),
                                          inputEnabled: false)))
         guard case .control(.geometry)? = try client.receive() else { throw NativeSessionError(message: "Viewer expected geometry") }
-        let total = 30
+        let total = 33 // 30 ordinary frames, two hostile timestamps, then an ordinary control
         for index in 0..<total {
             let pixels = try frame(index, width: 1920, height: 1080)
             // Stamped with the capture clock, as ScreenCaptureKit display times are.
@@ -160,9 +180,11 @@ struct NativeStreamIntegration {
             lock.lock(); let error = failure; lock.unlock()
             if let error { throw NativeSessionError(message: error) }
         }
-        lock.lock(); let measured = latencies; lock.unlock()
-        try require(measured.count == total && measured.allSatisfy { $0 < 500 },
-                    "Every frame reports capture-to-decoded latency across the session")
+        lock.lock(); let measured = latencies, discarded = discardedTimings; lock.unlock()
+        try require(discarded == [UInt64(Int64.max), UInt64.max],
+                    "Valid video survives transport and decoding while extreme timing samples are discarded")
+        try require(measured.count == total - 2 && measured.allSatisfy { $0 < 500 },
+                    "Ordinary frame timing still works before and after unusable timestamps")
         return (total, NativeLatencyWindow.percentile(measured, 0.5) ?? 0)
     }
     static func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {

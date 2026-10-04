@@ -25,7 +25,10 @@ struct NativeClipboardContent: Equatable {
         var result = NativeClipboardContent(text: text?.isEmpty == false ? text : nil)
         guard result.byteCount <= Self.maxBytes else { return nil }
         if let png, !png.isEmpty, result.byteCount + png.count <= Self.maxBytes, NativeClipboardContent(png: png).isValid { result.png = png }
-        if let rtf, !rtf.isEmpty, result.byteCount + rtf.count <= Self.maxBytes, NativeClipboardContent(rtf: rtf).isValid { result.rtf = rtf }
+        if let rtf, !rtf.isEmpty, result.byteCount + rtf.count <= Self.maxBytes, NativeClipboardContent(rtf: rtf).isValid {
+            guard let inspected = NativePasteboard.shareableRTF(rtf) else { return nil }
+            if result.byteCount + inspected.count <= Self.maxBytes { result.rtf = inspected }
+        }
         return result.isEmpty || !result.isValid ? nil : result
     }
 
@@ -57,6 +60,7 @@ struct NativeClipboardContent: Equatable {
 
 /// The pasteboard side of the shared clipboard.
 enum NativePasteboard {
+    typealias ReadResult = (content: NativeClipboardContent, tiff: Data?)
     /// Markers for passwords and other items that must never be shared or
     /// recorded: nspasteboard.org's, plus older password-manager conventions.
     static let privateTypes: Set<NSPasteboard.PasteboardType> = Set([
@@ -72,7 +76,24 @@ enum NativePasteboard {
     static let maxTIFFBytes = 64 * 1024 * 1024
     /// MacLink's own pairing codes are secrets, even after an app drops their
     /// concealed marker on the way to the other Mac.
-    static func containsPairingCode(_ text: String) -> Bool { text.contains("MLP1.") }
+    static func containsPairingCode(_ text: String) -> Bool { containsPairingCode(Data(text.utf8)) }
+    private static func containsPairingCode(_ bytes: Data) -> Bool {
+        bytes.withUnsafeBytes {
+            ml_clipboard_contains_pairing_secret($0.bindMemory(to: UInt8.self).baseAddress, $0.count) != 0
+        }
+    }
+    /// Decode before applying Rust's text rule: escapes/groups can split a
+    /// prefix. Reserialize the inspected rich text so hidden document metadata
+    /// and unknown destinations (including escaped secrets) are not forwarded.
+    static func shareableRTF(_ rtf: Data) -> Data? {
+        guard rtf.count <= NativeClipboardContent.maxBytes, !containsPairingCode(rtf),
+              let decoded = try? NSAttributedString(data: rtf, options: [.documentType: NSAttributedString.DocumentType.rtf],
+                                                    documentAttributes: nil), !containsPairingCode(decoded.string),
+              let inspected = try? decoded.data(from: NSRange(location: 0, length: decoded.length),
+                                                documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]),
+              inspected.count <= NativeClipboardContent.maxBytes, !containsPairingCode(inspected) else { return nil }
+        return inspected
+    }
     /// macOS 15.4 and later may ask before an app reads the clipboard in the
     /// background; "always deny" means reading would fail anyway.
     static func readingDenied(_ pasteboard: NSPasteboard) -> Bool {
@@ -91,13 +112,22 @@ enum NativePasteboard {
 
     /// What this pasteboard can share now, plus a TIFF image still to convert;
     /// nil when it is empty or marked private.
-    static func read(_ pasteboard: NSPasteboard) -> (content: NativeClipboardContent, tiff: Data?)? {
+    static func read(_ pasteboard: NSPasteboard) -> ReadResult? {
         let types = Set(pasteboard.types ?? [])
         guard !types.isEmpty, types.isDisjoint(with: privateTypes), !types.contains(remoteClipboardType) else { return nil }
         var content = NativeClipboardContent()
         content.text = pasteboard.string(forType: .string)
         if let text = content.text, containsPairingCode(text) { return nil }
         content.rtf = pasteboard.data(forType: .rtf)
+        if let rtf = content.rtf {
+            // Preserve fitting: a representation too large or invalid on the
+            // wire is dropped; valid-sized RTF must pass the privacy check.
+            if rtf.count > NativeClipboardContent.maxBytes || !NativeClipboardContent(rtf: rtf).isValid { content.rtf = nil }
+            else {
+                guard let inspected = shareableRTF(rtf) else { return nil }
+                content.rtf = inspected
+            }
+        }
         // Copied files share their names as text only, not Finder's icon image.
         guard !types.contains(.fileURL) else { content.rtf = nil; return content.text == nil ? nil : (content, nil) }
         content.png = pasteboard.data(forType: .png)
@@ -125,9 +155,17 @@ enum NativePasteboard {
 /// echo path (Universal Clipboard, clipboard managers) can bounce it back.
 final class NativeClipboardSync: @unchecked Sendable {
     /// Called on the main thread.
-    var onSend: ((NativeClipboardContent) -> Void)?
+    var onSend: ((NativeClipboardContent, NativeRunToken) -> Void)?
     private let pasteboard: NSPasteboard
-    private let queue = DispatchQueue(label: "dev.maclink.clipboard", qos: .utility)
+    private let queue: DispatchQueue
+    private let readPasteboard: (NSPasteboard) -> NativePasteboard.ReadResult?
+    private final class Scope {
+        let token = NativeRunToken()
+        let send: ((NativeClipboardContent, NativeRunToken) -> Void)?
+        init(send: ((NativeClipboardContent, NativeRunToken) -> Void)?) { self.send = send }
+    }
+    private let scopeLock = NSLock()
+    private var scope: Scope?
     private let pollLock = NSLock()
     private var pollQueued = false
     // Confined to `queue`.
@@ -135,51 +173,78 @@ final class NativeClipboardSync: @unchecked Sendable {
     private var exchangedChangeCount: Int?
     private var exchanged: SHA256.Digest?
 
-    init(pasteboard: NSPasteboard = .general) { self.pasteboard = pasteboard }
+    init(pasteboard: NSPasteboard = .general,
+         queue: DispatchQueue = DispatchQueue(label: "dev.maclink.clipboard", qos: .utility),
+         read: @escaping (NSPasteboard) -> NativePasteboard.ReadResult? = NativePasteboard.read) {
+        self.pasteboard = pasteboard; self.queue = queue; readPasteboard = read
+    }
+    private func currentScope() -> Scope? { scopeLock.lock(); defer { scopeLock.unlock() }; return scope }
+    /// Capture at receive time, before another queue can defer delivery.
+    var scopeToken: NativeRunToken? { currentScope()?.token }
+    /// Invalidates queued reads, writes and main callbacks synchronously. A
+    /// write already in progress finishes before this returns; reads never
+    /// hold the mutation lock, so lazy providers cannot delay invalidation.
+    func stop() {
+        scopeLock.lock(); scope?.token.cancel(); scope = nil; scopeLock.unlock()
+    }
     /// Follows changes from now on; `includeCurrent` also shares what is copied
     /// already, unless it is what was last exchanged.
     func start(includeCurrent: Bool) {
+        let scope = Scope(send: onSend)
+        scopeLock.lock(); self.scope?.token.cancel(); self.scope = scope; scopeLock.unlock()
         queue.async { [self] in
+            guard scope.token.isActive else { return }
             let count = pasteboard.changeCount
             seenChangeCount = count
-            if includeCurrent && count != exchangedChangeCount && !NativePasteboard.readingDenied(pasteboard) { publish(count) }
+            if includeCurrent && count != exchangedChangeCount && !NativePasteboard.readingDenied(pasteboard) { publish(count, scope: scope) }
         }
     }
     /// Main thread, twice a second. At most one poll waits behind a slow read.
     func poll() {
+        guard let scope = currentScope() else { return }
         pollLock.lock()
         guard !pollQueued else { pollLock.unlock(); return }
         pollQueued = true; pollLock.unlock()
         queue.async { [self] in
             pollLock.lock(); pollQueued = false; pollLock.unlock()
-            guard !NativePasteboard.readingDenied(pasteboard) else { return }
+            guard scope.token.isActive, !NativePasteboard.readingDenied(pasteboard) else { return }
             let count = pasteboard.changeCount
             guard count != seenChangeCount else { return }
             seenChangeCount = count
-            publish(count)
+            publish(count, scope: scope)
         }
     }
     /// Writes the other Mac's copy here; it is never sent back.
-    func apply(_ content: NativeClipboardContent) {
+    func apply(_ content: NativeClipboardContent, from source: NativeRunToken? = nil, within expected: NativeRunToken? = nil) {
+        guard let scope = currentScope(), expected == nil || expected === scope.token else { return }
         queue.async { [self] in
-            NativePasteboard.write(content, to: pasteboard)
-            let count = pasteboard.changeCount
-            seenChangeCount = count; exchangedChangeCount = count; exchanged = content.identity
+            guard scope.token.isActive, source?.isActive != false, let fitted = content.fitted() else { return }
+            scope.token.performIfActive {
+                guard source?.isActive != false else { return }
+                NativePasteboard.write(fitted, to: pasteboard)
+                let count = pasteboard.changeCount
+                seenChangeCount = count; exchangedChangeCount = count; exchanged = fitted.identity
+            }
         }
     }
     /// Waits for queued pasteboard work; for tests.
     func waitUntilIdle() { queue.sync {} }
 
-    private func publish(_ count: Int) {
-        guard let read = NativePasteboard.read(pasteboard) else { return }
+    private func publish(_ count: Int, scope: Scope) {
+        guard scope.token.isActive, let read = readPasteboard(pasteboard) else { return }
         var content = read.content
         if let tiff = read.tiff { content.png = NativePasteboard.png(fromTIFF: tiff) }
         // A newer copy supersedes this one; the next poll reads it.
-        guard pasteboard.changeCount == count, let fitted = content.fitted() else { return }
-        exchangedChangeCount = count
+        guard let fitted = content.fitted(), scope.token.isActive, pasteboard.changeCount == count else { return }
         let identity = fitted.identity
         guard identity != exchanged else { return }
-        exchanged = identity
-        DispatchQueue.main.async { [weak self] in self?.onSend?(fitted) }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, scope.token.isActive, let send = scope.send else { return }
+            send(fitted, scope.token)
+            self.queue.async { [self] in
+                guard scope.token.isActive, self.pasteboard.changeCount == count else { return }
+                self.exchangedChangeCount = count; self.exchanged = identity
+            }
+        }
     }
 }

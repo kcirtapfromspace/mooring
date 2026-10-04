@@ -156,9 +156,12 @@ enum { ML_CODEC_H264 = 1, ML_CODEC_HEVC = 2 };
 #define ML_CAPABILITY_REMOTE_UPDATE 128ull /* a sharing Mac that updates itself when a viewer asks */
 #define ML_CAPABILITY_WAITS 256ull /* previews 22-28: a sharing Mac that waits 12 h for a viewer whose session dropped */
 /* A sharing Mac whose display slept, or whose screen was covered, waits this
- * long after waking it for an approved viewer; a screen still asking for its
- * password then stops sharing until someone unlocks it. */
+ * long while retrying remote activity for an approved viewer. Capture still
+ * requires an eligible session and an awake display. */
 #define ML_HOST_WAKE_WAIT_MS 5000u
+typedef struct { uint32_t attempts, last_activity_ms; } MLHostWake;
+enum { ML_HOST_WAKE_WAIT = 0, ML_HOST_WAKE_DECLARE_ACTIVITY = 1, ML_HOST_WAKE_READY = 2,
+       ML_HOST_WAKE_TIMED_OUT = 3, ML_HOST_WAKE_INACTIVE = 4 };
 /* MLTuning.keyframe_seconds: keyframes only when needed (the default); 1-10
  * means one every N seconds. Local JSON shows and takes it as 0. */
 #define ML_KEYFRAMES_ON_DEMAND 255u
@@ -315,6 +318,10 @@ typedef struct {
     uint64_t error_us;
 } MLClockEstimate;
 
+typedef struct {
+    uint64_t total_us, to_viewer_us, display_wait_us;
+} MLFrameLatency;
+
 /* A received Opus packet (codec 1) at payload_offset in the caller's buffer:
  * its sequence number, duration in 48 kHz frames (240, 480 or 960) and
  * channel count (1 or 2). */
@@ -430,6 +437,8 @@ _Static_assert(sizeof(MLSendQueue) == 24 && offsetof(MLSendQueue, sent_bytes) ==
 _Static_assert(sizeof(MLFlowState) == 20, "MLFlowState layout");
 _Static_assert(sizeof(MLLinkMeter) == 48 && offsetof(MLLinkMeter, last_queued) == 40, "MLLinkMeter layout");
 _Static_assert(sizeof(MLClockEstimate) == 16 && offsetof(MLClockEstimate, error_us) == 8, "MLClockEstimate layout");
+_Static_assert(sizeof(MLFrameLatency) == 24 && offsetof(MLFrameLatency, display_wait_us) == 16, "MLFrameLatency layout");
+_Static_assert(sizeof(MLHostWake) == 8 && offsetof(MLHostWake, last_activity_ms) == 4, "MLHostWake layout");
 _Static_assert(offsetof(MLSessionMessage, audio) == 848, "MLSessionMessage.audio layout");
 _Static_assert(sizeof(MLAudioMessage) == 24 && offsetof(MLAudioMessage, frames) == 4
                && offsetof(MLAudioMessage, codec) == 7 && offsetof(MLAudioMessage, payload_offset) == 8, "MLAudioMessage layout");
@@ -521,6 +530,17 @@ int32_t ml_audio_playout(uint32_t buffered_frames, uint8_t playing, uint8_t *pla
  * the shortest round trip wins, and its half is the error bound. INVALID when
  * no sample is usable (round trips over 1 s are ignored). */
 int32_t ml_clock_estimate(const MLClockSample *samples, size_t count, MLClockEstimate *out);
+/* Checked arithmetic for a placed frame; INVALID for overflow, missing
+ * presentation or capture-to-stage times outside 0...2 s. Clears out on error. */
+int32_t ml_clock_latency(int64_t offset_us, uint64_t host_us, uint64_t decode_start_us,
+                         uint64_t decoded_us, uint64_t presented_us, MLFrameLatency *out);
+/* One authenticated wake sequence with zero-initialized state: an ML_HOST_WAKE_* action or INVALID.
+ * Flags are 0/1; state is unchanged on error. Retry count and deadline are bounded. */
+int32_t ml_host_wake_step(MLHostWake *state, uint32_t elapsed_ms, uint8_t may_listen,
+                          uint8_t may_share, uint8_t display_awake);
+/* A prior timeout stops blocking the listener once the session is eligible,
+ * even while the display is asleep. Invalid flags keep the latch. */
+uint8_t ml_host_needs_unlock(uint8_t previous, uint8_t may_share);
 /* Strict "major.minor.patch" or "major.minor.patch-preview.N", each below
  * 65536 and N from 1 to 65534, packed 16 bits apiece for ML_CONTROL_VERSION.
  * A final release stores 0xffff as N, so it compares after its previews. */
@@ -566,6 +586,10 @@ int32_t ml_video_dimensions_validate(uint32_t width, uint32_t height);
 int32_t ml_video_frame_validate(const MLVideoFrame *frame);
 int32_t ml_input_event_validate(const MLInputEvent *event);
 int32_t ml_clipboard_validate(const MLClipboardItem *items, size_t count);
+/* 1 for any supported pairing envelope, 0 otherwise; INVALID for a bad
+ * buffer or length over ML_CLIPBOARD_MAX_BYTES. Also accepts raw RTF bytes;
+ * the native shell must check decoded RTF text as well. */
+int32_t ml_clipboard_contains_pairing_secret(const uint8_t *bytes, size_t length);
 /* 1 when a key stays on the viewing Mac while system shortcuts such as ⌘-Tab
  * are captured for the remote Mac: Force Quit (⌘⌥Esc, optionally ⇧), Lock
  * Screen (⌃⌘Q) and full screen (⌃⌘F or Globe-F); otherwise 0. */

@@ -190,6 +190,21 @@ pub struct MLClockEstimate {
     pub offset_us: i64,
     pub error_us: u64,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MLFrameLatency {
+    pub total_us: u64,
+    pub to_viewer_us: u64,
+    pub display_wait_us: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MLHostWake {
+    pub attempts: u32,
+    pub last_activity_ms: u32,
+}
 /// A received Opus packet at `payload_offset` in the caller's buffer, with
 /// its sequence number and duration in 48 kHz frames.
 #[repr(C)]
@@ -380,6 +395,8 @@ const _: () = {
     assert!(size_of::<MLFlowState>() == 20);
     assert!(size_of::<MLLinkMeter>() == 48 && offset_of!(MLLinkMeter, last_queued) == 40);
     assert!(size_of::<MLClockEstimate>() == 16 && offset_of!(MLClockEstimate, error_us) == 8);
+    assert!(size_of::<MLFrameLatency>() == 24 && offset_of!(MLFrameLatency, display_wait_us) == 16);
+    assert!(size_of::<MLHostWake>() == 8 && offset_of!(MLHostWake, last_activity_ms) == 4);
     assert!(offset_of!(MLSessionMessage, audio) == 848);
     assert!(size_of::<MLAudioMessage>() == 24);
     assert!(offset_of!(MLAudioMessage, frames) == 4);
@@ -1484,6 +1501,58 @@ pub unsafe extern "C" fn ml_clipboard_validate(items: *const MLClipboardItem, co
         clipboard::validate(values.iter().map(|(kind, data)| (*kind, *data)))
     })
 }
+
+/// Checks copied text or raw representation bytes for any pairing envelope.
+/// Returns 1 for private content, 0 otherwise, INVALID for an invalid buffer.
+/// # Safety
+/// A non-null `bytes` must be readable for `length` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_clipboard_contains_pairing_secret(
+    bytes: *const u8,
+    length: usize,
+) -> i32 {
+    if length > clipboard::MAX_CLIPBOARD_BYTES || (bytes.is_null() && length != 0) {
+        return Error::Invalid as i32;
+    }
+    let data = if length == 0 {
+        &[]
+    } else {
+        // SAFETY: caller promises a readable buffer, bounded above.
+        unsafe { std::slice::from_raw_parts(bytes, length) }
+    };
+    i32::from(crate::pairing::contains_pairing_secret(data))
+}
+
+/// Checked capture-to-viewer arithmetic; unusable samples return INVALID.
+/// # Safety
+/// `out` must be writable for one MLFrameLatency.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_clock_latency(
+    offset_us: i64,
+    host_us: u64,
+    decode_start_us: u64,
+    decoded_us: u64,
+    presented_us: u64,
+    out: *mut MLFrameLatency,
+) -> i32 {
+    ffi(|| {
+        let out = unsafe { output(out)? };
+        *out = MLFrameLatency::default();
+        let latency = crate::clock::latency(
+            offset_us,
+            host_us,
+            decode_start_us,
+            decoded_us,
+            presented_us,
+        )?;
+        *out = MLFrameLatency {
+            total_us: latency.total_us,
+            to_viewer_us: latency.to_viewer_us,
+            display_wait_us: latency.display_wait_us,
+        };
+        Ok(())
+    })
+}
 /// # Safety
 /// `out` must be writable; a non-null `video_buffer` writable for `capacity`
 /// bytes and not aliased by another call.
@@ -1634,6 +1703,54 @@ pub const ML_CAPABILITY_REMOTE_UPDATE: u64 = crate::policy::CAPABILITY_REMOTE_UP
 pub const ML_CAPABILITY_WAITS: u64 = crate::policy::CAPABILITY_WAITS;
 pub const ML_KEYFRAMES_ON_DEMAND: u8 = crate::telemetry::KEYFRAMES_ON_DEMAND;
 pub const ML_HOST_WAKE_WAIT_MS: u64 = crate::policy::HOST_WAKE_WAIT.as_millis() as u64;
+
+/// Advances one authenticated host wake. Returns an ML_HOST_WAKE_* action or
+/// INVALID; flags must be 0 or 1, and state is unchanged on error.
+/// # Safety
+/// `state` must be readable and writable for one MLHostWake.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_host_wake_step(
+    state: *mut MLHostWake,
+    elapsed_ms: u32,
+    may_listen: u8,
+    may_share: u8,
+    display_awake: u8,
+) -> i32 {
+    let mut action = 0;
+    let status = ffi(|| {
+        if may_listen > 1 || may_share > 1 || display_awake > 1 {
+            return Err(Error::Invalid);
+        }
+        let state = unsafe { output(state)? };
+        let mut wake = crate::policy::HostWake {
+            attempts: state.attempts,
+            last_activity_ms: state.last_activity_ms,
+        };
+        action = wake.step(
+            elapsed_ms,
+            may_listen == 1,
+            may_share == 1,
+            display_awake == 1,
+        )? as i32;
+        state.attempts = wake.attempts;
+        state.last_activity_ms = wake.last_activity_ms;
+        Ok(())
+    });
+    if status == 0 { action } else { status }
+}
+
+/// Clears a prior wake-timeout latch once the session is eligible, independent
+/// of the display's power state. Invalid flags fail closed (keep the latch).
+#[unsafe(no_mangle)]
+pub extern "C" fn ml_host_needs_unlock(previous: u8, may_share: u8) -> u8 {
+    if previous > 1 || may_share > 1 {
+        return 1;
+    }
+    u8::from(crate::policy::host_needs_unlock(
+        previous == 1,
+        may_share == 1,
+    ))
+}
 pub const ML_RELEASE_CAPACITY: usize = 64;
 pub const ML_AUDIO_MAX_PAYLOAD: usize = crate::audio::MAX_AUDIO_PAYLOAD;
 pub const ML_AUDIO_SAMPLE_RATE: u32 = crate::audio::SAMPLE_RATE;

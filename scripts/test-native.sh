@@ -12,6 +12,14 @@ swiftc -swift-version 5 -warnings-as-errors -parse-as-library \
   -target arm64-apple-macosx14.0 app/HomeNetworkCheck.swift scripts/test-home-network.swift \
   -o target/maclink-home-network-tests
 target/maclink-home-network-tests
+swiftc -swift-version 5 -warnings-as-errors -parse-as-library -target arm64-apple-macosx14.0 \
+  -framework CoreGraphics -framework AppKit app/NativeDisplayTopology.swift app/NativeSharedDisplay.swift scripts/test-native-display.swift \
+  -o target/maclink-native-display-topology-tests
+target/maclink-native-display-topology-tests
+clang -fobjc-arc -O2 -Wall -Werror -DML_VIRTUAL_DISPLAY_TESTING -target arm64-apple-macos14.0 \
+  -framework Foundation -framework CoreGraphics app/NativeVirtualDisplay.m scripts/test-native-display.m \
+  -o target/maclink-native-display-boundary-tests
+target/maclink-native-display-boundary-tests
 swiftc -swift-version 5 -warnings-as-errors -parse-as-library \
   -target arm64-apple-macosx14.0 -framework AppKit \
   app/NativePrivacyGuard.swift scripts/test-native-privacy.swift \
@@ -37,7 +45,7 @@ target/maclink-native-media-tests > target/native-media-report.json
 printf '%s\n' 'Native media tests passed: hardware codec, Rust packet rules, recovery and bounds. Report: target/native-media-report.json'
 swiftc -swift-version 5 -warnings-as-errors -parse-as-library -target arm64-apple-macosx14.0 \
   "${media_frameworks[@]}" "${bridge[@]}" \
-  app/NativePairing.swift app/NativeTransport.swift app/NativeSessionState.swift app/NativeMedia.swift app/NativeAudio.swift \
+  app/NativePairing.swift app/NativeTransport.swift app/NativeSessionState.swift app/NativeWakeActivity.swift app/NativeMedia.swift app/NativeAudio.swift \
   app/NativePrivacyGuard.swift app/NativeInput.swift app/NativeClipboard.swift app/NativeCursor.swift \
   scripts/test-native-session.swift -o target/maclink-native-session-tests
 # The session check drives the real CLI against the app's local telemetry socket.

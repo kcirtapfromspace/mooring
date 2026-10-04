@@ -23,4 +23,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)resizeToPointWidth:(uint32_t)pointWidth pointHeight:(uint32_t)pointHeight scale:(uint32_t)scale;
 @end
 
+#if defined(ML_VIRTUAL_DISPLAY_TESTING)
+// Local CI resolves fake classes; this seam is absent from the app binary.
+void MLVirtualDisplaySetClassResolver(Class _Nullable (^ _Nullable resolver)(NSString *));
+#endif
+
 NS_ASSUME_NONNULL_END

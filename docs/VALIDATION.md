@@ -559,6 +559,17 @@ For `v0.3.0-preview.29`, which replaces the 12-hour wait of previews 22 to 28.
   - After a session drops, the display now turns off on its usual schedule.
 - **Not verified.** The wake was tested from a stand-alone process, not from MacLink, and not with a viewer connecting. Whether ScreenCaptureKit starts cleanly right after the wake is also untested. Both are checked in TESTING.md step 11.
 
+## Lid/wake reconnect recovery (2026-10-04)
+
+This revises preview 29's single-activity wake policy above.
+
+- **Observed locally.** At 07:50:41, loginwindow began clearing its display-dim shield after remote user activity but did not complete. At 07:50:46, MacLink's five-second wake deadline expired; it described a password lock and stopped listening. The next remote user activity at 08:03:28 cleared the shield. loginwindow reported that the keybag was not locked and that no password was required; MacLink resumed sharing. This explains the dependence on a subsequent Screen Sharing/RDP connection, but is not a reproduction of the patched two-Mac path.
+- **Change.** An authenticated connection makes at most three remote user activity requests, a second apart, within the existing five-second wait. The public IOKit boundary keeps the returned activity ID for renewal and holds the display through the wait, releasing both on completion or cancellation. The display hold has a five-second powerd timeout as well. Capture and input still require an eligible, uncovered console session; waking does not grant access to a locked screen.
+- **Recovery.** A wake timeout no longer proves a password is required. A still-covered or unavailable session waits for an unlock. An eligible session whose display is asleep keeps listening, and an eligible session clears a prior timeout latch without requiring the display to be awake first. This lets an approved connection supply the wake request instead of depending on another remote-desktop app.
+- **Local regression scope.** Rust tests exercise a shield that needs a second request, the three-request budget, the five-second deadline, missing console access, display/session readiness, and the C ABI's invalid state/flag handling. Swift tests use fake power APIs to check retained/replaced IDs, cleanup after API failures, cancellation cleanup, and the same Rust wake policy. They do not alter the live desktop's power state.
+- **Validation result.** `./scripts/ci-local.sh` passed on the local Mac with 232 Rust tests, 247 native session checks, native media/streaming checks, and the arm64 macOS 14 app build. Validation used a separate source copy and did not replace or launch the installed app.
+- **Release gate.** Repeat TESTING.md step 11 with two Macs, including overnight lid sleep and an actual password lock. Local tests and an arm64 build do not independently verify macOS's wake response, immediate ScreenCaptureKit recovery, or the user's exact lid cycle.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

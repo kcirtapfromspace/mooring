@@ -11,9 +11,52 @@ use crate::transport::{
 use crate::video::tests::{IDR, P_SLICE, PPS, SPS};
 use std::ffi::{CString, c_char};
 use std::net::{Shutdown, TcpStream};
+use std::ptr;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+
+#[test]
+fn host_wake_abi_rejects_invalid_observations_without_advancing() {
+    let mut wake = MLHostWake::default();
+    assert_eq!(unsafe { ml_host_wake_step(&mut wake, 0, 1, 0, 0) }, 1);
+    assert_eq!(wake.attempts, 1);
+    for (listen, share, display) in [(2, 0, 0), (1, 2, 0), (1, 0, 2)] {
+        assert_eq!(
+            unsafe { ml_host_wake_step(&mut wake, 1000, listen, share, display) },
+            Error::Invalid as i32
+        );
+        assert_eq!((wake.attempts, wake.last_activity_ms), (1, 0));
+    }
+    assert_eq!(
+        unsafe { ml_host_wake_step(std::ptr::null_mut(), 0, 1, 0, 0) },
+        Error::Invalid as i32
+    );
+    assert_eq!(unsafe { ml_host_wake_step(&mut wake, 1000, 1, 0, 0) }, 1);
+    assert_eq!(
+        unsafe { ml_host_wake_step(&mut wake, 999, 1, 0, 0) },
+        Error::Invalid as i32
+    );
+    assert_eq!((wake.attempts, wake.last_activity_ms), (2, 1000));
+    for (attempts, last_activity_ms) in [(4, 2000), (0, 1), (3, 5000)] {
+        let mut invalid = MLHostWake {
+            attempts,
+            last_activity_ms,
+        };
+        assert_eq!(
+            unsafe { ml_host_wake_step(&mut invalid, 6000, 1, 0, 0) },
+            Error::Invalid as i32
+        );
+        assert_eq!(
+            (invalid.attempts, invalid.last_activity_ms),
+            (attempts, last_activity_ms)
+        );
+    }
+    assert_eq!(ml_host_needs_unlock(1, 1), 0);
+    assert_eq!(ml_host_needs_unlock(1, 0), 1);
+    assert_eq!(ml_host_needs_unlock(2, 1), 1);
+    assert_eq!(ml_host_needs_unlock(0, 2), 1);
+}
 
 struct Owned(u64);
 impl Drop for Owned {
@@ -2065,6 +2108,60 @@ fn clock_estimate_crosses_the_c_abi() {
     );
     assert_eq!(
         unsafe { ml_clock_estimate(samples.as_ptr(), 33, &mut estimate) },
+        Error::Invalid as i32
+    );
+}
+
+#[test]
+fn latency_and_clipboard_privacy_cross_the_c_abi() {
+    let mut latency = MLFrameLatency::default();
+    assert_eq!(
+        unsafe { ml_clock_latency(-100, 100, 210, 220, 230, &mut latency) },
+        0
+    );
+    assert_eq!(
+        (
+            latency.total_us,
+            latency.to_viewer_us,
+            latency.display_wait_us
+        ),
+        (30, 10, 10)
+    );
+    for (offset, host, end) in [
+        (-1, i64::MAX as u64, 100),
+        (i64::MAX, 0, i64::MAX as u64),
+        (0, u64::MAX, 100),
+    ] {
+        assert_eq!(
+            unsafe { ml_clock_latency(offset, host, end, end, end, &mut latency) },
+            Error::Invalid as i32
+        );
+        assert_eq!(latency.total_us, 0);
+    }
+    assert_eq!(
+        unsafe { ml_clock_latency(0, 0, 1, 1, 1, ptr::null_mut()) },
+        Error::Invalid as i32
+    );
+    for (text, expected) in [
+        (b"copy: MLP1.secret".as_slice(), 1),
+        (b"copy: MLP2.secret", 1),
+        (b"normal text", 0),
+    ] {
+        assert_eq!(
+            unsafe { ml_clipboard_contains_pairing_secret(text.as_ptr(), text.len()) },
+            expected
+        );
+    }
+    assert_eq!(
+        unsafe { ml_clipboard_contains_pairing_secret(ptr::null(), 0) },
+        0
+    );
+    assert_eq!(
+        unsafe { ml_clipboard_contains_pairing_secret(ptr::null(), 1) },
+        Error::Invalid as i32
+    );
+    assert_eq!(
+        unsafe { ml_clipboard_contains_pairing_secret(b"x".as_ptr(), ML_CLIPBOARD_MAX_BYTES + 1) },
         Error::Invalid as i32
     );
 }

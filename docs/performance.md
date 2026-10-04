@@ -1,6 +1,8 @@
 # Performance and reliability acceptance plan
 
-**Status: proposed targets, not measured results.** MacLink currently launches Apple's client and contains a separately tested adaptive-quality policy. No custom capture, encoding, transport, decoder, input injection, or Metal presentation pipeline exists. The synthetic scenarios cannot establish latency, throughput, fidelity, or superiority over Apple Screen Sharing.
+**Status: proposed two-Mac targets, not comparative measured results.** MacLink has both an Apple Screen Sharing launcher/automation route and a native ScreenCaptureKit, VideoToolbox, encrypted Rust transport, decoder, input, audio, clipboard and Metal presentation route. Local synthetic hardware-codec and encrypted-loopback tests demonstrate that the native engine works; they do not establish physical two-Mac latency, throughput, fidelity or superiority over Apple Screen Sharing.
+
+The native flow policy uses live TCP send-queue and throughput observations to pace frames and adapt bitrate. The separate adaptive-quality policy below is still tested with simulated samples. The Apple-route TCP/RFB checks measure reachability and service readiness, not bandwidth, loss or video latency. Keep those three sources of evidence distinct.
 
 ## What to prove
 
@@ -14,7 +16,7 @@ Use the same two Macs, displays, scaling, macOS versions, network path, and work
 | Backlog | One pending raw frame per capture/render handoff; no sustained application video queue exceeding one frame interval | Queue age and depth histogram; track decoder and GPU queues separately |
 | Usability | Already paired, awake Mac: p95 first usable frame ≤ 2 s after Connect | 30 cold and 30 warm application runs; separate authentication time |
 | Brief network interruption | Following a 1–3 s interruption, p95 recovery ≤ 5 s after reachability returns, within the retry budget | 30 interrupted sessions; verify working input as well as picture |
-| Long disconnect | Stop after eight failed retries; explicit Disconnect cancels pending work immediately | Deterministic policy test plus integrated fault injection |
+| Long disconnect | Stop at the native retry budget: five ordinary retries, or forty attempts three seconds apart while the host updates or awaits unlock; explicit Disconnect cancels pending work immediately | Deterministic policy test plus integrated fault injection |
 | Extended session | Eight-hour active session without crash, stuck modifiers, accumulating frame backlog, or unbounded memory growth | Per-minute memory/resource counters and input/stream health checks |
 | Desktop continuity | Zero changes to logical desktop dimensions during automatic quality adaptation | Log dimensions before and after every profile change |
 
@@ -71,6 +73,6 @@ Never discard arbitrary interdependent compressed packets to imitate a latest-fr
 - Limit requested video bitrate to 70% of estimated sustainable available bandwidth. This is policy headroom, not a congestion controller or guaranteed achieved bitrate. At insufficient bandwidth a target frame rate is best effort.
 - The one-slot `LatestFrameMailbox` releases superseded raw/decoded frames; application-held frames and in-flight GPU work still need their own budgets.
 - `ReconnectPolicy` starts at 250 ms, doubles delays, applies deterministic injected jitter within ±20%, clips actual delay at 8 seconds, and stops after eight failed attempts. Pending scheduling is idempotent. A successful connection resets the budget; explicit user Disconnect cannot be undone by a late success callback. Authentication and permission denials require a different path.
-- `PeerContext` keeps network path and pairing trust separate. A private IP, Bonjour name, or fast response never establishes identity. The current metadata does not implement pairing, credential verification, or encryption.
+- `PeerContext` keeps network path and pairing trust separate. A private IP, Bonjour name, or fast response never establishes identity. This metadata type does not implement pairing, credential verification or encryption; the native session crate implements those boundaries separately.
 
-Run `cargo test -p maclink-core` for policy, mailbox, and retry tests, and `cargo run -p maclink-cli -- simulate` for serializable synthetic scenarios. These verify deterministic behavior only; acceptance remains open until an integrated video pipeline is measured.
+Run `cargo test -p maclink-core` for policy, mailbox and retry tests, and `cargo run -p maclink-cli -- simulate` for serializable synthetic scenarios. These verify deterministic behavior only. Native scripted tests cover additional codec, encrypted-loopback and lifecycle boundaries; acceptance remains open until matched real two-Mac trials measure the native pipeline.

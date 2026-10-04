@@ -22,6 +22,16 @@ use zeroize::{Zeroize, Zeroizing};
 pub(crate) const MAX_NAME_BYTES: usize = 160;
 const PREFIX: &str = "MLP1.";
 const ONE_TIME_PREFIX: &str = "MLP2.";
+
+/// Pairing envelopes remain private even when embedded in another copied item,
+/// expired, or incomplete. Keep this rule beside the encoder's supported kinds.
+pub(crate) fn contains_pairing_secret(bytes: &[u8]) -> bool {
+    [PREFIX, ONE_TIME_PREFIX].iter().any(|prefix| {
+        bytes
+            .windows(prefix.len())
+            .any(|part| part == prefix.as_bytes())
+    })
+}
 const MAX_CODE_TEXT: usize = 2048;
 /// Base64 makes this at most 2000 characters, which with the prefix fits
 /// MAX_CODE_TEXT.
@@ -422,6 +432,25 @@ impl PairingCode {
 pub(crate) mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn every_secret_bearing_envelope_is_private_in_copied_content() {
+        let mut current = code();
+        for kind in [CodeKind::Legacy, CodeKind::OneTime] {
+            current.kind = kind;
+            let encoded = current.encode().unwrap();
+            assert!(contains_pairing_secret(encoded.as_bytes()));
+            assert!(contains_pairing_secret(
+                format!("before {} after", encoded.as_str()).as_bytes()
+            ));
+        }
+        for private in [b"MLP1.".as_slice(), b"MLP2.", b"\xffMLP2.secret"] {
+            assert!(contains_pairing_secret(private));
+        }
+        for ordinary in [b"".as_slice(), b"normal copied text", b"MLP", b"mlp2."] {
+            assert!(!contains_pairing_secret(ordinary));
+        }
+    }
 
     pub(crate) fn code() -> PairingCode {
         let public = std::array::from_fn(|index| index as u8 + 1);

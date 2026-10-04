@@ -48,10 +48,73 @@ pub(crate) const CAPABILITY_REMOTE_UPDATE: u64 = 1 << 7;
 pub(crate) const CAPABILITY_WAITS: u64 = 1 << 8;
 /// How long a sharing Mac whose display slept, or whose screen was covered,
 /// waits after waking it for an approved viewer before it can share. A cover
-/// that needs no password lifts in well under a second; one that asks for the
-/// password never does, and the host stops listening until someone unlocks
-/// it. The viewer's pings wait unread meanwhile, well within `IDLE_LIMIT`.
+/// that needs no password usually lifts quickly, but may need another remote
+/// activity request; one that asks for the password never does. Retry within
+/// this window before waiting for an unlock. Pings wait unread, well within `IDLE_LIMIT`.
 pub(crate) const HOST_WAKE_WAIT: Duration = Duration::from_secs(5);
+const HOST_WAKE_ACTIVITY_SPACING_MS: u32 = 1000;
+const HOST_WAKE_ACTIVITY_ATTEMPTS: u32 = 3;
+
+/// One authenticated connection's bounded wake sequence. The native boundary
+/// supplies current session/display observations; this never authorizes input
+/// or capture while the session is covered or off the console.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct HostWake {
+    pub attempts: u32,
+    pub last_activity_ms: u32,
+}
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostWakeAction {
+    Wait = 0,
+    DeclareActivity = 1,
+    Ready = 2,
+    TimedOut = 3,
+    Inactive = 4,
+}
+
+impl HostWake {
+    pub fn step(
+        &mut self,
+        elapsed_ms: u32,
+        may_listen: bool,
+        may_share: bool,
+        display_awake: bool,
+    ) -> Result<HostWakeAction> {
+        if self.attempts > HOST_WAKE_ACTIVITY_ATTEMPTS
+            || self.last_activity_ms >= HOST_WAKE_WAIT.as_millis() as u32
+            || (self.attempts == 0 && self.last_activity_ms != 0)
+            || elapsed_ms < self.last_activity_ms
+        {
+            return Err(Error::Invalid);
+        }
+        if !may_listen {
+            return Ok(HostWakeAction::Inactive);
+        }
+        if may_share && display_awake {
+            return Ok(HostWakeAction::Ready);
+        }
+        if elapsed_ms >= HOST_WAKE_WAIT.as_millis() as u32 {
+            return Ok(HostWakeAction::TimedOut);
+        }
+        if self.attempts < HOST_WAKE_ACTIVITY_ATTEMPTS
+            && (self.attempts == 0
+                || elapsed_ms - self.last_activity_ms >= HOST_WAKE_ACTIVITY_SPACING_MS)
+        {
+            self.attempts += 1;
+            self.last_activity_ms = elapsed_ms;
+            return Ok(HostWakeAction::DeclareActivity);
+        }
+        Ok(HostWakeAction::Wait)
+    }
+}
+
+/// Display sleep is not a password lock. An unlocked console session can
+/// resume its listener while asleep, so an approved viewer can wake it.
+pub(crate) fn host_needs_unlock(previous: bool, may_share: bool) -> bool {
+    previous && !may_share
+}
 /// Hosts send a cursor only when it changes; this stops a flood.
 const CURSORS_PER_WINDOW: u32 = 20;
 /// Four times the rate of 10 ms packets. Sound beyond it, as after a stall, is
@@ -374,6 +437,87 @@ mod tests {
     use crate::input::{InputEvent, InputKind};
     use crate::telemetry::Tuning;
     use crate::video::{VideoHeader, VideoPacket};
+
+    #[test]
+    fn host_wake_retries_a_stalled_shield_then_finishes_when_ready() {
+        let mut wake = HostWake::default();
+        assert_eq!(
+            wake.step(0, true, false, false).unwrap(),
+            HostWakeAction::DeclareActivity
+        );
+        assert_eq!(
+            wake.step(999, true, false, true).unwrap(),
+            HostWakeAction::Wait
+        );
+        assert_eq!(
+            wake.step(1000, true, false, true).unwrap(),
+            HostWakeAction::DeclareActivity
+        );
+        assert_eq!(
+            wake.step(1100, true, true, true).unwrap(),
+            HostWakeAction::Ready
+        );
+        assert_eq!(wake.attempts, 2);
+    }
+
+    #[test]
+    fn host_wake_has_a_finite_activity_budget_and_deadline() {
+        let mut wake = HostWake::default();
+        let mut requests = Vec::new();
+        for elapsed in (0..5000).step_by(100) {
+            let action = wake.step(elapsed, true, false, true).unwrap();
+            if action == HostWakeAction::DeclareActivity {
+                requests.push(elapsed);
+            } else {
+                assert_eq!(action, HostWakeAction::Wait);
+            }
+        }
+        assert_eq!(requests, [0, 1000, 2000]);
+        assert_eq!(
+            wake.step(5000, true, false, true).unwrap(),
+            HostWakeAction::TimedOut
+        );
+        assert_eq!(
+            wake.step(6000, true, false, true).unwrap(),
+            HostWakeAction::TimedOut
+        );
+
+        // A stalled queue cannot send an extra wake after the deadline.
+        let mut late = HostWake::default();
+        assert_eq!(
+            late.step(5000, true, true, false).unwrap(),
+            HostWakeAction::TimedOut
+        );
+        assert_eq!(late.attempts, 0);
+    }
+
+    #[test]
+    fn host_wake_needs_both_an_eligible_session_and_an_awake_display() {
+        let mut wake = HostWake::default();
+        assert_eq!(
+            wake.step(0, false, true, true).unwrap(),
+            HostWakeAction::Inactive
+        );
+        assert_eq!(wake.attempts, 0);
+        assert_eq!(
+            wake.step(0, true, true, false).unwrap(),
+            HostWakeAction::DeclareActivity
+        );
+        assert_eq!(
+            wake.step(100, true, false, true).unwrap(),
+            HostWakeAction::Wait
+        );
+        assert_eq!(
+            wake.step(100, true, true, true).unwrap(),
+            HostWakeAction::Ready
+        );
+
+        // A prior timeout must not strand an eligible console with its display
+        // asleep: clearing the latch does not itself authorize capture.
+        assert!(!host_needs_unlock(true, true));
+        assert!(host_needs_unlock(true, false));
+        assert!(!host_needs_unlock(false, false));
+    }
 
     fn geometry() -> Incoming {
         Incoming::Control(ControlMessage::Geometry {

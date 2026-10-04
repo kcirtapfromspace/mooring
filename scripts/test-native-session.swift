@@ -9,6 +9,7 @@
 // Built and run by scripts/test-native.sh, which links the arm64 Rust static library.
 import AppKit
 import CoreGraphics
+import IOKit.pwr_mgt
 
 @main
 enum NativeSessionTests {
@@ -118,15 +119,23 @@ enum NativeSessionTests {
         guard case .control(.hello) = try next(again), case .control(.hello) = try next(returningHost) else {
             throw Failure("Protocol 5 sessions open with each side's Hello")
         }
-        let channel = NativeSessionChannel(again)
+        let writer = DispatchQueue(label: "dev.maclink.tests.blocked-writer")
+        let writerEntered = DispatchSemaphore(value: 0), writerUnblock = DispatchSemaphore(value: 0)
+        writer.async { writerEntered.signal(); writerUnblock.wait() }
+        try require(writerEntered.wait(timeout: .now() + 2) == .success, "Writer is blocked before the clipboard packet")
+        let channel = NativeSessionChannel(again, writer: writer), copyScope = NativeRunToken(), copyCompletions = Counter()
+        channel.send(.clipboard(NativeClipboardContent(text: "retired clipboard")), whileActive: copyScope) { copyCompletions.increment() }
+        copyScope.cancel()
         channel.control(.ping(7))
         channel.close(after: .control(.leaving))
+        writerUnblock.signal()
         let ping = try next(returningHost), leaving = try next(returningHost)
         var closed = false
         do { _ = try next(returningHost) } catch { closed = (error as? NativeSessionError)?.status == Int32(ML_SESSION_CLOSED) }
         var ordered = false
         if case .control(.ping(7)) = ping, case .control(.leaving) = leaving { ordered = true }
-        try require(ordered && closed, "The host reads the viewer's leaving message, in order, before the connection closes")
+        try require(ordered && closed && copyCompletions.value == 1,
+                    "A clipboard retired on the writer is skipped while ordinary ordered controls and completions remain intact")
         returningHost.close()
         try require(returningHost.peerDevice == nil, "A closed session names no Mac")
 
@@ -188,6 +197,16 @@ enum NativeSessionTests {
         let sync = NativeClockSync()
         let frame = NativeFrameTiming(hostUs: 5_100_000, decodeStartUs: 112_000, decodedUs: 116_000, presentedUs: 130_000)
         try require(sync.latency(frame) == nil, "No latency before the clocks are placed")
+        let hostile = NativeClockSync()
+        hostile.add(sentUs: 1, receivedUs: 1, hostUs: 0)
+        try require(hostile.latency(NativeFrameTiming(hostUs: UInt64(Int64.max), decodeStartUs: 103, decodedUs: 104, presentedUs: 105)) == nil,
+                    "An extreme capture timestamp cannot overflow a negative offset")
+        hostile.reset(); hostile.add(sentUs: 0, receivedUs: 0, hostUs: UInt64(Int64.max))
+        try require(hostile.latency(NativeFrameTiming(hostUs: 0, decodeStartUs: UInt64(Int64.max), decodedUs: UInt64(Int64.max),
+                                                     presentedUs: UInt64(Int64.max))) == nil,
+                    "Subtracting a far-behind capture cannot overflow a stage timestamp")
+        try require(hostile.latency(NativeFrameTiming(hostUs: UInt64.max, decodeStartUs: 1, decodedUs: 2, presentedUs: 3)) == nil,
+                    "Unsigned timestamps outside the signed range are discarded")
         // The sharing Mac's clock is 5 s ahead; the queued 40 ms reply is not used.
         sync.add(sentUs: 0, receivedUs: 40_000, hostUs: 5_030_000)
         sync.add(sentUs: 50_000, receivedUs: 52_000, hostUs: 5_051_000)
@@ -333,6 +352,8 @@ enum NativeSessionTests {
             try require(try NativeControlMessage(validated: message.raw) == message, "Every control message round-trips the C ABI")
         }
         try testLatency()
+        try testCapabilityGate()
+        try testWakeRecovery()
         try testPointer()
         var unknown = MLControlMessage(); unknown.kind = 13
         try rejects("Unknown control kinds are rejected") { _ = try NativeControlMessage(validated: unknown) }
@@ -543,7 +564,9 @@ extension NativeSessionTests {
         let content = NativeClipboardContent(text: "héllo ✓", rtf: Data("{\\rtf1 hi}".utf8), png: png)
         NativePasteboard.write(content, to: board)
         let read = NativePasteboard.read(board)
-        try require(read?.content == content && read?.tiff == nil, "Text, rich text and PNG round-trip a pasteboard")
+        try require(read?.content.text == content.text && read?.content.png == content.png && read?.tiff == nil
+                    && read?.content.rtf.flatMap { NativePasteboard.shareableRTF($0) } != nil,
+                    "Text and PNG round-trip; rich text is inspected and reserialized")
         try require(content.isValid && content.summary.hasPrefix("text, rich text, image"), "Rust accepts it; the log names kinds only")
 
         let limit = NativeClipboardContent.maxBytes
@@ -559,11 +582,47 @@ extension NativeSessionTests {
         try require(NativeClipboardContent(text: "code: MLP1.eyJhIjoxfQ==").fitted() == nil, "MacLink pairing codes are never shared")
         board.clearContents(); board.setString("MLP1.eyJhIjoxfQ==", forType: .string)
         try require(NativePasteboard.read(board) == nil, "A pairing code without its concealed marker is still not shared")
+        let identity = NativeHostIdentity(privateKey: Data(repeating: 1, count: 32), publicKey: Data(repeating: 2, count: 32),
+                                          secret: Data(repeating: 3, count: 32))
+        let generated = try NativePairingCode.forHost(address: "test.local", computerName: "Test", identity: identity,
+                                                      oneTimeSecret: Data(repeating: 4, count: 32))
+        var legacyRaw = generated.raw; legacyRaw.kind = NativePairingCode.Kind.legacy.rawValue
+        for candidate in [NativePairingCode(raw: legacyRaw), generated] {
+            let code = try candidate.encoded()
+            try require(NativeClipboardContent(text: "before \(code) after").fitted() == nil, "Every generated pairing code is private")
+            NativePasteboard.write(NativeClipboardContent(text: code), to: board)
+            try require(NativePasteboard.read(board) == nil, "Marker-free generated codes cannot enter sync")
+        }
+        let code = try NativePairingCode.forHost(address: "test.local", computerName: "Test", identity: identity,
+                                                 oneTimeSecret: Data(repeating: 4, count: 32)).encoded()
+        let payload = code.dropFirst(5)
+        for encoded in ["{\\rtf1\\ansi \(code)}", "{\\rtf1\\ansi M{\\b L}P2.\(payload)}",
+                        "{\\rtf1\\ansi \\'4d\\'4c\\'50\\'32.\(payload)}",
+                        "{\\rtf1\\ansi\\uc1 \\u77?\\u76?\\u80?\\u50?.\(payload)}",
+                        "{\\rtf1{\\info{\\comment \(code)}}ordinary}"] {
+            let rtf = Data(encoded.utf8)
+            try require(NativeClipboardContent(rtf: rtf).fitted() == nil, "RTF-only pairing material is private, including escaped or grouped prefixes")
+            try require(NativeClipboardContent(text: "ordinary", rtf: rtf).fitted() == nil, "Benign plain text cannot mask a rich-text secret")
+            NativePasteboard.write(NativeClipboardContent(rtf: rtf), to: board)
+            try require(NativePasteboard.read(board) == nil, "The pasteboard rejects secret-bearing RTF before sync")
+        }
+        let metadata = Data("{\\rtf1{\\info{\\comment \\'4d\\'4c\\'50\\'32.\(payload)}}ordinary}".utf8)
+        let cleaned = NativeClipboardContent(rtf: metadata).fitted()?.rtf
+        try require(cleaned != nil && !(String(data: cleaned!, encoding: .utf8) ?? "").contains(String(payload)),
+                    "Escaped secrets in non-visible RTF metadata are stripped instead of forwarded")
+        let ordinaryRich = NSAttributedString(string: "ordinary rich text", attributes: [.font: NSFont(name: "Helvetica-Bold", size: 15)!])
+        let ordinaryRTF = try ordinaryRich.data(from: NSRange(location: 0, length: ordinaryRich.length),
+                                               documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
+        let fittedRTF = NativeClipboardContent(rtf: ordinaryRTF).fitted()!.rtf!
+        let decodedRich = try NSAttributedString(data: fittedRTF, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil)
+        try require(decodedRich.string == ordinaryRich.string && decodedRich.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+                    == ordinaryRich.attribute(.font, at: 0, effectiveRange: nil) as? NSFont,
+                    "Ordinary rich-text content and font formatting remain intact")
         NativePasteboard.write(content, to: board)
 
         var sent: [NativeClipboardContent] = []
         let sync = NativeClipboardSync(pasteboard: board)
-        sync.onSend = { sent.append($0) }
+        sync.onSend = { content, _ in sent.append(content) }
         // Pasteboard work runs on the sync's own queue; sends arrive on main.
         func settle() {
             sync.waitUntilIdle()
@@ -571,7 +630,7 @@ extension NativeSessionTests {
             while ProcessInfo.processInfo.systemUptime < until { RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01)) }
         }
         sync.start(includeCurrent: true); settle()
-        try require(sent == [content], "A new viewer session shares what is already copied")
+        try require(sent == [content.fitted()!], "A new viewer session shares the inspected representations already copied")
         sync.poll(); settle()
         try require(sent.count == 1, "Nothing new, nothing sent")
         let remote = NativeClipboardContent(text: "from the other Mac")
@@ -602,9 +661,147 @@ extension NativeSessionTests {
         settle()
         try require(sent.count == 3, "Polls waiting behind a read coalesce and send nothing new")
 
+        NativePasteboard.write(NativeClipboardContent(rtf: ordinaryRTF), to: board)
+        sync.poll(); settle()
+        try require(sent.count == 4 && sent.last?.rtf == fittedRTF, "An ordinary RTF-only copy is delivered")
+        NativePasteboard.write(NativeClipboardContent(rtf: fittedRTF), to: board)
+        sync.poll(); settle()
+        try require(sent.count == 4, "Normalizing an RTF-only copy does not change its identity or create an echo")
+        sync.apply(NativeClipboardContent(rtf: ordinaryRTF)); settle(); sync.poll(); settle()
+        try require(sent.count == 4, "An incoming RTF-only copy retains echo suppression")
+
         board.clearContents(); board.writeObjects([NSURL(fileURLWithPath: "/tmp/example.txt")])
         if let files = NativePasteboard.read(board) {
             try require(files.content.png == nil && files.content.rtf == nil && files.tiff == nil, "Copied files share names only")
         } else { checks += 1 }
+        try testClipboardCancellation(board)
+    }
+
+    static func testClipboardCancellation(_ board: NSPasteboard) throws {
+        var original: [NativeClipboardContent] = [], replacement: [NativeClipboardContent] = []
+        let queue = DispatchQueue(label: "dev.maclink.tests.clipboard-cancellation")
+        let sync = NativeClipboardSync(pasteboard: board, queue: queue)
+        sync.onSend = { content, _ in original.append(content) }
+        NativePasteboard.write(NativeClipboardContent(text: "original local copy"), to: board)
+        sync.start(includeCurrent: false); sync.waitUntilIdle()
+        let entered = DispatchSemaphore(value: 0), unblock = DispatchSemaphore(value: 0)
+        queue.async { entered.signal(); unblock.wait() }
+        try require(entered.wait(timeout: .now() + 2) == .success, "Clipboard queue blocked for a delayed write")
+        sync.apply(NativeClipboardContent(text: "stale remote copy")); sync.poll()
+        sync.stop(); sync.onSend = { content, _ in replacement.append(content) }; sync.start(includeCurrent: false)
+        unblock.signal(); sync.waitUntilIdle(); drainMainQueue()
+        try require(board.string(forType: .string) == "original local copy" && original.isEmpty && replacement.isEmpty,
+                    "Disable/re-enable invalidates queued reads and writes")
+
+        let source = NativeRunToken(), enteredSource = DispatchSemaphore(value: 0), unblockSource = DispatchSemaphore(value: 0)
+        queue.async { enteredSource.signal(); unblockSource.wait() }
+        try require(enteredSource.wait(timeout: .now() + 2) == .success, "Clipboard queue blocked for source disconnect")
+        sync.apply(NativeClipboardContent(text: "disconnected source"), from: source)
+        source.cancel(); unblockSource.signal(); sync.waitUntilIdle()
+        try require(board.string(forType: .string) == "original local copy", "A disconnected source cannot write queued content")
+
+        let receivedScope = sync.scopeToken!
+        DispatchQueue.main.async { sync.apply(NativeClipboardContent(text: "stale incoming main callback"), within: receivedScope) }
+        sync.stop(); sync.start(includeCurrent: false)
+        drainMainQueue(); sync.waitUntilIdle()
+        try require(board.string(forType: .string) == "original local copy",
+                    "Incoming work admitted before disable/re-enable cannot adopt the replacement clipboard scope")
+
+        NativePasteboard.write(NativeClipboardContent(text: "pending old callback"), to: board)
+        sync.start(includeCurrent: true); sync.waitUntilIdle() // callback is queued on main but not run
+        sync.stop(); NativePasteboard.write(NativeClipboardContent(text: "new session copy"), to: board)
+        sync.start(includeCurrent: true); sync.waitUntilIdle(); drainMainQueue(); sync.waitUntilIdle()
+        try require(replacement.map { $0.text } == ["new session copy"], "A pending main callback is not revived by a replacement session")
+
+        let readEntered = DispatchSemaphore(value: 0), readUnblock = DispatchSemaphore(value: 0)
+        let slow = NativeClipboardSync(pasteboard: board, read: { pasteboard in
+            let copy = NativePasteboard.read(pasteboard)
+            readEntered.signal(); readUnblock.wait(); return copy
+        })
+        slow.onSend = { content, _ in original.append(content) }
+        slow.start(includeCurrent: true)
+        try require(readEntered.wait(timeout: .now() + 2) == .success, "A lazy clipboard read is in progress")
+        slow.stop() // must not wait for the blocked read
+        slow.onSend = { content, _ in replacement.append(content) }; slow.start(includeCurrent: false)
+        readUnblock.signal(); slow.waitUntilIdle(); drainMainQueue()
+        try require(original.isEmpty && replacement.count == 1, "A read completed after cancellation cannot leak to any recipient")
+        slow.stop(); sync.stop()
+    }
+
+    static func testCapabilityGate() throws {
+        let gate = NativeCapabilityGate(), canceled = NativeRunToken(), replacement = NativeRunToken()
+        var effects: [String] = []
+        try require(gate.admit(token: canceled, { effects.append("canceled Keychain/transport/viewer work") }) == .waiting,
+                    "The original registered attempt waits for startup probes")
+        canceled.cancel()
+        try require(gate.admit(token: replacement, { effects.append("replacement") }) == .waiting,
+                    "A replacement waits with a new identity")
+        gate.complete(); gate.complete()
+        try require(effects == ["replacement"], "Closing the original attempt suppresses all deferred side effects; completion runs once")
+        try require(gate.admit(token: replacement, {}) == .ready, "Ordinary connections proceed once probes complete")
+        try require(gate.admit(token: canceled, {}) == .rejected, "A canceled attempt cannot be revived after readiness")
+
+        let stopped = NativeCapabilityGate(), pending = NativeRunToken()
+        _ = stopped.admit(token: pending, { effects.append("after stop") })
+        stopped.stop(); stopped.complete()
+        try require(!pending.isActive && effects == ["replacement"] && stopped.admit({}) == .rejected,
+                    "Stop cancels pending requests and prevents late startup callbacks")
+
+        let bounded = NativeCapabilityGate()
+        var calls = 0
+        for index in 0..<12 {
+            let admission = bounded.admit { calls += 1 }
+            try require(admission == (index < 8 ? .waiting : .rejected), "Startup work has a finite admission budget")
+        }
+        bounded.complete()
+        try require(calls == 8, "Only admitted work is executed")
+
+        let duringFlush = NativeCapabilityGate(), retired = NativeRunToken()
+        _ = duringFlush.admit { retired.cancel() }
+        _ = duringFlush.admit(token: retired, { effects.append("retired during flush") })
+        duringFlush.complete()
+        try require(effects == ["replacement"], "The gate rechecks each intent immediately before delivery")
+    }
+
+    /// Synthetic session observations and fake power APIs only: no live wake.
+    static func testWakeRecovery() throws {
+        var held = 0, received: [IOPMAssertionID] = [], released: [IOPMAssertionID] = []
+        let activity = NativeWakeActivity(createHold: { held += 1; return 99 }, declare: { id in
+            received.append(id); id = UInt32(received.count + 40); return true
+        }, release: { released.append($0) })
+        var wake = MLHostWake()
+        func step(_ ms: UInt32, share: Bool = false, awake: Bool = true) -> Int32 {
+            ml_host_wake_step(&wake, ms, 1, share ? 1 : 0, awake ? 1 : 0)
+        }
+        try require(step(0, awake: false) == ML_HOST_WAKE_DECLARE_ACTIVITY && activity.request(),
+                    "An approved connection starts one wake while the display is off")
+        try require(step(100) == ML_HOST_WAKE_WAIT && released.isEmpty && held == 1,
+                    "The activity and display hold remain owned while loginwindow is still covered")
+        try require(step(1000) == ML_HOST_WAKE_DECLARE_ACTIVITY && activity.request(),
+                    "A shield that missed the first activity gets a second request")
+        try require(received == [0, 41], "A renewed activity passes the ID returned by IOKit")
+        try require(step(1100, share: true) == ML_HOST_WAKE_READY,
+                    "Clearing the shield permits a session only with an awake display")
+        activity.stop(); activity.stop()
+        try require(released == [42, 99] && !activity.request(), "Finishing releases each owned assertion once and prevents late activity")
+        try require(ml_host_needs_unlock(1, 1) == 0 && ml_host_needs_unlock(1, 0) == 1,
+                    "An eligible session clears a previous timeout regardless of display sleep; a covered session keeps it")
+
+        var failedReleases: [IOPMAssertionID] = [], calls = 0
+        do {
+            let failed = NativeWakeActivity(createHold: { nil }, declare: { id in
+                calls += 1
+                if calls == 1 { id = 7; return true }
+                id = 123; return false
+            }, release: { failedReleases.append($0) })
+            try require(failed.request() && !failed.request(), "An API failure is reported without discarding a previous successful activity")
+        }
+        try require(failedReleases == [7], "Dropping a canceled wake releases the last valid ID, not a failed output")
+        var emptyReleases: [IOPMAssertionID] = []
+        do {
+            let empty = NativeWakeActivity(createHold: { nil }, declare: { _ in false }, release: { emptyReleases.append($0) })
+            try require(!empty.request(), "A failed first request leaves no owned activity")
+        }
+        try require(emptyReleases.isEmpty, "Failed assertion creation requires no release")
     }
 }

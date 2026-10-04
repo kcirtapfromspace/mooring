@@ -15,6 +15,39 @@ final class NativeRunToken: @unchecked Sendable {
     private var live = true
     var isActive: Bool { lock.lock(); defer { lock.unlock() }; return live }
     @discardableResult func cancel() -> Bool { lock.lock(); defer { lock.unlock() }; let old = live; live = false; return old }
+    /// Serialize a short mutation with cancellation. Never hold this over a
+    /// lazy pasteboard read, conversion, network operation or callback.
+    @discardableResult func performIfActive(_ work: () -> Void) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard live else { return false }
+        work(); return true
+    }
+}
+
+/// Main-thread launch gate. Deferred work carries its original intent rather
+/// than creating another attempt when startup probes eventually finish.
+final class NativeCapabilityGate {
+    enum Admission: Equatable { case ready, waiting, rejected }
+    private(set) var isReady = false
+    private(set) var isStopped = false
+    private var waiting: [(NativeRunToken?, () -> Void)] = []
+    func admit(token: NativeRunToken? = nil, _ work: @escaping () -> Void) -> Admission {
+        guard !isStopped, token?.isActive != false else { return .rejected }
+        if isReady { return .ready }
+        waiting.removeAll { $0.0?.isActive == false }
+        guard waiting.count < 8 else { return .rejected }
+        waiting.append((token, work)); return .waiting
+    }
+    func complete() {
+        guard !isStopped, !isReady else { return }
+        isReady = true
+        let pending = waiting; waiting = []
+        for (token, work) in pending where !isStopped && token?.isActive != false { work() }
+    }
+    func stop() {
+        isStopped = true
+        waiting.forEach { $0.0?.cancel() }; waiting = []
+    }
 }
 
 /// Session control messages. Rust validates fields and direction on send and
@@ -252,16 +285,11 @@ final class NativeClockSync {
     /// Milliseconds from the host's screen change to each stage here, or nil
     /// before the clocks are placed or for a value outside 0 to 2 s.
     func latency(_ timing: NativeFrameTiming) -> (total: Double, toViewer: Double, displayWait: Double)? {
-        guard let estimate, timing.presentedUs > 0, timing.hostUs <= UInt64(Int64.max) else { return nil }
-        let hostHere = Int64(timing.hostUs) - estimate.offsetUs
-        func since(_ start: Int64, _ end: UInt64) -> Double? {
-            guard end <= UInt64(Int64.max) else { return nil }
-            let milliseconds = Double(Int64(end) - start) / 1000
-            return (0...2000).contains(milliseconds) ? milliseconds : nil
-        }
-        guard let total = since(hostHere, timing.presentedUs), let toViewer = since(hostHere, timing.decodeStartUs),
-              timing.presentedUs >= timing.decodedUs else { return nil }
-        return (total, toViewer, Double(timing.presentedUs - timing.decodedUs) / 1000)
+        guard let estimate else { return nil }
+        var value = MLFrameLatency()
+        guard ml_clock_latency(estimate.offsetUs, timing.hostUs, timing.decodeStartUs, timing.decodedUs,
+                               timing.presentedUs, &value) == ML_SESSION_OK else { return nil }
+        return (Double(value.total_us) / 1000, Double(value.to_viewer_us) / 1000, Double(value.display_wait_us) / 1000)
     }
 }
 
@@ -459,7 +487,7 @@ final class NativeSessionChannel: @unchecked Sendable {
     let transport: NativeTransport
     let token = NativeRunToken()
     let measurements = NativeSessionMeasurements()
-    private let writer = DispatchQueue(label: "dev.maclink.native.writer", qos: .userInteractive)
+    private let writer: DispatchQueue
     private let lock = NSLock()
     private var pending = 0
     private var pendingMain = 0
@@ -479,11 +507,14 @@ final class NativeSessionChannel: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return (peerStats, peerStatsTime.map { ProcessInfo.processInfo.systemUptime - $0 })
     }
-    init(_ transport: NativeTransport) { self.transport = transport }
-    func send(_ message: NativeSessionMessage, completion: (() -> Void)? = nil) {
+    init(_ transport: NativeTransport, writer: DispatchQueue = DispatchQueue(label: "dev.maclink.native.writer", qos: .userInteractive)) {
+        self.transport = transport; self.writer = writer
+    }
+    func send(_ message: NativeSessionMessage, whileActive intent: NativeRunToken? = nil, completion: (() -> Void)? = nil) {
         var move: NativeInputEvent?
         if case .input(let event) = message, event.kind == .pointerMove { move = event }
         lock.lock()
+        guard intent?.isActive != false else { lock.unlock(); completion?(); return }
         if let move, let open = openMove {
             open.event = move; lock.unlock(); completion?()
             return
@@ -503,7 +534,7 @@ final class NativeSessionChannel: @unchecked Sendable {
             if let slot {
                 lock.lock(); if openMove === slot { openMove = nil }; outgoing = .input(slot.event); lock.unlock()
             }
-            guard token.isActive else { return }
+            guard token.isActive, intent?.isActive != false else { return }
             let began = ProcessInfo.processInfo.systemUptime
             do {
                 try transport.send(outgoing)
