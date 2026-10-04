@@ -9,7 +9,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
     exit 1
 fi
 
-for build_tool in cargo rustup swiftc xcrun lipo codesign plutil; do
+for build_tool in cargo rustup swiftc xcrun lipo codesign plutil iconutil; do
     command -v "$build_tool" >/dev/null || {
         printf 'Missing build tool: %s. Install Rust and the Apple command line tools.\n' "$build_tool" >&2
         exit 1
@@ -39,6 +39,12 @@ trap 'rm -rf "$build_root"' EXIT
 staged_bundle="$build_root/MacLink.app"
 mkdir -p "$staged_bundle/Contents/MacOS" "$staged_bundle/Contents/Resources" "$staged_bundle/Contents/Frameworks"
 sdk_path="$(xcrun --show-sdk-path)"
+# Render every standard icon size from the same geometry used by the shell.
+swiftc -O -swift-version 5 -parse-as-library -sdk "$sdk_path" -target arm64-apple-macosx14.0 \
+    -framework AppKit "$project_root/app/MacLinkBrand.swift" "$project_root/scripts/render-brand.swift" \
+    -o "$build_root/render-brand"
+"$build_root/render-brand" "$build_root/MacLink.iconset"
+iconutil -c icns "$build_root/MacLink.iconset" -o "$staged_bundle/Contents/Resources/MacLink.icns"
 installed_targets="$(rustup target list --installed)"
 rust_target=aarch64-apple-darwin
 if ! printf '%s\n' "$installed_targets" | /usr/bin/grep -Fqx "$rust_target"; then

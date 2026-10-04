@@ -10,26 +10,28 @@ final class ConnectionPermissionController: NSWindowController, NSWindowDelegate
     private let allow = NSButton(title: "Enable & Connect…", target: nil, action: nil)
 
     init(macName: String) {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 490, height: 265),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 330),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Connect to \(macName)"
+        MacLinkAppearance.prepare(window)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
-        let title = label("One permission for automatic connections", size: 19, weight: .semibold)
+        let heading = MacLinkAppearance.header("Allow session control", subtitle: "For full screen and automatic connections.")
         let manual = NSButton(title: "Connect Without Automation", target: self, action: #selector(connectManually))
         manual.bezelStyle = .rounded
         allow.target = self; allow.action = #selector(requestAccess); allow.bezelStyle = .rounded
+        MacLinkAppearance.primary(allow)
         allow.keyEquivalent = "\r"
         let note = label("You can change your preferences later in Settings.", size: 12, color: .secondaryLabelColor)
-        let content = stack([title, detail, note, allow, manual], spacing: 15)
+        let content = stack([heading, detail, note, allow, manual], spacing: 18)
         let root = window.contentView!
         root.addSubview(content)
         NSLayoutConstraint.activate([
             content.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 26),
             content.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -26),
             content.topAnchor.constraint(equalTo: root.topAnchor, constant: 24),
-            title.widthAnchor.constraint(equalTo: content.widthAnchor),
+            heading.widthAnchor.constraint(equalTo: content.widthAnchor),
             detail.widthAnchor.constraint(equalTo: content.widthAnchor),
             note.widthAnchor.constraint(equalTo: content.widthAnchor)
         ])

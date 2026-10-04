@@ -14,17 +14,20 @@ final class NativeShareWindow: NSWindowController, NSWindowDelegate {
     let toggle = NSButton(title: "Start Sharing", target: nil, action: nil)
     let copy = NSButton(title: "Copy Pairing Code", target: nil, action: nil)
     let control = NSButton(title: "Enable Keyboard & Mouse…", target: nil, action: nil)
+    private let controlNote = label("Allow Accessibility on this Mac to enable remote control.", size: 12, color: .secondaryLabelColor)
     let automatic = NSButton(checkboxWithTitle: "Share this Mac automatically", target: nil, action: nil)
     let clipboard = NSButton(checkboxWithTitle: "Share clipboard with the connected Mac", target: nil, action: nil)
 
     init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 470),
-                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 620),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "Share This Mac"
+        MacLinkAppearance.prepare(window)
+        window.contentMinSize = NSSize(width: 540, height: 460)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
-        let title = label("Your Mac, wherever you work", size: 22, weight: .semibold)
+        let heading = MacLinkAppearance.header("Share this Mac", subtitle: "Your workspace, on your other Mac.")
         let note = label("Pairing allows viewing and, when enabled, keyboard and mouse control. Keep the code private. Sharing continues after you close this window; stop it here or from the menu bar.", size: 12, color: .secondaryLabelColor)
         let automaticNote = label("Starts sharing when MacLink opens and resumes after sleep or lock. To share after you log in, turn on Launch MacLink at login in Settings.", size: 12, color: .secondaryLabelColor)
         let reset = NSButton(title: "Reset Pairing", target: self, action: #selector(resetPairing))
@@ -36,18 +39,24 @@ final class NativeShareWindow: NSWindowController, NSWindowDelegate {
         clipboard.target = self; clipboard.action = #selector(changeClipboard)
         clipboard.toolTip = "Copy on one Mac and paste on the other while connected. Items password managers mark as private are never shared."
         for button in [toggle, copy, control, reset, diagnostics] { button.bezelStyle = .rounded }
+        MacLinkAppearance.primary(toggle)
         let actions = stack([toggle, copy], orientation: .horizontal, spacing: 10)
-        let extras = stack([reset, diagnostics], orientation: .horizontal, spacing: 10)
-        let body = stack([title, status, detail, actions, control, stack([automatic, automaticNote], spacing: 4), clipboard, note, extras], spacing: 15)
-        let root = window.contentView!; root.addSubview(body)
-        NSLayoutConstraint.activate([
-            body.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 26),
-            body.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -26),
-            body.topAnchor.constraint(equalTo: root.topAnchor, constant: 24)
-        ])
-        for view in [title, detail, note, automaticNote] { view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
+        let extras = stack([reset, NSView(), diagnostics], orientation: .horizontal, spacing: 10)
+        let state = stack([status, detail, actions], spacing: 12)
+        detail.widthAnchor.constraint(equalTo: state.widthAnchor).isActive = true
+        let preferences = stack([MacLinkAppearance.sectionTitle("Sharing preferences", symbol: "slider.horizontal.3"),
+                                 controlNote, control, stack([automatic, automaticNote], spacing: 4), clipboard], spacing: 12)
+        preferences.detachesHiddenViews = true
+        controlNote.widthAnchor.constraint(equalTo: preferences.widthAnchor).isActive = true
+        automaticNote.widthAnchor.constraint(equalTo: preferences.widthAnchor).isActive = true
+        let body = stack([heading, MacLinkAppearance.surface(state), preferences, note, extras], spacing: 24)
+        MacLinkAppearance.scrollBody(body, in: window.contentView!)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    func showControlPermission(_ allowed: Bool) {
+        control.isHidden = allowed
+        controlNote.stringValue = allowed ? "Keyboard and mouse control is enabled." : "Allow Accessibility on this Mac to enable remote control."
+    }
     @objc private func toggleSharing() { onToggle?() }
     @objc private func changeAutomatic() { onAutomaticChange?(automatic.state == .on) }
     @objc private func changeClipboard() { onClipboardChange?(clipboard.state == .on) }
@@ -57,43 +66,80 @@ final class NativeShareWindow: NSWindowController, NSWindowDelegate {
     @objc private func saveDiagnostics() { onDiagnostics?() }
 }
 
-final class NativePairWindow: NSWindowController, NSWindowDelegate {
+final class NativePairWindow: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
     var onClose: (() -> Void)?
     var onConnect: ((String, String) -> Void)?
     let code = NSSecureTextField(string: "")
     let address = NSTextField(string: "")
     let error = label("", size: 12, color: .systemRed)
     let connect = NSButton(title: "Pair & Connect", target: nil, action: nil)
+    private let options = NSButton(title: "Address override", target: nil, action: nil)
+    private var addressForm: NSStackView!
+    private var busy = false
     init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 335),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 380),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Connect with MacLink"
+        MacLinkAppearance.prepare(window)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
-        let heading = label("Pair once. Connect anytime.", size: 22, weight: .semibold)
+        let heading = MacLinkAppearance.header("Pair a Mac", subtitle: "Pair once. Connect anytime.")
         let note = label("On your other Mac, open MacLink → Share This Mac → Start Sharing, then copy its pairing code here.", color: .secondaryLabelColor)
         code.placeholderString = "Paste pairing code"; code.setAccessibilityLabel("Pairing code")
         address.placeholderString = "Optional — the code lists the Mac's addresses"; address.setAccessibilityLabel("Mac address override")
-        let form = NSGridView(views: [[label("Pairing code"), code], [label("Address"), address]])
-        form.rowSpacing = 14; form.columnSpacing = 14
-        form.column(at: 1).xPlacement = .fill
-        connect.target = self; connect.action = #selector(pair); connect.bezelStyle = .rounded; connect.keyEquivalent = "\r"
-        let body = stack([heading, note, form, error, connect], spacing: 18)
+        code.controlSize = .large; address.controlSize = .large
+        code.delegate = self; address.delegate = self
+        let form = stack([label("Pairing code", size: 12, weight: .medium), code], spacing: 6)
+        code.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
+        addressForm = stack([label("Address", size: 12, weight: .medium), address], spacing: 6)
+        address.widthAnchor.constraint(equalTo: addressForm.widthAnchor).isActive = true
+        addressForm.isHidden = true
+        options.bezelStyle = .inline; options.setButtonType(.onOff)
+        options.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)
+        options.imagePosition = .imageLeading
+        options.target = self; options.action = #selector(toggleOptions)
+        options.toolTip = "Use a different address, such as the sharing Mac’s VPN address."
+        connect.target = self; connect.action = #selector(pair); connect.keyEquivalent = "\r"
+        MacLinkAppearance.primary(connect)
+        connect.isEnabled = false
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelPairing))
+        cancel.bezelStyle = .rounded; cancel.keyEquivalent = "\u{1b}"
+        let actions = stack([NSView(), cancel, connect], orientation: .horizontal, spacing: 8)
+        error.maximumNumberOfLines = 3
+        error.lineBreakMode = .byTruncatingTail
+        let body = stack([heading, note, form, options, addressForm, error, actions], spacing: 18)
+        body.detachesHiddenViews = true
         let root = window.contentView!; root.addSubview(body)
         NSLayoutConstraint.activate([
             body.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 26),
             body.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -26),
             body.topAnchor.constraint(equalTo: root.topAnchor, constant: 24)
         ])
-        for view in [note, form, error] { view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
+        for view in [heading, note, form, addressForm!, error, actions] { view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
         window.initialFirstResponder = code
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-    @objc private func pair() { onConnect?(code.stringValue, address.stringValue) }
+    @objc private func pair() {
+        guard !busy, !code.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        onConnect?(code.stringValue, address.stringValue)
+    }
+    @objc private func cancelPairing() { window?.performClose(nil) }
+    @objc private func toggleOptions() {
+        let expanded = options.state == .on
+        addressForm.isHidden = !expanded
+        options.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
+        window?.setContentSize(NSSize(width: 560, height: expanded ? 460 : 380))
+    }
+    func controlTextDidChange(_ obj: Notification) {
+        connect.isEnabled = !busy && !code.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        error.stringValue = ""
+    }
     func windowWillClose(_ notification: Notification) { onClose?() }
     func setBusy(_ busy: Bool) {
-        connect.isEnabled = !busy; code.isEnabled = !busy; address.isEnabled = !busy
+        self.busy = busy
+        connect.isEnabled = !busy && !code.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        code.isEnabled = !busy; address.isEnabled = !busy; options.isEnabled = !busy
         connect.title = busy ? "Connecting…" : "Pair & Connect"
     }
 }
@@ -190,6 +236,7 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
         window.title = name + " — MacLink"
+        MacLinkAppearance.prepare(window)
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.fullScreenPrimary]
         window.minSize = NSSize(width: 540, height: 360)
@@ -208,7 +255,16 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
         exitFullScreen.target = self; exitFullScreen.action = #selector(leaveFullScreen); exitFullScreen.bezelStyle = .inline
         exitFullScreen.toolTip = "Or press ⌃⌘F. Swiping between Spaces also shows this Mac without leaving full screen."
         exitFullScreen.isHidden = true
-        let bar = stack([status, NSView(), versionNotice, allowSystemKeys, exitFullScreen, diagnostics], orientation: .horizontal, spacing: 12)
+        let mark = NSImageView(image: MacLinkBrand.menuBarImage)
+        mark.contentTintColor = MacLinkBrand.accent
+        mark.translatesAutoresizingMaskIntoConstraints = false
+        mark.widthAnchor.constraint(equalToConstant: 18).isActive = true
+        mark.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        status.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        status.maximumNumberOfLines = 1
+        status.lineBreakMode = .byTruncatingTail
+        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let bar = stack([mark, status, NSView(), versionNotice, allowSystemKeys, exitFullScreen, diagnostics], orientation: .horizontal, spacing: 12)
         root.addSubview(bar)
         NSLayoutConstraint.activate([
             video.leadingAnchor.constraint(equalTo: root.leadingAnchor), video.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -230,6 +286,7 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
         closeButton.target = self; closeButton.action = #selector(closeWindow)
         cancelButton.target = self; cancelButton.action = #selector(cancelReconnect)
         for button in [reconnectButton, closeButton, cancelButton] { button.bezelStyle = .rounded }
+        MacLinkAppearance.primary(reconnectButton)
         endedReason.alignment = .center
         let content = stack([endedTitle, endedReason,
                              stack([closeButton, cancelButton, reconnectButton], orientation: .horizontal, spacing: 10)], spacing: 12)

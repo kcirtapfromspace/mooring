@@ -39,7 +39,8 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
         draft = settings
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 610, height: 540),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.title = "MacLink Settings"
+        window.title = "Screen Sharing Settings"
+        MacLinkAppearance.prepare(window)
         window.minSize = NSSize(width: 580, height: 540)
         window.isReleasedWhenClosed = false
         super.init(window: window)
@@ -99,6 +100,7 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
         saveButton.target = self
         saveButton.action = #selector(save)
         saveButton.keyEquivalent = "\r"
+        MacLinkAppearance.primary(saveButton)
     }
 
     private func section(_ title: String, _ views: [NSView]) -> NSStackView {
@@ -119,11 +121,7 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
 
     private func buildLayout() {
         guard let window, let root = window.contentView else { return }
-        let title = label("Settings", size: 23, weight: .semibold)
-        let subtitle = label("Ready by default. Change only what you need.", size: 13, color: .secondaryLabelColor)
-        subtitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        subtitle.preferredMaxLayoutWidth = 540
-        let heading = stack([title, subtitle], spacing: 6)
+        let heading = MacLinkAppearance.header("Screen Sharing", subtitle: "Display and automation preferences for Apple Screen Sharing.")
         root.addSubview(heading)
 
         let target = NSGridView(views: [[label("Mac"), targetPopup]])
@@ -194,7 +192,6 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
             heading.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 26),
             heading.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -26),
             heading.topAnchor.constraint(equalTo: root.topAnchor, constant: 24),
-            subtitle.widthAnchor.constraint(equalTo: heading.widthAnchor),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 18),
@@ -212,7 +209,9 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
             actions.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -18),
             validationLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 310)
         ])
-        for view in body.arrangedSubviews { view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
+        for view in body.arrangedSubviews where view !== advancedButton {
+            view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+        }
     }
 
     func completeHomeCheck(request: UUID, description: String, fingerprint: String?) {

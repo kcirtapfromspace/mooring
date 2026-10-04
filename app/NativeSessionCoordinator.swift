@@ -340,8 +340,7 @@ final class NativeSessionCoordinator {
             ready = "Ready for your other Mac · its connection wakes this display"
         }
         shareWindow?.status.stringValue = isSharing ? (hostChannel == nil ? ready : connected) : idle
-        shareWindow?.control.isEnabled = !NativeInputInjector.isTrusted
-        shareWindow?.control.title = NativeInputInjector.isTrusted ? "Keyboard & Mouse Enabled" : "Enable Keyboard & Mouse…"
+        shareWindow?.showControlPermission(NativeInputInjector.isTrusted)
         shareWindow?.automatic.state = sharesAutomatically ? .on : .off
         shareWindow?.clipboard.state = sharesClipboard ? .on : .off
         if let message { shareWindow?.detail.stringValue = message }
@@ -729,8 +728,7 @@ final class NativeSessionCoordinator {
         }
         hostInputGate.invalidate()
         let trusted = NativeInputInjector.isTrusted
-        shareWindow?.control.isEnabled = !trusted
-        shareWindow?.control.title = trusted ? "Keyboard & Mouse Enabled" : "Enable Keyboard & Mouse…"
+        shareWindow?.showControlPermission(trusted)
         guard let channel = hostChannel, channel.token.isActive else { return }
         if !trusted { hostInjector?.releaseAll() }
         capture?.setShowsCursor(!trusted)

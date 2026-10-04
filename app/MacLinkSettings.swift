@@ -30,10 +30,6 @@ enum MacLinkSetting {
     case sharesAutomatically, sharesClipboard, matchesScreen, playsSound, lowersDisplayLatency, launchesAtLogin
 }
 
-private final class FlippedView: NSView {
-    override var isFlipped: Bool { true }
-}
-
 /// One window for everything a person may want to change, in three parts:
 /// sharing this Mac, viewing another, and MacLink itself. Apple Screen
 /// Sharing automation keeps its own window, opened from here.
@@ -70,12 +66,15 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
     private let version = label("", size: 13)
     private let updateNote = label("", size: 12, color: .secondaryLabelColor)
     private let updateButton = NSButton(title: "Check for Updates…", target: nil, action: nil)
+    private let sectionSelector = NSSegmentedControl()
+    private var sections: [NSStackView] = []
 
     init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 640),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 600),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "MacLink Settings"
-        window.minSize = NSSize(width: 520, height: 420)
+        MacLinkAppearance.prepare(window)
+        window.contentMinSize = NSSize(width: 560, height: 460)
         window.isReleasedWhenClosed = false
         window.setFrameAutosaveName("MacLinkSettings")
         super.init(window: window)
@@ -105,7 +104,8 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
     }
 
     private func section(_ title: String, _ note: String?, _ views: [NSView]) -> NSStackView {
-        var content: [NSView] = [label(title, size: 13, weight: .semibold)]
+        let symbol = title == "Sharing this Mac" ? "rectangle.on.rectangle" : title == "Viewing another Mac" ? "display" : "gearshape"
+        var content: [NSView] = [MacLinkAppearance.sectionTitle(title, symbol: symbol)]
         if let note { content.append(label(note, size: 12, color: .secondaryLabelColor)) }
         return stack(content + views, spacing: 9)
     }
@@ -120,8 +120,6 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
         indented.widthAnchor.constraint(equalTo: option.widthAnchor).isActive = true
         return option
     }
-    private func separator() -> NSBox { let box = NSBox(); box.boxType = .separator; return box }
-
     private func layout() {
         guard let root = window?.contentView else { return }
         let share = NSButton(title: "Share This Mac…", target: self, action: #selector(shareThisMac))
@@ -149,27 +147,20 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
             stack([updateNote, updateButton], spacing: 6),
             automation
         ])
-        let body = stack([sharing, separator(), viewing, separator(), general], spacing: 20)
+        let heading = MacLinkAppearance.header("Settings", subtitle: "Changes apply as you go.")
+        sectionSelector.segmentCount = 3
+        for (index, title) in ["Sharing", "Viewing", "General"].enumerated() { sectionSelector.setLabel(title, forSegment: index) }
+        sectionSelector.trackingMode = .selectOne
+        sectionSelector.segmentStyle = .rounded
+        sectionSelector.segmentDistribution = .fillEqually
+        sectionSelector.selectedSegment = 0
+        sectionSelector.target = self; sectionSelector.action = #selector(changeSection)
+        sectionSelector.setAccessibilityLabel("Settings category")
+        sections = [sharing, viewing, general]
+        viewing.isHidden = true; general.isHidden = true
+        let body = stack([heading, sectionSelector, sharing, viewing, general], spacing: 26)
         body.detachesHiddenViews = true
-        let document = FlippedView()
-        document.translatesAutoresizingMaskIntoConstraints = false
-        document.addSubview(body)
-        let scroll = NSScrollView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
-        scroll.drawsBackground = false; scroll.borderType = .noBorder
-        scroll.documentView = document
-        root.addSubview(scroll)
-        NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: root.topAnchor), scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-            body.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 26),
-            body.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -26),
-            body.topAnchor.constraint(equalTo: document.topAnchor, constant: 22),
-            body.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -22)
-        ])
-        for view in body.arrangedSubviews { view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
+        MacLinkAppearance.scrollBody(body, in: root)
         // Text and grouped options span the column and wrap; buttons keep their size.
         for part in [sharing, viewing, general] {
             for view in part.arrangedSubviews {
@@ -180,6 +171,10 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
                 }
             }
         }
+    }
+
+    @objc private func changeSection() {
+        for (index, section) in sections.enumerated() { section.isHidden = index != sectionSelector.selectedSegment }
     }
 
     /// Shows `state`; call again whenever it may have changed.

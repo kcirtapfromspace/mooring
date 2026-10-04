@@ -126,6 +126,8 @@ func label(_ text: String, size: CGFloat = 13, weight: NSFont.Weight = .regular,
     view.textColor = color
     view.lineBreakMode = .byWordWrapping
     view.maximumNumberOfLines = 0
+    view.preferredMaxLayoutWidth = 440
+    view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
     return view
 }
 
@@ -218,8 +220,9 @@ private final class AddMacController: NSWindowController, NSTextFieldDelegate {
                               styleMask: [.titled], backing: .buffered, defer: false)
         super.init(window: window)
         window.title = "Add a Mac"
-        let title = label("Add a Mac", size: 22, weight: .semibold)
-        let subtitle = label("Enter your Mac’s address. Auto mode and full screen are ready to go.", color: .secondaryLabelColor)
+        MacLinkAppearance.prepare(window)
+        let heading = MacLinkAppearance.header("Add a Mac", subtitle: "Connect using Apple Screen Sharing.")
+        let subtitle = label("Enable Screen Sharing on the other Mac, then enter its hostname or IP address.", color: .secondaryLabelColor)
         for field in [nameField, hostField, portField] {
             field.delegate = self
             field.controlSize = .large
@@ -253,7 +256,7 @@ private final class AddMacController: NSWindowController, NSTextFieldDelegate {
         optionsButton.target = self
         optionsButton.action = #selector(toggleOptions)
         optionsButton.setAccessibilityLabel("More Options: optional name and port")
-        saveButton.bezelStyle = .rounded
+        MacLinkAppearance.primary(saveButton)
         saveButton.keyEquivalent = "\r"
         saveButton.target = self
         saveButton.action = #selector(save)
@@ -264,7 +267,7 @@ private final class AddMacController: NSWindowController, NSTextFieldDelegate {
         cancelButton.action = #selector(cancel)
         let spacer = NSView()
         let actions = stack([spacer, cancelButton, saveButton], orientation: .horizontal, spacing: 8)
-        let content = stack([title, subtitle, form, optionsButton, optionsForm, errorLabel, actions], spacing: 14)
+        let content = stack([heading, subtitle, form, optionsButton, optionsForm, errorLabel, actions], spacing: 14)
         content.detachesHiddenViews = true
         window.contentView!.addSubview(content)
         NSLayoutConstraint.activate([
@@ -273,6 +276,7 @@ private final class AddMacController: NSWindowController, NSTextFieldDelegate {
             content.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 28),
             content.bottomAnchor.constraint(lessThanOrEqualTo: window.contentView!.bottomAnchor, constant: -24),
             subtitle.widthAnchor.constraint(equalTo: content.widthAnchor),
+            heading.widthAnchor.constraint(equalTo: content.widthAnchor),
             form.widthAnchor.constraint(equalTo: content.widthAnchor),
             optionsForm.widthAnchor.constraint(equalTo: content.widthAnchor),
             errorLabel.widthAnchor.constraint(equalTo: content.widthAnchor),
@@ -354,8 +358,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     private var busy = false
     private var addController: AddMacController?
     private let countLabel = label("0", size: 11, color: .secondaryLabelColor)
-    private let titleLabel = label("Your Macs,\nwithin reach.", size: 30, weight: .semibold)
-    private let addressLabel = label("Save your first Mac to get started.", size: 14, color: .secondaryLabelColor)
+    private let titleLabel = label("Your Macs,\nwithin reach.", size: 34, weight: .semibold)
+    private let addressLabel = label("Connect to another Mac, or share this one.", size: 14, color: .secondaryLabelColor)
+    private let connectionKind = label("CONNECT · SHARE · CONTROL", size: 11, weight: .semibold, color: MacLinkBrand.accent)
+    private let connectionIcon = NSImageView()
+    private let emptyList = label("Your saved Macs appear here.\nPair a Mac or add its address\nto get started.", size: 12, color: .secondaryLabelColor)
+    private let pairButton = NSButton(title: "Pair a Mac…", target: nil, action: nil)
+    private let shareButton = NSButton(title: "Share this Mac…", target: nil, action: nil)
     private let statusTitle = label("Welcome to MacLink", size: 14, weight: .semibold)
     private let statusDetail = NSTextView(frame: NSRect(x: 0, y: 0, width: 360, height: 92))
     private let statusSymbol = NSImageView()
@@ -378,7 +387,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        NSApp.setActivationPolicy(.regular)
+        NSApp.applicationIconImage = NSImage(named: "MacLink") ?? MacLinkBrand.image(size: 512)
         buildMenu()
         buildWindow()
         buildStatusItem()
@@ -389,7 +399,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         }
         automationState = automation.state
         native.onChange = { [weak self] in
-            self?.refreshStatusMenu()
+            self?.updateControls()
             self?.refreshSettings()
             // A session that just ended may free a waiting update to install.
             DispatchQueue.main.async { self?.updater.installIfIdle() }
@@ -413,18 +423,28 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showConnections()
+        if !flag { showConnections() }
         return true
     }
 
     func applicationWillTerminate(_ notification: Notification) { automation.stop(); native.stop() }
 
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu()
+        for (title, action) in [("Open Connections", #selector(showConnections)),
+                                ("Pair a Mac…", #selector(connectNative)),
+                                ("Share this Mac…", #selector(shareNative))] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
+        }
+        return menu
+    }
+
     private func buildStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem.button {
-            let image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: "MacLink")
-            image?.isTemplate = true
-            button.image = image
+            button.image = MacLinkBrand.menuBarImage
             button.setAccessibilityLabel("MacLink")
         }
         statusMenu.autoenablesItems = false
@@ -543,13 +563,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     @objc private func showConnections() {
+        if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func connectFromMenu(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String,
-              let row = connections.firstIndex(where: { $0.id == id }),
+              let row = rows.firstIndex(where: { $0.id == ConnectionRow.screenSharingID(id) }),
               !busy, !automationState.isBusy, window.attachedSheet == nil else { return }
         table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         connect()
@@ -571,6 +592,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide MacLink", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.option, .command]
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit MacLink", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         menu.addItem(appItem)
@@ -605,6 +630,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         view.submenu!.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
         view.submenu!.items[0].keyEquivalentModifierMask = [.control, .command]
         menu.addItem(view)
+        let windows = NSMenu(title: "Window")
+        windows.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windows.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windows.addItem(.separator())
+        windows.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+        let windowItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
+        windowItem.submenu = windows
+        menu.addItem(windowItem)
+        NSApp.windowsMenu = windows
         let help = NSMenuItem(title: "Help", action: nil, keyEquivalent: "")
         help.submenu = NSMenu(title: "Help")
         help.submenu!.addItem(withTitle: "Connecting to a Mac", action: #selector(showConnectionHelp), keyEquivalent: "?")
@@ -622,11 +656,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     private func buildWindow() {
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 540),
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 940, height: 640),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "MacLink"
+        MacLinkAppearance.prepare(window)
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 760, height: 520)
+        window.contentMinSize = NSSize(width: 900, height: 610)
         window.setFrameAutosaveName("MacLinkMainWindow")
         window.center()
         let root = window.contentView!
@@ -646,7 +681,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             sidebar.topAnchor.constraint(equalTo: root.topAnchor),
             sidebar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            sidebar.widthAnchor.constraint(equalToConstant: 230),
+            sidebar.widthAnchor.constraint(equalToConstant: 250),
             divider.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
             divider.topAnchor.constraint(equalTo: root.topAnchor),
             divider.bottomAnchor.constraint(equalTo: root.bottomAnchor),
@@ -656,7 +691,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             main.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             main.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         ])
-        let heading = stack([label("Saved Macs", size: 13, weight: .semibold), NSView(), countLabel], orientation: .horizontal)
+        let brandIcon = NSImageView(image: MacLinkBrand.image(size: 36))
+        brandIcon.translatesAutoresizingMaskIntoConstraints = false
+        brandIcon.widthAnchor.constraint(equalToConstant: 36).isActive = true
+        brandIcon.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        let brand = stack([brandIcon, stack([label("MacLink", size: 19, weight: .semibold),
+                                           label(MacLinkBrand.tagline, size: 10, color: .secondaryLabelColor)], spacing: 2)],
+                          orientation: .horizontal, spacing: 9)
+        sidebar.addSubview(brand)
+        let heading = stack([label("Saved Macs", size: 12, weight: .semibold), NSView(), countLabel], orientation: .horizontal)
         sidebar.addSubview(heading)
         table.headerView = nil
         table.style = .sourceList
@@ -665,7 +708,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         table.backgroundColor = .clear
         table.allowsEmptySelection = true
         table.allowsMultipleSelection = false
-        table.focusRingType = .none
+        table.focusRingType = .default
         table.dataSource = self
         table.delegate = self
         table.doubleAction = #selector(connect)
@@ -680,6 +723,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         scroll.hasVerticalScroller = true
         scroll.documentView = table
         sidebar.addSubview(scroll)
+        emptyList.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(emptyList)
         addButton.bezelStyle = .rounded
         addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
         addButton.imagePosition = .imageLeading
@@ -693,35 +738,47 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         removeButton.action = #selector(removeMac)
         let sidebarActions = stack([addButton, NSView(), removeButton], orientation: .horizontal, spacing: 8)
         sidebar.addSubview(sidebarActions)
+        let settings = NSButton(title: "Settings…", target: self, action: #selector(showSettings))
+        settings.bezelStyle = .inline
+        settings.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
+        settings.imagePosition = .imageLeading
+        let sidebarFooter = stack([settings, NSView()], orientation: .horizontal)
+        sidebar.addSubview(sidebarFooter)
         NSLayoutConstraint.activate([
+            brand.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 18),
+            brand.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -18),
+            brand.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 24),
             heading.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 20),
             heading.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -20),
-            heading.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 24),
+            heading.topAnchor.constraint(equalTo: brand.bottomAnchor, constant: 32),
             scroll.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 14),
             scroll.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 8),
             scroll.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -8),
             scroll.bottomAnchor.constraint(equalTo: sidebarActions.topAnchor, constant: -16),
             sidebarActions.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 16),
             sidebarActions.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -16),
-            sidebarActions.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -18)
+            sidebarActions.bottomAnchor.constraint(equalTo: sidebarFooter.topAnchor, constant: -18),
+            sidebarFooter.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 20),
+            sidebarFooter.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -20),
+            sidebarFooter.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -20),
+            emptyList.topAnchor.constraint(equalTo: scroll.topAnchor, constant: 18),
+            emptyList.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 20),
+            emptyList.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -20)
         ])
-        let icon = NSImageView(image: NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: nil)!)
-        icon.contentTintColor = .controlAccentColor
-        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 38, weight: .light)
+        let icon = connectionIcon
+        icon.image = MacLinkBrand.image(size: 64)
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 40, weight: .regular)
         icon.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([icon.widthAnchor.constraint(equalToConstant: 52), icon.heightAnchor.constraint(equalToConstant: 52)])
+        NSLayoutConstraint.activate([icon.widthAnchor.constraint(equalToConstant: 64), icon.heightAnchor.constraint(equalToConstant: 64)])
         titleLabel.maximumNumberOfLines = 2
         titleLabel.lineBreakMode = .byTruncatingTail
         addressLabel.maximumNumberOfLines = 1
         addressLabel.lineBreakMode = .byTruncatingMiddle
         statusTitle.maximumNumberOfLines = 1
         statusTitle.lineBreakMode = .byTruncatingTail
-        let intro = stack([icon, titleLabel, addressLabel], spacing: 12)
-        let statusBox = NSView()
+        let intro = stack([icon, connectionKind, titleLabel, addressLabel], spacing: 10)
+        let statusBox = MacLinkSurface()
         statusBox.translatesAutoresizingMaskIntoConstraints = false
-        statusBox.wantsLayer = true
-        statusBox.layer?.cornerRadius = 12
-        statusBox.layer?.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.08).cgColor
         statusSymbol.translatesAutoresizingMaskIntoConstraints = false
         statusSymbol.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: nil)
         statusSymbol.contentTintColor = .secondaryLabelColor
@@ -765,9 +822,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             statusTitle.widthAnchor.constraint(equalTo: statusCopy.widthAnchor),
             detailScroll.widthAnchor.constraint(equalTo: statusCopy.widthAnchor)
         ])
-        connectButton.bezelStyle = .rounded
-        connectButton.controlSize = .large
-        connectButton.font = .systemFont(ofSize: 14, weight: .semibold)
+        MacLinkAppearance.primary(connectButton)
         connectButton.keyEquivalent = "\r"
         connectButton.target = self
         connectButton.action = #selector(connect)
@@ -782,9 +837,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         spinner.isDisplayedWhenStopped = false
         let buttons = stack([connectButton, checkButton, spinner], orientation: .horizontal, spacing: 10)
         connectButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 112).isActive = true
-        let content = stack([intro, statusBox, buttons], spacing: 26)
+        let content = stack([intro, statusBox, buttons], spacing: 24)
         main.addSubview(content)
-        let hint = label("Auto mode and full screen by default.\nCustomize anytime in Settings.", size: 12, color: .secondaryLabelColor)
+        for (button, action, symbol) in [(pairButton, #selector(connectNative), "link"),
+                                        (shareButton, #selector(shareNative), "rectangle.on.rectangle")] {
+            button.bezelStyle = .rounded
+            button.target = self; button.action = action
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            button.imagePosition = .imageLeading
+        }
+        pairButton.toolTip = "Pair using a code from MacLink on your other Mac. ⌘K"
+        shareButton.toolTip = "Share this Mac with another Mac running MacLink."
+        let topBar = stack([label("Connections", size: 13, weight: .semibold), NSView(), pairButton, shareButton], orientation: .horizontal, spacing: 10)
+        main.addSubview(topBar)
+        let hint = label("Close the window to keep MacLink running.\nReturn from the Dock, menu bar, or ⌘Tab.", size: 12, color: .secondaryLabelColor)
         let help = NSButton(image: NSImage(systemSymbolName: "questionmark.circle", accessibilityDescription: "Connection help and display mode")!, target: self, action: #selector(showConnectionHelp))
         help.isBordered = false
         help.toolTip = "Connection help and display mode"
@@ -793,7 +859,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         NSLayoutConstraint.activate([
             content.leadingAnchor.constraint(equalTo: main.leadingAnchor, constant: 36),
             content.trailingAnchor.constraint(equalTo: main.trailingAnchor, constant: -36),
-            content.topAnchor.constraint(equalTo: main.topAnchor, constant: 34),
+            content.topAnchor.constraint(equalTo: topBar.bottomAnchor, constant: 28),
+            topBar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            topBar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            topBar.topAnchor.constraint(equalTo: main.topAnchor, constant: 24),
             intro.widthAnchor.constraint(equalTo: content.widthAnchor),
             titleLabel.widthAnchor.constraint(equalTo: intro.widthAnchor),
             addressLabel.widthAnchor.constraint(equalTo: intro.widthAnchor),
@@ -822,6 +891,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         let selection = id ?? selectedRow?.id
         rows = native.peers.map(ConnectionRow.maclink) + connections.map(ConnectionRow.screenSharing)
         countLabel.stringValue = String(rows.count)
+        emptyList.isHidden = !rows.isEmpty
         table.reloadData()
         if let row = rows.firstIndex(where: { $0.id == selection }) ?? (rows.isEmpty ? nil : 0) {
             table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
@@ -835,23 +905,32 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
 
     private func updateSelection() {
         if let peer = selectedPeer {
+            connectionKind.stringValue = "MACLINK CONNECTION"
+            connectionIcon.image = NSImage(systemSymbolName: "display.2", accessibilityDescription: nil)
+            connectionIcon.contentTintColor = MacLinkBrand.accent
             titleLabel.stringValue = peer.name
             titleLabel.toolTip = peer.name
             addressLabel.stringValue = "Paired with MacLink · " + peer.address
             addressLabel.toolTip = peer.address
             setStatus("Ready when you are", "Connects directly with MacLink’s encrypted session. On \(peer.name), open MacLink → Share This Mac → Start Sharing first.")
         } else if let mac = selectedMac {
+            connectionKind.stringValue = "APPLE SCREEN SHARING"
+            connectionIcon.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: nil)
+            connectionIcon.contentTintColor = MacLinkBrand.accent
             titleLabel.stringValue = mac.name
             titleLabel.toolTip = mac.name
             addressLabel.stringValue = mac.endpoint
             addressLabel.toolTip = mac.endpoint
             setStatus("Ready when you are", "Connect to sign in with your remote Mac’s account. MacLink handles the connection settings for you.")
         } else {
+            connectionKind.stringValue = "CONNECT · SHARE · CONTROL"
+            connectionIcon.image = MacLinkBrand.image(size: 64)
+            connectionIcon.contentTintColor = nil
             titleLabel.stringValue = "Your Macs,\nwithin reach."
             titleLabel.toolTip = nil
-            addressLabel.stringValue = "Save your first Mac to get started."
+            addressLabel.stringValue = "Connect to another Mac, or share this one."
             addressLabel.toolTip = nil
-            setStatus("Welcome to MacLink", "Enable Screen Sharing on the Mac you want to use, then add its local address.")
+            setStatus("Start with your other Mac", "Open MacLink on the other Mac and choose Share This Mac. Copy its pairing code, then choose Pair a Mac here.\n\nUsing Apple Screen Sharing? Add the Mac’s address instead.")
         }
         updateControls()
     }
@@ -875,8 +954,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
 
     private func updateControls() {
         let available = !busy && !automationState.isBusy && addController == nil && window?.attachedSheet == nil
-        connectButton.isEnabled = available && selectedRow != nil
-        checkButton.isEnabled = available && selectedMac != nil
+        connectButton.isEnabled = available
+        connectButton.action = selectedRow == nil ? #selector(connectNative) : #selector(connect)
+        connectButton.title = busy ? "Please wait…" : selectedRow == nil ? "Pair a Mac…" : selectedPeer?.id == native.connectedPeerID ? "Show Session" : "Connect"
+        connectButton.setAccessibilityLabel(selectedRow == nil ? "Pair a Mac using a MacLink code" : "Connect to \(selectedRow?.name ?? "Mac")")
+        checkButton.isHidden = selectedPeer != nil
+        checkButton.title = selectedRow == nil ? "Use Screen Sharing…" : "Check Connection"
+        checkButton.action = selectedRow == nil ? #selector(addMac) : #selector(checkConnection)
+        checkButton.toolTip = selectedRow == nil ? "Add a hostname or IP address for Apple Screen Sharing." : "Check TCP reachability and the Screen Sharing greeting without signing in."
+        checkButton.isEnabled = available && (selectedRow == nil || selectedMac != nil)
+        pairButton.isEnabled = available
+        shareButton.isEnabled = available
+        shareButton.title = native.isSharing ? "Sharing this Mac…" : "Share this Mac…"
         removeButton.isEnabled = available && selectedRow != nil
         addButton.isEnabled = available
         refreshStatusMenu()
@@ -885,6 +974,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(showConnections) { return true }
         if menuItem.action == #selector(showSettings) { return true }
+        if [#selector(connectNative), #selector(shareNative)].contains(menuItem.action) {
+            return !busy && !automationState.isBusy && addController == nil && window.attachedSheet == nil
+        }
         if menuItem.action == #selector(addMac) {
             return !busy && !automationState.isBusy && addController == nil && window.attachedSheet == nil
         }
@@ -1193,7 +1285,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "MacLink",
             .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "MacLinkReleaseVersion") as? String ?? "Development",
-            .credits: NSAttributedString(string: "A menu bar companion with a Rust core.\nRemote sessions are provided by Apple Screen Sharing.")
+            .applicationIcon: MacLinkBrand.image(size: 128),
+            .credits: NSAttributedString(string: "Your Macs, within reach.\n\nConnect and share with MacLink,\nor connect using Apple Screen Sharing.")
         ])
     }
 }
