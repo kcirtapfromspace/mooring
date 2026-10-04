@@ -264,6 +264,8 @@ enum NativeSessionTests {
         }
     }
     static func run() throws {
+        try testViewerDiagnostics()
+        try testViewerMeasurementStream()
         let publicKey = Data((0..<32).map { UInt8($0 + 1) })
         let secret = Data((0..<32).map { UInt8($0 + 101) })
         let privateKey = Data((0..<32).map { UInt8($0 + 201) })
@@ -761,6 +763,66 @@ extension NativeSessionTests {
         _ = duringFlush.admit(token: retired, { effects.append("retired during flush") })
         duringFlush.complete()
         try require(effects == ["replacement"], "The gate rechecks each intent immediately before delivery")
+    }
+
+    /// Missing, idle, stale and disconnected samples must remain distinct.
+    static func testViewerDiagnostics() throws {
+        func value(_ stats: NativeViewerDiagnostics, _ name: String) -> String? {
+            stats.sections.flatMap(\.rows).first { $0.name == name }?.value
+        }
+        var stats = NativeViewerDiagnostics()
+        try require(value(stats, "Received video") == "—" && value(stats, "Keyframe requests") == "—",
+                    "Before connecting, missing samples aren't displayed as zero")
+        stats.connected = true; stats.state = "Connected · view only"
+        stats.local = [.receivedMbps: 0, .presentedFps: 0, .rttMs: 12.4]
+        stats.host = [.bitrateMbps: 35, .fpsCap: 60, .encodeMs: 2.1]
+        stats.totals = ["session_seconds": 3661, "keyframe_requests": 4, "decoder_overflows": 2]
+        try require(value(stats, "Received video") == "0.00 Mbps" && value(stats, "Host bitrate target") == "—",
+                    "A measured idle rate is zero; unsampled host data remains unavailable")
+        stats.hostAge = 1
+        try require(value(stats, "Host bitrate target") == "35.00 Mbps" && value(stats, "Presented / cap") == "0.0 / 60.0 fps",
+                    "The host's target and frame cap are separate from measured throughput and presentation")
+        try require(value(stats, "Network round trip") == "12.4 ms" && value(stats, "Screen → display")?.contains("— / —") == true,
+                    "Network RTT is never substituted for unavailable screen-to-display latency")
+        try require(value(stats, "Duration") == "1:01:01" && value(stats, "Keyframe requests") == "4" && value(stats, "Decode overflows") == "2",
+                    "Elapsed time and recovery totals retain their own units")
+        stats.hostAge = 3.1
+        try require(stats.freshHost.isEmpty && stats.hostNotice.contains("stale") && value(stats, "Host encode") == "—",
+                    "Old host samples expire instead of appearing live")
+        stats.connected = false; stats.state = "Session ended"
+        try require(value(stats, "Duration") == "—" && value(stats, "Network round trip") == "—" && value(stats, "Connection") == "Session ended",
+                    "Ending a session clears live values even if its last sample remains in memory")
+        try require(NativeViewerDiagnostics.number(.nan) == "—" && NativeViewerDiagnostics.number(-1) == "—",
+                    "Invalid measurements aren't rendered as plausible numbers")
+    }
+
+    /// Real measurement mutations drive the subscriber; a burst cannot flood
+    /// AppKit, expirations stop, and a stopped session cannot deliver late data.
+    static func testViewerMeasurementStream() throws {
+        let measurements = NativeSessionMeasurements()
+        var samples: [NativeInterval] = []
+        let stream = NativeViewerMeasurementStream(measurements: measurements, minimumInterval: 0.02,
+                                                  expirations: [0.08, 0.16]) { samples.append($0) }
+        measurements.observeChanges { [weak stream] in stream?.signal() }
+        defer { measurements.observeChanges(nil); stream.stop() }
+        func pump(_ seconds: TimeInterval) {
+            let end = Date(timeIntervalSinceNow: seconds)
+            while Date() < end { RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.005)) }
+        }
+        for _ in 0..<1_000 { measurements.add("received_video_bytes", 100) }
+        let deadline = Date(timeIntervalSinceNow: 2)
+        while samples.isEmpty && Date() < deadline { pump(0.005) }
+        try require(samples.count == 1 && samples[0].values["received_video_bytes"] == 100_000,
+                    "A burst is coalesced into one push containing the newest measurements")
+        pump(0.25)
+        try require(samples.count >= 2 && samples.count <= 3,
+                    "Only the two bounded one-shot expirations may follow a quiet stream")
+        let quiet = samples.count
+        pump(0.06)
+        try require(samples.count == quiet, "A quiet stats subscriber has no repeating refresh timer")
+        measurements.add("received_video_bytes", 12)
+        stream.stop(); pump(0.06)
+        try require(samples.count == quiet, "Stopping a session cancels its queued UI push")
     }
 
     /// Synthetic session observations and fake power APIs only: no live wake.

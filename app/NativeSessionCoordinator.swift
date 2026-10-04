@@ -44,6 +44,7 @@ final class NativeSessionCoordinator {
     private static let matchScreenKey = "native.matchScreen"
     private static let playSoundKey = "native.playSound"
     private static let lowLatencyDisplayKey = "native.lowLatencyDisplay"
+    private static let diagnosticBarKey = "native.showDiagnosticBar"
     /// One-shot: sharing was on, but not automatic, when a viewer's requested
     /// update installed; share again after the relaunch.
     private static let resumeAfterUpdateKey = "native.resumeSharingAfterUpdate"
@@ -106,6 +107,8 @@ final class NativeSessionCoordinator {
     /// The sharing side's stream settings for this app run; tuning changes them live.
     private var hostTuning = NativeTuning.defaults
     private var telemetryTimer: Timer?
+    private var viewerDiagnosticsStream: NativeViewerMeasurementStream?
+    private var liveLatencies: [(at: TimeInterval, value: (total: Double, toViewer: Double, displayWait: Double))] = []
     /// The running capture's liveness. A restart cancels it first, so callbacks
     /// from the retired capture never reach the session.
     private var captureToken: NativeRunToken?
@@ -230,6 +233,16 @@ final class NativeSessionCoordinator {
         set {
             defaults.set(newValue, forKey: Self.lowLatencyDisplayKey)
             viewerWindow?.video.waitsForDisplayRefresh = !newValue
+            onChange?()
+        }
+    }
+    /// Presentation preference only; hiding the footer leaves telemetry active.
+    var showsDiagnosticBar: Bool {
+        get { defaults.object(forKey: Self.diagnosticBarKey) as? Bool ?? true }
+        set {
+            defaults.set(newValue, forKey: Self.diagnosticBarKey)
+            viewerWindow?.setDiagnosticBarVisible(newValue)
+            viewerDiagnosticsStream?.signal()
             onChange?()
         }
     }
@@ -1249,6 +1262,7 @@ final class NativeSessionCoordinator {
         viewerChannel = channel; self.decoder = decoder; lastViewerMeasurements = channel.measurements
         firstFrame = false; viewerInputEnabled = false; pendingPing = nil; lastPresented = 0; lastStatusTime = uptime
         clockSync.reset(); latencySecond = NativeLatencyWindow(); latencyReport = NativeLatencyWindow()
+        liveLatencies = []
         drawReportTicks = 0; drawReportDecoded = 0
         observedScreenRequest = nil; sentScreenRequest = nil
         viewerStarted = uptime; reconnectWork?.cancel(); reconnectWork = nil
@@ -1268,8 +1282,19 @@ final class NativeSessionCoordinator {
             viewerWindow?.onClose = nil; viewerWindow?.onReleaseInput = nil
             viewerWindow?.video.onInput = nil; viewerWindow?.video.onReleaseInput = nil
             viewerWindow?.close()
-            window = NativeViewerWindow(name: peer.name, peerID: peer.id); viewerWindow = window
+            window = NativeViewerWindow(name: peer.name, peerID: peer.id, showsDiagnosticBar: showsDiagnosticBar); viewerWindow = window
         }
+        window.onDiagnosticBarChange = { [weak self] visible in self?.showsDiagnosticBar = visible }
+        window.updateDiagnostics(NativeViewerDiagnostics())
+        viewerDiagnosticsStream?.stop()
+        let diagnosticsStream = NativeViewerMeasurementStream(measurements: channel.measurements) { [weak self, weak channel] interval in
+            guard let self, let channel, self.viewerChannel === channel, channel.token.isActive else { return }
+            self.updateViewerDiagnostics(channel, interval: interval)
+        }
+        viewerDiagnosticsStream = diagnosticsStream
+        channel.measurements.observeChanges { [weak diagnosticsStream] in diagnosticsStream?.signal() }
+        window.onViewportChange = { [weak diagnosticsStream] in diagnosticsStream?.signal() }
+        diagnosticsStream.signal()
         viewerActivity = viewerActivity ?? ProcessInfo.processInfo.beginActivity(
             options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled, .userInitiated],
             reason: "Showing a paired Mac")
@@ -1322,6 +1347,9 @@ final class NativeSessionCoordinator {
         window.video.onFrameTiming = { [weak self, weak channel] timing in
             guard let self, let channel, self.viewerChannel === channel, let latency = self.clockSync.latency(timing) else { return }
             self.latencySecond.add(latency); self.latencyReport.add(latency)
+            self.liveLatencies.append((self.uptime, latency))
+            if self.liveLatencies.count > 120 { self.liveLatencies.removeFirst(self.liveLatencies.count - 120) }
+            self.viewerDiagnosticsStream?.signal()
         }
         window.video.onPresented = { [weak self, weak channel] in
             guard let channel, channel.token.isActive else { return }
@@ -1331,6 +1359,7 @@ final class NativeSessionCoordinator {
                 DispatchQueue.main.async {
                     guard let self, self.viewerChannel === channel, channel.token.isActive, let viewer = self.viewerWindow else { return }
                     self.firstFrame = true
+                    self.viewerDiagnosticsStream?.signal()
                     guard !viewer.hasShownVideo else { return }
                     viewer.hasShownVideo = true
                     if let window = viewer.window, !window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil) }
@@ -1377,6 +1406,7 @@ final class NativeSessionCoordinator {
     /// geometry before video, limits control rate, and ends an idle session.
     private func readViewer(_ channel: NativeSessionChannel, decoder: NativeVideoDecoder) {
         let player = audioPlayer
+        let diagnosticsStream = viewerDiagnosticsStream
         DispatchQueue.global(qos: .userInitiated).async { [weak self, weak channel] in
             guard let self, let channel else { return }
             while channel.token.isActive {
@@ -1385,14 +1415,18 @@ final class NativeSessionCoordinator {
                     switch message {
                     case .video(let packet):
                         channel.measurements.add("received_video_frames"); channel.measurements.add("received_video_bytes", Double(packet.wireSize))
+                        channel.measurements.set("video_codec", Double(packet.codec.raw))
                         _ = decoder.decode(packet)
+                        channel.measurements.set("decoder_overflows", Double(decoder.overflows))
                     case .control(let control):
                         channel.deliverControl { [weak self, weak channel] in
                             guard let self, let channel, self.viewerChannel === channel, channel.token.isActive else { return }
                             self.apply(control, channel: channel)
+                            diagnosticsStream?.signal()
                         }
                     case .telemetry(.stats(let stats)):
                         channel.storePeerStats(stats)
+                        diagnosticsStream?.signal()
                     case .clipboard(let content):
                         guard let scope = self.clipboard.scopeToken else { continue }
                         channel.deliverControl { [weak self, weak channel] in
@@ -1406,6 +1440,7 @@ final class NativeSessionCoordinator {
                         }
                     case .audio(let packet):
                         player?.receive(packet)
+                        diagnosticsStream?.signal()
                     case .input, .telemetry(.tuning):
                         throw NativeSessionError(message: "The sharing Mac sent an unexpected message.")
                     }
@@ -1592,15 +1627,6 @@ final class NativeSessionCoordinator {
             // hidden or the picture is still: report nothing rather than old figures.
             for key in ["latency_ms", "latency_ms_p95", "to_viewer_ms", "display_wait_ms"] { channel.measurements.remove(key) }
         }
-        // Screen change on the sharing Mac to this display, when frames are
-        // flowing and the clocks are placed; otherwise the network round trip.
-        let rtt = latency.map { String(format: "%.0f ms latency", $0.p50) }
-            ?? snapshot["network_round_trip_ms"].map { String(format: "%.0f ms RTT", $0) } ?? "checking connection"
-        // The sharing Mac sends frames only when its screen changes, so the rate
-        // follows activity there; it is not a cap.
-        let rate = fps < 0.5 ? "screen unchanged" : String(format: "%.0f fps as the screen changes", fps)
-        let size = viewerWindow?.video.geometry.map { " · \($0.pixelWidth)×\($0.pixelHeight)" } ?? ""
-        viewerWindow?.status.stringValue = "\(viewerInputEnabled ? "Connected" : "View only") · \(rate) · \(rtt)\(size)"
         requestMatchingScreen(channel)
         if let pendingPing, now - pendingPing.1 > 8 { channel.fail("The sharing Mac stopped answering connection checks."); return }
         if pendingPing == nil {
@@ -1661,6 +1687,8 @@ final class NativeSessionCoordinator {
         // Privacy and sleep events call this with no session; leave any window
         // from an earlier session showing its own reason.
         guard let channel = viewerChannel else { return }
+        channel.measurements.observeChanges(nil)
+        viewerDiagnosticsStream?.stop(); viewerDiagnosticsStream = nil; liveLatencies = []
         let lasted = uptime - viewerStarted
         recordEnd("viewer", reason); lastViewerEnd = reason
         releaseViewerInput()
@@ -1679,6 +1707,7 @@ final class NativeSessionCoordinator {
         if let viewerActivity { ProcessInfo.processInfo.endActivity(viewerActivity) }
         viewerActivity = nil
         viewerWindow?.status.stringValue = reason
+        viewerWindow?.updateDiagnostics(NativeViewerDiagnostics(state: reason))
         // Remove the last remote frame as soon as the authenticated session ends,
         // and say why in place of the picture.
         viewerWindow?.video.clearFrame()
@@ -1835,6 +1864,42 @@ final class NativeSessionCoordinator {
         stats[.displayWaitMs] = interval.values["display_wait_ms"]
         stats[.clockErrorMs] = interval.values["clock_error_ms"]
         return stats
+    }
+
+    /// Runs only on an arriving measurement/peer event or a one-shot expiry.
+    /// Local rates and latency flow from the receive/decode/presentation path;
+    /// host values flow from its authenticated telemetry messages.
+    private func updateViewerDiagnostics(_ channel: NativeSessionChannel, interval: NativeInterval) {
+        let (host, age) = channel.latestPeerStats()
+        let totals = interval.values
+        var local = viewerStats(interval)
+        while let first = liveLatencies.first, first.at < uptime - 1 { liveLatencies.removeFirst() }
+        var latency = NativeLatencyWindow()
+        for sample in liveLatencies { latency.add(sample.value) }
+        let summary = latency.summary
+        local[.latencyMs] = summary?.p50; local[.latencyMsP95] = summary?.p95
+        local[.toViewerMs] = summary?.toViewer; local[.displayWaitMs] = summary?.displayWait
+        var snapshot = NativeViewerDiagnostics()
+        snapshot.connected = true
+        snapshot.state = firstFrame ? (viewerInputEnabled ? "Connected · control enabled" : "Connected · view only") : "Waiting for video"
+        snapshot.local = local; snapshot.host = host; snapshot.hostAge = age; snapshot.totals = totals
+        if let codec = totals["video_codec"] {
+            snapshot.codec = codec == Double(ML_CODEC_HEVC) ? NativeVideoCodec.hevc.name : NativeVideoCodec.h264.name
+        }
+        if totals["decoded_frames", default: 0] > 0 { snapshot.hardwareDecoder = decoder?.hardwareDecoder }
+        if let video = viewerWindow?.video {
+            let size = video.convertToBacking(video.bounds).size
+            snapshot.videoArea = "\(Int(size.width.rounded())) × \(Int(size.height.rounded())) px"
+        }
+        snapshot.protocolVersion = channel.transport.protocolVersion; snapshot.peerVersion = viewerPeerVersion
+        snapshot.audio = audioPlayer?.snapshot(); snapshot.soundEnabled = playsSound
+        viewerWindow?.updateDiagnostics(snapshot)
+        let fps = local[.presentedFps, default: 0]
+        let rate = fps < 0.5 ? "no new frames displayed" : String(format: "%.0f fps as the screen changes", fps)
+        let timing = summary.map { String(format: "%.0f ms latency", $0.p50) }
+            ?? local[.rttMs].map { String(format: "%.0f ms RTT", $0) } ?? "checking connection"
+        let size = viewerWindow?.video.geometry.map { " · \($0.pixelWidth)×\($0.pixelHeight)" } ?? ""
+        viewerWindow?.status.stringValue = "\(viewerInputEnabled ? "Connected" : "View only") · \(rate) · \(timing)\(size)"
     }
 
     private func saveDiagnostics(_ measurements: NativeSessionMeasurements?) {

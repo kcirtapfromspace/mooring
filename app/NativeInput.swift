@@ -281,7 +281,8 @@ final class NativeCommandKeyUpMonitor {
     init(view: NSView, forward: @escaping (NSEvent) -> Void) {
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { [weak view] event in
             if let view, let window = view.window, event.window === window, window.firstResponder === view,
-               event.modifierFlags.contains(.command) { forward(event) }
+               event.modifierFlags.contains(.command),
+               !NativeSystemKeyCapture.keepsLocal(keyCode: event.keyCode, modifiers: .from(event.modifierFlags)) { forward(event) }
             return event
         }
     }
@@ -296,7 +297,7 @@ final class NativeCommandKeyUpMonitor {
 /// and Spaces before any app sees them. While the viewer is focused and
 /// controlling the remote Mac, this active event tap sends every key event to
 /// the remote Mac instead and consumes it here, except the few that Rust keeps
-/// local as an escape hatch (Force Quit, Lock Screen, full screen). It needs
+/// local as an escape hatch or viewer diagnostic toggle. It needs
 /// Accessibility permission on this Mac; without it, ordinary keys still work
 /// through the view and system shortcuts stay local. Main run loop only.
 final class NativeSystemKeyCapture {

@@ -592,7 +592,8 @@ int32_t ml_clipboard_validate(const MLClipboardItem *items, size_t count);
 int32_t ml_clipboard_contains_pairing_secret(const uint8_t *bytes, size_t length);
 /* 1 when a key stays on the viewing Mac while system shortcuts such as ⌘-Tab
  * are captured for the remote Mac: Force Quit (⌘⌥Esc, optionally ⇧), Lock
- * Screen (⌃⌘Q) and full screen (⌃⌘F or Globe-F); otherwise 0. */
+ * Screen (⌃⌘Q), full screen (⌃⌘F or Globe-F), diagnostic footer (⌃⌘D),
+ * and Stats for Nerds (⌃⌘I); otherwise 0. */
 int32_t ml_input_keeps_local(uint16_t key_code, uint32_t modifiers);
 
 /* Automatic viewer reconnects after an unexpected end: milliseconds to wait

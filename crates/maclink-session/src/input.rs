@@ -70,7 +70,8 @@ pub(crate) fn is_modifier_key(code: u16) -> bool {
 
 /// While the viewer captures system shortcuts such as ⌘-Tab for the remote
 /// Mac, these stay on the viewing Mac as an escape hatch: Force Quit (⌘⌥Esc,
-/// with or without ⇧), Lock Screen (⌃⌘Q), and full screen (⌃⌘F or Globe-F).
+/// with or without ⇧), Lock Screen (⌃⌘Q), full screen (⌃⌘F or Globe-F),
+/// diagnostic footer (⌃⌘D), and stats (⌃⌘I).
 /// Caps Lock is ignored.
 pub(crate) fn keeps_local(key_code: u16, modifiers: u32) -> bool {
     const SHIFT: u32 = 1;
@@ -83,6 +84,7 @@ pub(crate) fn keeps_local(key_code: u16, modifiers: u32) -> bool {
         53 => held == COMMAND | OPTION || held == COMMAND | OPTION | SHIFT, // Escape
         12 => held == CONTROL | COMMAND,                                    // Q
         3 => held == CONTROL | COMMAND || held == FUNCTION,                 // F
+        2 | 34 => held == CONTROL | COMMAND,                                // D, I
         _ => false,
     }
 }
@@ -709,6 +711,8 @@ mod tests {
             (12, control | command),
             (3, control | command),
             (3, function),
+            (2, control | command),
+            (34, control | command | caps),
         ] {
             assert!(keeps_local(code, modifiers), "{code} {modifiers}");
         }
@@ -721,6 +725,10 @@ mod tests {
             (12, command), // ⌘-Q quits the remote app
             (3, command),  // ⌘-F finds on the remote Mac
             (3, control | command | shift),
+            (2, command), // ⌘-D belongs to the remote app
+            (34, command),
+            (2, control | command | option),
+            (34, control | command | shift),
             (123, control), // ⌃← switches remote Spaces
         ] {
             assert!(!keeps_local(code, modifiers), "{code} {modifiers}");

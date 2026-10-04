@@ -181,7 +181,8 @@ buffer of at least `ML_CLIPBOARD_MAX_MESSAGE` bytes.
 
 `ml_input_keeps_local` names the chords that stay on the viewing Mac while it
 captures system shortcuts such as ⌘-Tab for the remote Mac: Force Quit, Lock
-Screen and full screen. `ml_reconnect_delay_ms` is the viewer's bounded
+Screen, full screen, the diagnostic footer (⌃⌘D), and Stats for Nerds (⌃⌘I).
+`ml_reconnect_delay_ms` is the viewer's bounded
 automatic-reconnect backoff: five attempts, 0.5 s to 8 s apart, with a fresh
 budget after a session stays connected for 20 s.
 

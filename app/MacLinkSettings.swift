@@ -15,6 +15,7 @@ struct MacLinkSettingsState {
     var matchesScreen = true
     var playsSound = true
     var lowersDisplayLatency = false
+    var showsDiagnosticBar = true
     var launchesAtLogin = false
     var loginNeedsApproval = false
     /// Macs this Mac connects to, and the one connected now.
@@ -27,7 +28,7 @@ struct MacLinkSettingsState {
 }
 
 enum MacLinkSetting {
-    case sharesAutomatically, sharesClipboard, matchesScreen, playsSound, lowersDisplayLatency, launchesAtLogin
+    case sharesAutomatically, sharesClipboard, matchesScreen, playsSound, lowersDisplayLatency, showsDiagnosticBar, launchesAtLogin
 }
 
 /// One window for everything a person may want to change, in three parts:
@@ -55,6 +56,7 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
     private let matchesScreen = NSButton(checkboxWithTitle: "Match the shared screen to this Mac", target: nil, action: nil)
     private let playsSound = NSButton(checkboxWithTitle: "Play sound from the shared Mac", target: nil, action: nil)
     private let lowersDisplayLatency = NSButton(checkboxWithTitle: "Lower display latency (may tear)", target: nil, action: nil)
+    private let showsDiagnosticBar = NSButton(checkboxWithTitle: "Show the diagnostic footer", target: nil, action: nil)
     private let peerList = stack([], spacing: 8)
     private let deviceList = stack([], spacing: 8)
     private let legacyNote = label("", size: 12, color: .secondaryLabelColor)
@@ -87,7 +89,8 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
     private func configure() {
         let toggles: [(NSButton, MacLinkSetting)] = [
             (sharesAutomatically, .sharesAutomatically), (sharesClipboard, .sharesClipboard), (matchesScreen, .matchesScreen),
-            (playsSound, .playsSound), (lowersDisplayLatency, .lowersDisplayLatency), (launchesAtLogin, .launchesAtLogin)
+            (playsSound, .playsSound), (lowersDisplayLatency, .lowersDisplayLatency),
+            (showsDiagnosticBar, .showsDiagnosticBar), (launchesAtLogin, .launchesAtLogin)
         ]
         for (button, setting) in toggles {
             button.target = self; button.action = #selector(toggled(_:))
@@ -138,6 +141,7 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
             option(matchesScreen, "The sharing Mac shows a screen exactly this Mac's size, pixel for pixel."),
             option(playsSound, "Sound also keeps playing on the sharing Mac."),
             option(lowersDisplayLatency, "Shows each frame without waiting for this display's next refresh. Sooner, but moving pictures can show a tear line."),
+            option(showsDiagnosticBar, "Toggle with View → Diagnostic Footer or ⌃⌘D, including in full screen. View → Stats for Nerds (⌃⌘I) shows live streaming details."),
             label("Paired Macs", size: 12, weight: .medium),
             peerList
         ])
@@ -189,6 +193,7 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
         matchesScreen.state = state.matchesScreen ? .on : .off
         playsSound.state = state.playsSound ? .on : .off
         lowersDisplayLatency.state = state.lowersDisplayLatency ? .on : .off
+        showsDiagnosticBar.state = state.showsDiagnosticBar ? .on : .off
         launchesAtLogin.state = state.launchesAtLogin ? .on : .off
         loginNote.isHidden = !state.loginNeedsApproval
         version.stringValue = "Version \(state.version)"
@@ -290,7 +295,8 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
     @objc private func toggled(_ sender: NSButton) {
         let settings: [String: MacLinkSetting] = [
             "sharesAutomatically": .sharesAutomatically, "sharesClipboard": .sharesClipboard, "matchesScreen": .matchesScreen,
-            "playsSound": .playsSound, "lowersDisplayLatency": .lowersDisplayLatency, "launchesAtLogin": .launchesAtLogin
+            "playsSound": .playsSound, "lowersDisplayLatency": .lowersDisplayLatency,
+            "showsDiagnosticBar": .showsDiagnosticBar, "launchesAtLogin": .launchesAtLogin
         ]
         guard let key = sender.identifier?.rawValue, let setting = settings[key] else { return }
         onChange?(setting, sender.state == .on)

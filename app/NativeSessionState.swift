@@ -422,20 +422,33 @@ final class NativeSessionMeasurements: @unchecked Sendable {
     private let lock = NSLock()
     private let started = ProcessInfo.processInfo.systemUptime
     private var values: [String: Double] = [:]
+    private var observer: (() -> Void)?
+    /// One viewer subscriber. Notification runs outside the lock; its bounded
+    /// stream coalesces changes before delivering them to AppKit.
+    func observeChanges(_ observer: (() -> Void)?) {
+        lock.lock(); self.observer = observer; lock.unlock()
+    }
     func set(_ key: String, _ value: Double) {
         guard value.isFinite, value >= 0 else { return }
-        lock.lock(); values[key] = value; lock.unlock()
+        lock.lock()
+        let changed = values[key] != value
+        values[key] = value
+        let notify = changed ? observer : nil
+        lock.unlock(); notify?()
     }
     /// For a value that no longer applies, so it isn't reported as current.
     func remove(_ key: String) {
-        lock.lock(); values[key] = nil; lock.unlock()
+        lock.lock()
+        let notify = values.removeValue(forKey: key) == nil ? nil : observer
+        lock.unlock(); notify?()
     }
     func add(_ key: String, _ amount: Double = 1) {
         guard amount.isFinite, amount >= 0 else { return }
         lock.lock()
         let next = values[key, default: 0] + amount
         if next.isFinite { values[key] = next }
-        lock.unlock()
+        let notify = next.isFinite && amount > 0 ? observer : nil
+        lock.unlock(); notify?()
     }
     private var maxima: [String: Double] = [:]
     private var intervalBaseline: [String: Double] = [:]

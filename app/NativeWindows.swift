@@ -175,8 +175,14 @@ final class NativeRemoteView: NativeVideoView {
         let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self)
         addTrackingArea(area); tracking = area
     }
-    override func keyDown(with event: NSEvent) { onInput?(event) }
-    override func keyUp(with event: NSEvent) { onInput?(event) }
+    override func keyDown(with event: NSEvent) {
+        if NativeSystemKeyCapture.keepsLocal(keyCode: event.keyCode, modifiers: .from(event.modifierFlags)) { super.keyDown(with: event) }
+        else { onInput?(event) }
+    }
+    override func keyUp(with event: NSEvent) {
+        guard !NativeSystemKeyCapture.keepsLocal(keyCode: event.keyCode, modifiers: .from(event.modifierFlags)) else { return }
+        onInput?(event)
+    }
     override func flagsChanged(with event: NSEvent) { onInput?(event) }
     override func mouseMoved(with event: NSEvent) { onInput?(event) }
     override func mouseDragged(with event: NSEvent) { onInput?(event) }
@@ -193,8 +199,8 @@ final class NativeRemoteView: NativeVideoView {
     override func rotate(with event: NSEvent) { onInput?(event) }
     override func smartMagnify(with event: NSEvent) { onInput?(event) }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        // Force Quit, Lock Screen and full-screen chords stay on this Mac; other
-        // Command chords belong to the remote desktop while this view has focus.
+        // Escape hatches and diagnostic toggles stay on this Mac; other Command
+        // chords belong to the remote desktop while this view has focus.
         if event.type == .keyDown,
            NativeSystemKeyCapture.keepsLocal(keyCode: event.keyCode, modifiers: .from(event.modifierFlags)) { return false }
         guard forwardsCommandKeys, window?.firstResponder === self, event.type == .keyDown,
@@ -203,7 +209,82 @@ final class NativeRemoteView: NativeVideoView {
     }
 }
 
-final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
+/// A bounded, scrollable overlay: it never changes the shared display size.
+final class NativeViewerStatsView: NSVisualEffectView {
+    var onClose: (() -> Void)?
+    var onSave: (() -> Void)?
+    private let notice = label("Connecting…", size: 11, color: .secondaryLabelColor)
+    private var values: [NSTextField] = []
+
+    init() {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        material = .hudWindow; blendingMode = .withinWindow; state = .active
+        wantsLayer = true; layer?.cornerRadius = 12
+        setAccessibilityIdentifier("MacLink.StatsForNerds")
+        let close = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close stats")!, target: self, action: #selector(closeStats))
+        close.bezelStyle = .inline; close.toolTip = "Close stats (⌃⌘I)"
+        let heading = stack([label("Stats for nerds", size: 15, weight: .semibold), NSView(), close], orientation: .horizontal, spacing: 8)
+        let top = stack([heading, notice], spacing: 3)
+        addSubview(top)
+
+        let body = stack([], spacing: 14)
+        for section in NativeViewerDiagnostics().sections {
+            let rows = stack([], spacing: 5)
+            for row in section.rows {
+                let name = label(row.name, size: 11, color: .secondaryLabelColor)
+                name.widthAnchor.constraint(equalToConstant: 138).isActive = true
+                let value = label(row.value, size: 11)
+                value.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+                value.preferredMaxLayoutWidth = 240
+                value.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+                value.setAccessibilityLabel(row.name)
+                values.append(value)
+                let line = stack([name, value], orientation: .horizontal, spacing: 10)
+                rows.addArrangedSubview(line)
+                line.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
+            }
+            let group = stack([label(section.title, size: 11, weight: .semibold), rows], spacing: 7)
+            rows.widthAnchor.constraint(equalTo: group.widthAnchor).isActive = true
+            body.addArrangedSubview(group)
+        }
+        let scrollRoot = NSView(); scrollRoot.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(scrollRoot)
+        MacLinkAppearance.scrollBody(body, in: scrollRoot)
+        let note = label("Local rates cover a rolling second; host stats arrive once a second. Recovery counts cover this session. Still screens send fewer frames. Screen → display uses synchronized clocks, not input latency. — means unavailable. Audio gaps are unsent packets, not measured network loss.", size: 10, color: .secondaryLabelColor)
+        note.preferredMaxLayoutWidth = 404
+        let save = NSButton(title: "Save Diagnostics…", target: self, action: #selector(saveStats))
+        save.bezelStyle = .rounded; save.controlSize = .small
+        let bottom = stack([note, save], spacing: 8)
+        addSubview(bottom)
+        NSLayoutConstraint.activate([
+            top.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            top.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
+            top.topAnchor.constraint(equalTo: topAnchor, constant: 16),
+            heading.widthAnchor.constraint(equalTo: top.widthAnchor),
+            notice.widthAnchor.constraint(equalTo: top.widthAnchor),
+            scrollRoot.leadingAnchor.constraint(equalTo: leadingAnchor), scrollRoot.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scrollRoot.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 4),
+            scrollRoot.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: -10),
+            bottom.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            bottom.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
+            bottom.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
+            note.widthAnchor.constraint(equalTo: bottom.widthAnchor)
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    func update(_ snapshot: NativeViewerDiagnostics) {
+        notice.stringValue = snapshot.hostNotice
+        for (field, row) in zip(values, snapshot.sections.flatMap(\.rows)) {
+            field.stringValue = row.value
+            field.setAccessibilityLabel("\(row.name): \(row.value)")
+        }
+    }
+    @objc private func closeStats() { onClose?() }
+    @objc private func saveStats() { onSave?() }
+}
+
+final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
     let video = NativeRemoteView(frame: .zero, device: MTLCreateSystemDefaultDevice())
     let status = label("Connecting…", size: 12, color: .secondaryLabelColor)
     /// The paired Mac this window shows; reconnecting reuses the window.
@@ -215,6 +296,15 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
     var onCancelReconnect: (() -> Void)?
     var onAllowSystemKeys: (() -> Void)?
     var onVersionAction: (() -> Void)?
+    var onDiagnosticBarChange: ((Bool) -> Void)?
+    var onViewportChange: (() -> Void)?
+    private(set) var showsDiagnosticBar = true
+    private(set) var showsStatsForNerds = false
+    private let diagnosticBar = stack([], orientation: .horizontal, spacing: 12)
+    private let statsButton = NSButton(title: "Stats for nerds", target: nil, action: nil)
+    private let statsView = NativeViewerStatsView()
+    private var latestDiagnostics = NativeViewerDiagnostics()
+    private var videoBottom: NSLayoutConstraint!
     /// Set once the window closes; a closed window is never reused.
     private(set) var isClosed = false
     /// Full screen is entered for the first picture only, so a reconnect keeps
@@ -231,7 +321,7 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
     /// when there is one, the next step.
     private let versionNotice = NSButton(title: "", target: nil, action: nil)
     private let exitFullScreen = NSButton(title: "Exit Full Screen", target: nil, action: nil)
-    init(name: String, peerID: String) {
+    init(name: String, peerID: String, showsDiagnosticBar: Bool = true) {
         self.peerID = peerID
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
@@ -245,8 +335,11 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
         let root = window.contentView!
         video.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(video)
-        let diagnostics = NSButton(title: "Diagnostics…", target: self, action: #selector(saveDiagnostics))
-        diagnostics.bezelStyle = .inline
+        statsButton.target = self; statsButton.action = #selector(toggleStatsForNerds(_:)); statsButton.bezelStyle = .inline
+        statsButton.toolTip = "Live stream details (⌃⌘I). Also available from the View menu when the footer is hidden."
+        let hideBar = NSButton(image: NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Hide diagnostic footer")!, target: self, action: #selector(toggleDiagnosticBar(_:)))
+        hideBar.bezelStyle = .inline
+        hideBar.toolTip = "Hide diagnostic footer. Restore with ⌃⌘D or View → Diagnostic Footer."
         allowSystemKeys.target = self; allowSystemKeys.action = #selector(allowKeys); allowSystemKeys.bezelStyle = .inline
         allowSystemKeys.toolTip = "Allow MacLink in Accessibility on this Mac to send ⌘-Tab and other system shortcuts to the remote Mac."
         allowSystemKeys.isHidden = true
@@ -264,14 +357,31 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
         status.maximumNumberOfLines = 1
         status.lineBreakMode = .byTruncatingTail
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let bar = stack([mark, status, NSView(), versionNotice, allowSystemKeys, exitFullScreen, diagnostics], orientation: .horizontal, spacing: 12)
+        let bar = diagnosticBar
+        for view in [mark, status, NSView(), versionNotice, allowSystemKeys, exitFullScreen, statsButton, hideBar] { bar.addArrangedSubview(view) }
         root.addSubview(bar)
+        videoBottom = video.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         NSLayoutConstraint.activate([
             video.leadingAnchor.constraint(equalTo: root.leadingAnchor), video.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            video.topAnchor.constraint(equalTo: root.topAnchor), video.bottomAnchor.constraint(equalTo: bar.topAnchor, constant: -6),
+            video.topAnchor.constraint(equalTo: root.topAnchor), videoBottom,
             bar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
             bar.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
             bar.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -6), bar.heightAnchor.constraint(equalToConstant: 22)
+        ])
+        setDiagnosticBarVisible(showsDiagnosticBar)
+        statsView.isHidden = true
+        statsView.onClose = { [weak self] in self?.toggleStatsForNerds(nil) }
+        statsView.onSave = { [weak self] in self?.saveDiagnostics(nil) }
+        root.addSubview(statsView)
+        let preferredWidth = statsView.widthAnchor.constraint(equalToConstant: 440)
+        let preferredHeight = statsView.heightAnchor.constraint(equalToConstant: 560)
+        preferredWidth.priority = .defaultHigh; preferredHeight.priority = NSLayoutConstraint.Priority(1)
+        NSLayoutConstraint.activate([
+            statsView.topAnchor.constraint(equalTo: video.topAnchor, constant: 16),
+            statsView.trailingAnchor.constraint(equalTo: video.trailingAnchor, constant: -16),
+            statsView.widthAnchor.constraint(lessThanOrEqualTo: video.widthAnchor, constant: -32),
+            statsView.heightAnchor.constraint(lessThanOrEqualTo: video.heightAnchor, constant: -32),
+            preferredWidth, preferredHeight
         ])
         window.initialFirstResponder = video
         window.acceptsMouseMovedEvents = true
@@ -316,6 +426,32 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
     func hideOverlay() { ended.isHidden = true }
     var isReconnecting: Bool { !ended.isHidden && !cancelButton.isHidden }
     func setSystemKeysAllowed(_ allowed: Bool) { allowSystemKeys.isHidden = allowed }
+    func setDiagnosticBarVisible(_ visible: Bool) {
+        showsDiagnosticBar = visible
+        diagnosticBar.isHidden = !visible
+        videoBottom.constant = visible ? -34 : 0
+    }
+    func updateDiagnostics(_ snapshot: NativeViewerDiagnostics) {
+        latestDiagnostics = snapshot
+        if showsStatsForNerds { statsView.update(snapshot) }
+    }
+    @objc func toggleDiagnosticBar(_ sender: Any?) {
+        onReleaseInput?()
+        setDiagnosticBarVisible(!showsDiagnosticBar)
+        onDiagnosticBarChange?(showsDiagnosticBar)
+    }
+    @objc func toggleStatsForNerds(_ sender: Any?) {
+        onReleaseInput?()
+        showsStatsForNerds.toggle()
+        statsView.isHidden = !showsStatsForNerds
+        statsButton.state = showsStatsForNerds ? .on : .off
+        if showsStatsForNerds { statsView.update(latestDiagnostics) }
+    }
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(toggleDiagnosticBar(_:)) { item.state = showsDiagnosticBar ? .on : .off }
+        if item.action == #selector(toggleStatsForNerds(_:)) { item.state = showsStatsForNerds ? .on : .off }
+        return !isClosed && window?.attachedSheet == nil
+    }
     /// nil hides the notice; a disabled notice is information only.
     func setVersionNotice(_ text: String?, enabled: Bool = false) {
         versionNotice.isHidden = text == nil
@@ -344,8 +480,9 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate {
     }
     func windowDidEnterFullScreen(_ notification: Notification) { exitFullScreen.isHidden = false }
     func windowDidExitFullScreen(_ notification: Notification) { exitFullScreen.isHidden = true }
+    func windowDidResize(_ notification: Notification) { onViewportChange?() }
     func windowWillClose(_ notification: Notification) { isClosed = true; onClose?() }
     func windowDidResignKey(_ notification: Notification) { onReleaseInput?() }
     func windowDidMiniaturize(_ notification: Notification) { onReleaseInput?() }
-    @objc private func saveDiagnostics() { onDiagnostics?() }
+    @objc func saveDiagnostics(_ sender: Any?) { onReleaseInput?(); onDiagnostics?() }
 }

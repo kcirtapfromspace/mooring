@@ -177,6 +177,11 @@ enum NativeInputTests {
         // The system-shortcut tap keeps only the escape chords local. No tap is
         // installed here; this covers the Swift boundary to Rust's rule.
         let keepsLocal = NativeSystemKeyCapture.keepsLocal
+        require(keepsLocal(2, [.control, .command]) && keepsLocal(34, [.control, .command]),
+                "diagnostic toggles stay local while the viewer captures shortcuts")
+        require(!keepsLocal(2, .command) && !keepsLocal(34, .command)
+                && !keepsLocal(34, [.control, .command, .shift]),
+                "other D and I shortcuts still reach the remote Mac")
         require(keepsLocal(53, [.command, .option]) && keepsLocal(53, [.command, .option, .shift]),
                 "Force Quit stays on the viewing Mac")
         require(keepsLocal(12, [.control, .command]) && keepsLocal(3, [.control, .command]) && keepsLocal(3, .function),
@@ -231,6 +236,8 @@ enum NativeInputTests {
         pump([key(.keyDown, .command, 8), key(.keyUp, .command, 8), key(.keyDown, [], 9), key(.keyUp, [], 9)])
         require(forwarded == [8], "Command key releases reach the focused remote view")
         require(target.keyUps.contains(9), "Ordinary key releases keep normal responder delivery")
+        pump([key(.keyUp, [.control, .command], 2), key(.keyUp, [.control, .command], 34)])
+        require(forwarded == [8], "Local diagnostic key releases don't leak through the Command key-up monitor")
         window.makeFirstResponder(other)
         pump([key(.keyUp, .command, 8)])
         require(forwarded == [8], "Command key releases are not forwarded when the remote view lacks focus")

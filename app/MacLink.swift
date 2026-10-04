@@ -629,6 +629,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         view.submenu = NSMenu(title: "View")
         view.submenu!.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
         view.submenu!.items[0].keyEquivalentModifierMask = [.control, .command]
+        view.submenu!.addItem(.separator())
+        for (title, action, key) in [
+            ("Diagnostic Footer", #selector(NativeViewerWindow.toggleDiagnosticBar(_:)), "d"),
+            ("Stats for Nerds", #selector(NativeViewerWindow.toggleStatsForNerds(_:)), "i")
+        ] {
+            let item = view.submenu!.addItem(withTitle: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = [.control, .command]
+        }
+        view.submenu!.addItem(withTitle: "Save Session Diagnostics…", action: #selector(NativeViewerWindow.saveDiagnostics(_:)), keyEquivalent: "")
         menu.addItem(view)
         let windows = NSMenu(title: "Window")
         windows.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
@@ -1235,6 +1244,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         state.matchesScreen = native.matchesScreen
         state.playsSound = native.playsSound
         state.lowersDisplayLatency = native.lowersDisplayLatency
+        state.showsDiagnosticBar = native.showsDiagnosticBar
         let login = SMAppService.mainApp.status
         state.launchesAtLogin = login == .enabled || login == .requiresApproval
         state.loginNeedsApproval = login == .requiresApproval
@@ -1254,6 +1264,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         case .matchesScreen: native.matchesScreen = on
         case .playsSound: native.playsSound = on
         case .lowersDisplayLatency: native.lowersDisplayLatency = on
+        case .showsDiagnosticBar: native.showsDiagnosticBar = on
         case .launchesAtLogin:
             do {
                 let status = SMAppService.mainApp.status
