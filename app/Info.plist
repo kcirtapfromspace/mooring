@@ -11,9 +11,9 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>MacLink</string>
+	<string>Mooring</string>
 	<key>CFBundleDisplayName</key>
-	<string>MacLink</string>
+	<string>Mooring</string>
 	<key>CFBundleIconFile</key>
 	<string>MacLink</string>
 	<key>CFBundlePackageType</key>
@@ -21,7 +21,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>0.3.0</string>
 	<key>CFBundleVersion</key>
-	<string>37</string>
+	<string>38</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
@@ -31,7 +31,7 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>MacLink checks the Macs you add, connects to Macs you pair with, and shares this display only when you start sharing.</string>
+	<string>Mooring checks the Macs you add, connects to Macs you pair with, and shares this display only when you start sharing.</string>
 	<key>SUAllowsAutomaticUpdates</key>
 	<true/>
 	<key>SUAutomaticallyUpdate</key>

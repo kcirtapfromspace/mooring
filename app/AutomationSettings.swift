@@ -18,7 +18,7 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
     private let trialButton = NSButton(checkboxWithTitle: "Try High Performance automatically on familiar direct networks", target: nil, action: nil)
     private let enabledButton = NSButton(checkboxWithTitle: "Enable automation", target: nil, action: nil)
     private let targetPopup = NSPopUpButton()
-    private let loginButton = NSButton(checkboxWithTitle: "Launch MacLink at login", target: nil, action: nil)
+    private let loginButton = NSButton(checkboxWithTitle: "Launch Mooring at login", target: nil, action: nil)
     private let autoConnectButton = NSButton(checkboxWithTitle: "Reconnect automatically on familiar networks", target: nil, action: nil)
     private let fullScreenButton = NSButton(checkboxWithTitle: "Open the remote session in full screen", target: nil, action: nil)
     private let preferencePopup = NSPopUpButton()
@@ -131,7 +131,7 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
         target.row(at: 0).yPlacement = .center
         var generalViews: [NSView] = [autoConnectButton, fullScreenButton, loginButton]
         if draft.paused {
-            generalViews.append(label("Automation is paused. Resume it from the MacLink menu when you’re ready.", size: 12, color: .secondaryLabelColor))
+            generalViews.append(label("Automation is paused. Resume it from the Mooring menu when you’re ready.", size: 12, color: .secondaryLabelColor))
         }
         if SMAppService.mainApp.status == .requiresApproval {
             generalViews.append(label("Login launch needs approval in System Settings → General → Login Items.", size: 12, color: .secondaryLabelColor))
@@ -146,11 +146,11 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
         let display = section("Display", [mode, preferenceDetail])
 
         let homeActions = stack([checkHomeButton, markHomeButton], orientation: .horizontal, spacing: 8)
-        let networkIntro = label("Optional override. MacLink remembers familiar direct networks after you connect. You can also mark home networks yourself.", size: 12, color: .secondaryLabelColor)
+        let networkIntro = label("Optional override. Mooring remembers familiar direct networks after you connect. You can also mark home networks yourself.", size: 12, color: .secondaryLabelColor)
         let networkNote = label("Add your home Wi-Fi and Ethernet networks separately; up to eight are kept. A travel router or bridge can make locations look alike. Home detection does not guarantee available bandwidth.", size: 12, color: .secondaryLabelColor)
         let network = section("Home network", [networkIntro, routeDescription, homeActions, homeDescription, forgetHomeButton, networkNote])
 
-        let permissionNote = label("Accessibility lets MacLink identify its Screen Sharing window, enter full screen and reconnect that session when changing modes. Passwords stay in Apple Screen Sharing.", size: 12, color: .secondaryLabelColor)
+        let permissionNote = label("Accessibility lets Mooring identify its Screen Sharing window, enter full screen and reconnect that session when changing modes. Passwords stay in Apple Screen Sharing.", size: 12, color: .secondaryLabelColor)
         let permissions = section("Accessibility", [permissionNote, permissionDescription, permissionButton])
         let limitations = label("Changing modes reconnects the session. High Performance may blank the remote Mac’s physical display. Mode requests use an experimental Apple Screen Sharing URL and may not work on every macOS version.", size: 12, color: .secondaryLabelColor)
         limitations.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -273,7 +273,7 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
     private func updatePreference() {
         switch selectedPreference {
         case "standard": preferenceDetail.stringValue = "Requests Standard mode for this Mac."
-        case "high_performance": preferenceDetail.stringValue = "Requests High Performance. Both Macs must support it; MacLink can fall back if connection checks deteriorate."
+        case "high_performance": preferenceDetail.stringValue = "Requests High Performance. Both Macs must support it; Mooring can fall back if connection checks deteriorate."
         default: preferenceDetail.stringValue = "Starts with Standard, learns familiar networks, and can try High Performance when connection checks stay healthy."
         }
         vpnButton.isEnabled = selectedPreference == "auto"

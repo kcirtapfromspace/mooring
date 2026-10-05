@@ -1,0 +1,178 @@
+{
+  "checkedAt": "2026-10-05T01:52:40.648577+00:00",
+  "source": "Registry RDAP via IANA bootstrap; rdap.org referral when absent",
+  "results": [
+    {
+      "domain": "mooring.com",
+      "http": 200,
+      "registry": "https://rdap.verisign.com/com/v1/domain/mooring.com",
+      "status": [
+        "client transfer prohibited"
+      ],
+      "events": [
+        {
+          "eventAction": "registration",
+          "eventDate": "1994-08-19T04:00:00Z"
+        },
+        {
+          "eventAction": "expiration",
+          "eventDate": "2027-08-18T04:00:00Z"
+        }
+      ]
+    },
+    {
+      "domain": "mooring.app",
+      "http": 200,
+      "registry": "https://pubapi.registry.google/rdap/domain/mooring.app",
+      "status": [
+        "client delete prohibited",
+        "client transfer prohibited"
+      ],
+      "events": [
+        {
+          "eventAction": "registration",
+          "eventActor": "googledomains",
+          "eventDate": "2020-08-20T13:39:38.718Z"
+        },
+        {
+          "eventAction": "expiration",
+          "eventDate": "2027-08-20T13:39:38.718Z"
+        }
+      ]
+    },
+    {
+      "domain": "mooring.io",
+      "http": 404,
+      "registry": "https://rdap.org/domain/mooring.io",
+      "note": "Referral service returned 404; this does not establish domain availability. See registrar observation.",
+      "registrarObservation": {
+        "registrar": "Namecheap",
+        "status": "registered",
+        "source": "https://www.namecheap.com/domains/registration/results/?domain=mooring.io",
+        "observedDate": "2026-10-04 America/Denver"
+      }
+    },
+    {
+      "domain": "mooring.dev",
+      "http": 200,
+      "registry": "https://pubapi.registry.google/rdap/domain/mooring.dev",
+      "status": [
+        "client delete prohibited",
+        "client transfer prohibited"
+      ],
+      "events": [
+        {
+          "eventAction": "registration",
+          "eventActor": "googledomains",
+          "eventDate": "2019-03-02T06:25:09.611Z"
+        },
+        {
+          "eventAction": "expiration",
+          "eventDate": "2027-03-02T06:25:09.611Z"
+        }
+      ]
+    },
+    {
+      "domain": "mooring.space",
+      "http": 200,
+      "registry": "https://rdap.radix.host/rdap/domain/mooring.space",
+      "status": [
+        "active"
+      ],
+      "events": [
+        {
+          "eventAction": "registration",
+          "eventActor": "mesh",
+          "eventDate": "2018-03-12T13:36:18.000Z"
+        },
+        {
+          "eventAction": "expiration",
+          "eventDate": "2027-03-12T23:59:59.000Z"
+        }
+      ]
+    },
+    {
+      "domain": "getmooring.com",
+      "http": 200,
+      "registry": "https://rdap.verisign.com/com/v1/domain/getmooring.com",
+      "status": [
+        "client delete prohibited",
+        "client renew prohibited",
+        "client transfer prohibited",
+        "client update prohibited"
+      ],
+      "events": [
+        {
+          "eventAction": "registration",
+          "eventDate": "2025-03-27T18:42:36Z"
+        },
+        {
+          "eventAction": "expiration",
+          "eventDate": "2028-03-27T18:42:36Z"
+        }
+      ]
+    },
+    {
+      "domain": "usemooring.com",
+      "http": 200,
+      "registry": "https://rdap.verisign.com/com/v1/domain/usemooring.com",
+      "status": [
+        "client transfer prohibited"
+      ],
+      "events": [
+        {
+          "eventAction": "registration",
+          "eventDate": "2026-05-15T03:15:17Z"
+        },
+        {
+          "eventAction": "expiration",
+          "eventDate": "2027-05-15T03:15:17Z"
+        }
+      ]
+    },
+    {
+      "domain": "mooringformac.com",
+      "http": 404,
+      "registry": "https://rdap.verisign.com/com/v1/domain/mooringformac.com",
+      "note": "Registry has no record; registrar also lists available with Add to cart. Not purchased.",
+      "registrarObservation": {
+        "registrar": "Namecheap",
+        "status": "available",
+        "source": "https://www.namecheap.com/domains/registration/results/?domain=mooringformac.com",
+        "observedDate": "2026-10-04 America/Denver",
+        "displayedPriceUSD": 11.28,
+        "priceBasis": "Registration listing; taxes, fees, and final checkout not verified"
+      }
+    },
+    {
+      "domain": "mooringmac.com",
+      "http": 404,
+      "registry": "https://rdap.verisign.com/com/v1/domain/mooringmac.com",
+      "note": "Registry has no record; registrar also lists available with Add to cart. Not purchased.",
+      "registrarObservation": {
+        "registrar": "Namecheap",
+        "status": "available",
+        "source": "https://www.namecheap.com/domains/registration/results/?domain=mooringmac.com",
+        "observedDate": "2026-10-04 America/Denver",
+        "displayedPriceUSD": 11.28,
+        "priceBasis": "Registration listing; taxes, fees, and final checkout not verified"
+      }
+    },
+    {
+      "domain": "mooring.co",
+      "http": 404,
+      "registry": "https://rdap.org/domain/mooring.co",
+      "note": "Referral service returned 404; this does not establish domain availability. See registrar observation.",
+      "registrarObservation": {
+        "registrar": "Namecheap",
+        "status": "premium",
+        "source": "https://www.namecheap.com/domains/registration/results/?domain=mooring.co",
+        "observedDate": "2026-10-04 America/Denver",
+        "displayedPriceUSD": 6360.0,
+        "priceBasis": "Registration listing; taxes, fees, and final checkout not verified",
+        "displayedRenewalUSDPerYear": 45.48
+      }
+    }
+  ],
+  "recommendation": "mooringmac.com"
+}

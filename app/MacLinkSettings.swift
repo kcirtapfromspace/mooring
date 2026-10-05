@@ -50,31 +50,31 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
 
     private var state = MacLinkSettingsState()
     private let sharesAutomatically = NSButton(checkboxWithTitle: "Share this Mac automatically", target: nil, action: nil)
-    private let sharesClipboard = NSButton(checkboxWithTitle: "Share the clipboard with the connected Mac", target: nil, action: nil)
+    private let sharesClipboard = NSButton(checkboxWithTitle: "Share clipboard", target: nil, action: nil)
     private let keyboardAndMouse = label("", size: 12, color: .secondaryLabelColor)
-    private let allowKeyboardAndMouse = NSButton(title: "Allow Keyboard & Mouse…", target: nil, action: nil)
-    private let matchesScreen = NSButton(checkboxWithTitle: "Match the shared screen to this Mac", target: nil, action: nil)
-    private let playsSound = NSButton(checkboxWithTitle: "Play sound from the shared Mac", target: nil, action: nil)
+    private let allowKeyboardAndMouse = NSButton(title: "Allow control…", target: nil, action: nil)
+    private let matchesScreen = NSButton(checkboxWithTitle: "Match this screen", target: nil, action: nil)
+    private let playsSound = NSButton(checkboxWithTitle: "Play remote sound", target: nil, action: nil)
     private let lowersDisplayLatency = NSButton(checkboxWithTitle: "Lower display latency (may tear)", target: nil, action: nil)
-    private let showsDiagnosticBar = NSButton(checkboxWithTitle: "Show the diagnostic footer", target: nil, action: nil)
+    private let showsDiagnosticBar = NSButton(checkboxWithTitle: "Show diagnostics", target: nil, action: nil)
     private let peerList = stack([], spacing: 8)
     private let deviceList = stack([], spacing: 8)
     private let legacyNote = label("", size: 12, color: .secondaryLabelColor)
     private let stopOldCode = NSButton(title: "Stop Now…", target: nil, action: nil)
     private let extendOldCode = NSButton(title: "Another Week", target: nil, action: nil)
     private lazy var legacyRow = stack([legacyNote, stack([stopOldCode, extendOldCode], orientation: .horizontal, spacing: 8)], spacing: 6)
-    private let launchesAtLogin = NSButton(checkboxWithTitle: "Launch MacLink at login", target: nil, action: nil)
-    private let loginNote = label("Approve MacLink in System Settings → General → Login Items.", size: 12, color: .secondaryLabelColor)
+    private let launchesAtLogin = NSButton(checkboxWithTitle: "Open at login", target: nil, action: nil)
+    private let loginNote = label("Approve Mooring in System Settings → General → Login Items.", size: 12, color: .secondaryLabelColor)
     private let version = label("", size: 13)
     private let updateNote = label("", size: 12, color: .secondaryLabelColor)
-    private let updateButton = NSButton(title: "Check for Updates…", target: nil, action: nil)
+    private let updateButton = NSButton(title: "Check for updates…", target: nil, action: nil)
     private let sectionSelector = NSSegmentedControl()
     private var sections: [NSStackView] = []
 
     init() {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 600),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.title = "MacLink Settings"
+        window.title = "Mooring Settings"
         MacLinkAppearance.prepare(window)
         window.contentMinSize = NSSize(width: 560, height: 460)
         window.isReleasedWhenClosed = false
@@ -125,27 +125,27 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
     }
     private func layout() {
         guard let root = window?.contentView else { return }
-        let share = NSButton(title: "Share This Mac…", target: self, action: #selector(shareThisMac))
-        let automation = NSButton(title: "Apple Screen Sharing Automation…", target: self, action: #selector(automationSettings))
+        let share = NSButton(title: "Share this Mac…", target: self, action: #selector(shareThisMac))
+        let automation = NSButton(title: "Screen Sharing…", target: self, action: #selector(automationSettings))
         for button in [share, automation] { button.bezelStyle = .rounded }
         let sharing = section("Sharing this Mac", nil, [
-            option(sharesAutomatically, "Starts when MacLink opens and resumes after sleep or lock."),
+            option(sharesAutomatically, "Starts when Mooring opens and resumes after sleep or lock."),
             option(sharesClipboard, "Items that password managers mark as private are never shared."),
             stack([keyboardAndMouse, allowKeyboardAndMouse], spacing: 6),
-            label("Macs that can connect to this Mac", size: 12, weight: .medium),
+            label("Allowed Macs", size: 12, weight: .medium),
             deviceList,
             legacyRow,
             share
         ])
         let viewing = section("Viewing another Mac", nil, [
-            option(matchesScreen, "The sharing Mac shows a screen exactly this Mac's size, pixel for pixel."),
+            option(matchesScreen, "A remote screen at this Mac’s size, pixel for pixel."),
             option(playsSound, "Sound also keeps playing on the sharing Mac."),
-            option(lowersDisplayLatency, "Shows each frame without waiting for this display's next refresh. Sooner, but moving pictures can show a tear line."),
-            option(showsDiagnosticBar, "Toggle with View → Diagnostic Footer or ⌃⌘D, including in full screen. View → Stats for Nerds (⌃⌘I) shows live streaming details."),
+            option(lowersDisplayLatency, "Display frames sooner. Motion may show tear lines."),
+            option(showsDiagnosticBar, "⌃⌘D toggles the footer. ⌃⌘I opens live stats."),
             label("Paired Macs", size: 12, weight: .medium),
             peerList
         ])
-        let general = section("MacLink", nil, [
+        let general = section("Mooring", nil, [
             stack([launchesAtLogin, loginNote], spacing: 3),
             version,
             stack([updateNote, updateButton], spacing: 6),
@@ -187,8 +187,8 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
         sharesAutomatically.state = state.sharesAutomatically ? .on : .off
         sharesClipboard.state = state.sharesClipboard ? .on : .off
         keyboardAndMouse.stringValue = state.keyboardAndMouseAllowed
-            ? "Keyboard and mouse control is allowed. A viewer can control this Mac."
-            : "Viewers can only watch until you allow MacLink in Accessibility."
+            ? "Paired Macs can view and control."
+            : "View only. Allow Accessibility for control."
         allowKeyboardAndMouse.isHidden = state.keyboardAndMouseAllowed
         matchesScreen.state = state.matchesScreen ? .on : .off
         playsSound.state = state.playsSound ? .on : .off
@@ -202,11 +202,11 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
             updateNote.stringValue = "This build doesn't update itself."
             updateButton.isHidden = true
         case .available:
-            updateNote.stringValue = "Updates install by themselves while MacLink is idle."
-            updateButton.isHidden = false; updateButton.title = "Check for Updates…"
+            updateNote.stringValue = "Updates install while idle."
+            updateButton.isHidden = false; updateButton.title = "Check for updates…"
         case .ready(let name):
-            updateNote.stringValue = "\(name) is ready. It installs by itself while MacLink is idle."
-            updateButton.isHidden = false; updateButton.title = "Install Now & Relaunch"
+            updateNote.stringValue = "\(name) is ready. It installs by itself while Mooring is idle."
+            updateButton.isHidden = false; updateButton.title = "Install & reopen"
         }
         rebuildPeers()
         rebuildDevices()
@@ -230,7 +230,7 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
             return
         }
         if devices.isEmpty {
-            deviceList.addArrangedSubview(hint("None yet. Copy a pairing code in Share This Mac, then paste it into Connect with MacLink on the other Mac."))
+            deviceList.addArrangedSubview(hint("None yet. Share a code to approve a Mac."))
         }
         for device in devices {
             let connected = device.id == state.connectedDeviceID
@@ -253,10 +253,10 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
         var note: String
         switch legacy.closesAt {
         case nil:
-            note = "Macs paired with an earlier MacLink still connect with the old pairing code. Each gets its own key the next time "
+            note = "Macs paired with an earlier Mooring still connect with the old pairing code. Each gets its own key the next time "
                 + "it connects, and the old code stops a week after the first one does."
         case let closes? where legacy.isOpen:
-            note = "Macs paired with an earlier MacLink can use the old pairing code until \(Self.dates.string(from: closes)). "
+            note = "Macs paired with an earlier Mooring can use the old pairing code until \(Self.dates.string(from: closes)). "
                 + "Each gets its own key the next time it connects. Check that every Mac above is yours."
         case let closes?:
             note = "The old pairing code stopped working \(Self.dates.string(from: closes)). "
@@ -272,7 +272,7 @@ final class MacLinkSettingsWindow: NSWindowController, NSWindowDelegate {
     private func rebuildPeers() {
         peerList.arrangedSubviews.forEach { $0.removeFromSuperview() }
         guard !state.peers.isEmpty else {
-            peerList.addArrangedSubview(hint("None yet. Use Connect with MacLink and a pairing code from the other Mac."))
+            peerList.addArrangedSubview(hint("None yet. Use Connect with Mooring and a pairing code from the other Mac."))
             return
         }
         for peer in state.peers {

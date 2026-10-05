@@ -10,28 +10,28 @@ final class NativeShareWindow: NSWindowController, NSWindowDelegate {
     var onAutomaticChange: ((Bool) -> Void)?
     var onClipboardChange: ((Bool) -> Void)?
     let status = label("Sharing is off", size: 14, weight: .medium)
-    let detail = label("Start sharing, then copy the pairing code to MacLink on your other Mac.", color: .secondaryLabelColor)
-    let toggle = NSButton(title: "Start Sharing", target: nil, action: nil)
-    let copy = NSButton(title: "Copy Pairing Code", target: nil, action: nil)
-    let control = NSButton(title: "Enable Keyboard & Mouse…", target: nil, action: nil)
-    private let controlNote = label("Allow Accessibility on this Mac to enable remote control.", size: 12, color: .secondaryLabelColor)
+    let detail = label("Start sharing. Copy a code to your other Mac.", color: .secondaryLabelColor)
+    let toggle = NSButton(title: "Start sharing", target: nil, action: nil)
+    let copy = NSButton(title: "Copy code", target: nil, action: nil)
+    let control = NSButton(title: "Allow control…", target: nil, action: nil)
+    private let controlNote = label("Allow Accessibility for remote control.", size: 12, color: .secondaryLabelColor)
     let automatic = NSButton(checkboxWithTitle: "Share this Mac automatically", target: nil, action: nil)
     let clipboard = NSButton(checkboxWithTitle: "Share clipboard with the connected Mac", target: nil, action: nil)
 
     init() {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 620),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.title = "Share This Mac"
+        window.title = "Share this Mac"
         MacLinkAppearance.prepare(window)
         window.contentMinSize = NSSize(width: 540, height: 460)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
         let heading = MacLinkAppearance.header("Share this Mac", subtitle: "Your workspace, on your other Mac.")
-        let note = label("Pairing allows viewing and, when enabled, keyboard and mouse control. Keep the code private. Sharing continues after you close this window; stop it here or from the menu bar.", size: 12, color: .secondaryLabelColor)
-        let automaticNote = label("Starts sharing when MacLink opens and resumes after sleep or lock. To share after you log in, turn on Launch MacLink at login in Settings.", size: 12, color: .secondaryLabelColor)
-        let reset = NSButton(title: "Reset Pairing", target: self, action: #selector(resetPairing))
-        let diagnostics = NSButton(title: "Save Diagnostics…", target: self, action: #selector(saveDiagnostics))
+        let note = label("A code grants access. Keep it private. Sharing stays on when this window closes.", size: 12, color: .secondaryLabelColor)
+        let automaticNote = label("Starts with Mooring. Resumes when this Mac wakes and unlocks.", size: 12, color: .secondaryLabelColor)
+        let reset = NSButton(title: "Reset pairing", target: self, action: #selector(resetPairing))
+        let diagnostics = NSButton(title: "Save diagnostics…", target: self, action: #selector(saveDiagnostics))
         toggle.target = self; toggle.action = #selector(toggleSharing); toggle.keyEquivalent = "\r"
         copy.target = self; copy.action = #selector(copyCode); copy.isEnabled = false
         control.target = self; control.action = #selector(enableControl)
@@ -44,7 +44,7 @@ final class NativeShareWindow: NSWindowController, NSWindowDelegate {
         let extras = stack([reset, NSView(), diagnostics], orientation: .horizontal, spacing: 10)
         let state = stack([status, detail, actions], spacing: 12)
         detail.widthAnchor.constraint(equalTo: state.widthAnchor).isActive = true
-        let preferences = stack([MacLinkAppearance.sectionTitle("Sharing preferences", symbol: "slider.horizontal.3"),
+        let preferences = stack([MacLinkAppearance.sectionTitle("Access", symbol: "slider.horizontal.3"),
                                  controlNote, control, stack([automatic, automaticNote], spacing: 4), clipboard], spacing: 12)
         preferences.detachesHiddenViews = true
         controlNote.widthAnchor.constraint(equalTo: preferences.widthAnchor).isActive = true
@@ -55,7 +55,7 @@ final class NativeShareWindow: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     func showControlPermission(_ allowed: Bool) {
         control.isHidden = allowed
-        controlNote.stringValue = allowed ? "Keyboard and mouse control is enabled." : "Allow Accessibility on this Mac to enable remote control."
+        controlNote.stringValue = allowed ? "Remote control allowed." : "Allow Accessibility for remote control."
     }
     @objc private func toggleSharing() { onToggle?() }
     @objc private func changeAutomatic() { onAutomaticChange?(automatic.state == .on) }
@@ -72,22 +72,22 @@ final class NativePairWindow: NSWindowController, NSWindowDelegate, NSTextFieldD
     let code = NSSecureTextField(string: "")
     let address = NSTextField(string: "")
     let error = label("", size: 12, color: .systemRed)
-    let connect = NSButton(title: "Pair & Connect", target: nil, action: nil)
+    let connect = NSButton(title: "Pair & connect", target: nil, action: nil)
     private let options = NSButton(title: "Address override", target: nil, action: nil)
     private var addressForm: NSStackView!
     private var busy = false
     init() {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 380),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "Connect with MacLink"
+        window.title = "Pair a Mac"
         MacLinkAppearance.prepare(window)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
         let heading = MacLinkAppearance.header("Pair a Mac", subtitle: "Pair once. Connect anytime.")
-        let note = label("On your other Mac, open MacLink → Share This Mac → Start Sharing, then copy its pairing code here.", color: .secondaryLabelColor)
+        let note = label("On your other Mac: Mooring → Share this Mac → Start sharing. Copy its code here.", color: .secondaryLabelColor)
         code.placeholderString = "Paste pairing code"; code.setAccessibilityLabel("Pairing code")
-        address.placeholderString = "Optional — the code lists the Mac's addresses"; address.setAccessibilityLabel("Mac address override")
+        address.placeholderString = "Optional address"; address.setAccessibilityLabel("Mac address override")
         code.controlSize = .large; address.controlSize = .large
         code.delegate = self; address.delegate = self
         let form = stack([label("Pairing code", size: 12, weight: .medium), code], spacing: 6)
@@ -140,7 +140,7 @@ final class NativePairWindow: NSWindowController, NSWindowDelegate, NSTextFieldD
         self.busy = busy
         connect.isEnabled = !busy && !code.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         code.isEnabled = !busy; address.isEnabled = !busy; options.isEnabled = !busy
-        connect.title = busy ? "Connecting…" : "Pair & Connect"
+        connect.title = busy ? "Connecting…" : "Pair & connect"
     }
 }
 
@@ -253,7 +253,7 @@ final class NativeViewerStatsView: NSVisualEffectView {
         MacLinkAppearance.scrollBody(body, in: scrollRoot)
         let note = label("Local rates cover a rolling second; host stats arrive once a second. Recovery counts cover this session. Still screens send fewer frames. Screen → display uses synchronized clocks, not input latency. — means unavailable. Audio gaps are unsent packets, not measured network loss.", size: 10, color: .secondaryLabelColor)
         note.preferredMaxLayoutWidth = 404
-        let save = NSButton(title: "Save Diagnostics…", target: self, action: #selector(saveStats))
+        let save = NSButton(title: "Save diagnostics…", target: self, action: #selector(saveStats))
         save.bezelStyle = .rounded; save.controlSize = .small
         let bottom = stack([note, save], spacing: 8)
         addSubview(bottom)
@@ -325,7 +325,7 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
         self.peerID = peerID
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
-        window.title = name + " — MacLink"
+        window.title = name + " — Mooring"
         MacLinkAppearance.prepare(window)
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.fullScreenPrimary]
@@ -341,7 +341,7 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
         hideBar.bezelStyle = .inline
         hideBar.toolTip = "Hide diagnostic footer. Restore with ⌃⌘D or View → Diagnostic Footer."
         allowSystemKeys.target = self; allowSystemKeys.action = #selector(allowKeys); allowSystemKeys.bezelStyle = .inline
-        allowSystemKeys.toolTip = "Allow MacLink in Accessibility on this Mac to send ⌘-Tab and other system shortcuts to the remote Mac."
+        allowSystemKeys.toolTip = "Allow Mooring in Accessibility on this Mac to send ⌘-Tab and other system shortcuts to the remote Mac."
         allowSystemKeys.isHidden = true
         versionNotice.target = self; versionNotice.action = #selector(versionAction); versionNotice.bezelStyle = .inline
         versionNotice.isHidden = true

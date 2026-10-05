@@ -343,7 +343,7 @@ final class NativeSessionCoordinator {
     }
 
     private func refreshShare(_ message: String? = nil) {
-        shareWindow?.toggle.title = isSharing ? "Stop Sharing" : "Start Sharing"
+        shareWindow?.toggle.title = isSharing ? "Stop sharing" : "Start sharing"
         shareWindow?.copy.isEnabled = isSharing
         let idle = sharesAutomatically && !userStoppedSharing ? "Sharing paused · resumes automatically" : "Sharing is off"
         var connected = "Connected · sharing this display"
@@ -364,7 +364,7 @@ final class NativeSessionCoordinator {
     var keyboardAndMouseAllowed: Bool { NativeInputInjector.isTrusted }
     func allowKeyboardAndMouse() {
         AppleSession.requestPermission()
-        shareWindow?.detail.stringValue = "Enable MacLink in macOS Accessibility to allow keyboard and mouse. Viewing works without it."
+        shareWindow?.detail.stringValue = "Allow Mooring in Accessibility to control this Mac. Viewing needs no permission."
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
     }
     /// Turning it on starts sharing now; turning it off leaves a running share alone.
@@ -411,7 +411,7 @@ final class NativeSessionCoordinator {
             return
         }
         guard CGPreflightScreenCaptureAccess() || (!automatic && CGRequestScreenCaptureAccess()) else {
-            refreshShare("Allow MacLink in macOS Screen Recording, then click Start Sharing again.")
+            refreshShare("Allow Mooring in Screen Recording, then start sharing.")
             return
         }
         do {
@@ -434,7 +434,7 @@ final class NativeSessionCoordinator {
             let token = NativeRunToken()
             self.listener = listener; sharingToken = token; hostIdentity = identity
             NativeLog.session.notice("sharing started \(automatic ? "automatically" : "by the user", privacy: .public)")
-            refreshShare("Copy the pairing code to your other Mac. Sharing continues after you close this window, until you stop it.")
+            refreshShare("Copy a code to your other Mac. Sharing stays on when this window closes.")
             acceptNext(listener: listener, token: token)
             permissionTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.updateHostPermission() }
             if let permissionTimer { RunLoop.main.add(permissionTimer, forMode: .common) }
@@ -463,7 +463,7 @@ final class NativeSessionCoordinator {
     func prepareForUpdateInstall() {
         guard isSharing else { return }
         if !sharesAutomatically { defaults.set(true, forKey: Self.resumeAfterUpdateKey) }
-        stopSharing(reason: "Installing an update. Sharing resumes when MacLink restarts.")
+        stopSharing(reason: "Updating. Sharing resumes when Mooring restarts.")
     }
 
     private func acceptNext(listener: NativeTransport, token: NativeRunToken) {
@@ -927,7 +927,7 @@ final class NativeSessionCoordinator {
     func stopSharingByUser() {
         userStoppedSharing = true
         stopSharing(reason: sharesAutomatically
-            ? "Sharing stopped. It starts automatically again the next time MacLink opens, or click Start Sharing."
+            ? "Sharing stopped. It starts automatically again the next time Mooring opens, or click Start Sharing."
             : "Sharing stopped. Your paired Macs can reconnect the next time you start sharing.")
     }
 
@@ -978,7 +978,7 @@ final class NativeSessionCoordinator {
             item.setString(code, forType: .string)
             item.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
             NSPasteboard.general.clearContents(); NSPasteboard.general.writeObjects([item])
-            shareWindow?.detail.stringValue = "Pairing code copied. Paste it into Connect with MacLink on your other Mac within 10 minutes, "
+            shareWindow?.detail.stringValue = "Code copied. Paste into Pair a Mac on your other Mac within 10 minutes, "
                 + "while sharing stays on. It pairs one Mac, once; copying another code replaces it."
         } catch { refreshShare(error.localizedDescription) }
     }
@@ -1174,8 +1174,8 @@ final class NativeSessionCoordinator {
         let refused = (error as? NativeSessionError)?.isAuthenticationFailure == true
         let notSharing = (error as? NativeSessionError)?.isNotSharing == true
         if notSharing {
-            message = "The sharing Mac answered, but MacLink isn't sharing there right now. Its screen may be locked with a password: "
-                + "unlock it, for example with Screen Sharing, and MacLink reconnects within seconds."
+            message = "The sharing Mac answered, but Mooring isn't sharing there right now. Its screen may be locked with a password: "
+                + "unlock it, for example with Screen Sharing, and Mooring reconnects within seconds."
         }
         if refused && pairing {
             message = kind == .oneTime
@@ -1185,7 +1185,7 @@ final class NativeSessionCoordinator {
         }
         // Different versions end the handshake without a reason on the other side.
         if [Int32(ML_SESSION_CLOSED), Int32(ML_SESSION_PROTOCOL)].contains((error as? NativeSessionError)?.status ?? 0) {
-            message += " If the other Mac runs a different MacLink version, update both Macs."
+            message += " If the other Mac runs a different Mooring version, update both Macs."
             onVersionMismatch?()
         }
         if pairing {
@@ -1535,7 +1535,7 @@ final class NativeSessionCoordinator {
             if case .some((.ready, let ready, _)) = peerUpdate {
                 awaitingPeer = true; reconnectAttempts = 0
                 NativeLog.updates.notice("disconnecting so the sharing Mac can install \(ready?.name ?? "its update", privacy: .public)")
-                disconnectViewer(reason: "The sharing Mac is installing \(ready?.name ?? "an update") and will restart. MacLink reconnects when it's back.",
+                disconnectViewer(reason: "The sharing Mac is installing \(ready?.name ?? "an update") and will restart. Mooring reconnects when it's back.",
                                  reconnect: true)
             } else {
                 peerUpdate = (.checking, nil, uptime)
@@ -1664,7 +1664,7 @@ final class NativeSessionCoordinator {
         let peerID = viewerWindow.flatMap { window in
             !window.isClosed && (viewerChannel != nil || connecting != nil || window.isReconnecting) ? window.peerID : nil
         }
-        disconnectViewer(reason: peerID == nil ? reason + " Reconnect when ready." : reason + " MacLink reconnects when this Mac is awake and unlocked.")
+        disconnectViewer(reason: peerID == nil ? reason + " Reconnect when ready." : reason + " Mooring reconnects when this Mac is awake and unlocked.")
         if let peerID { resumeAfterWake = peerID; NativeLog.session.notice("viewer paused; it reconnects after this Mac wakes") }
     }
     /// Runs once a second: reconnects a session this Mac's sleep or lock
@@ -1911,7 +1911,7 @@ final class NativeSessionCoordinator {
         catch { showError("Could not save diagnostics: \(error.localizedDescription)") }
     }
     private func showError(_ message: String) {
-        let alert = NSAlert(); alert.messageText = "MacLink connection"; alert.informativeText = message; alert.runModal()
+        let alert = NSAlert(); alert.messageText = "Mooring connection"; alert.informativeText = message; alert.runModal()
     }
     func stop() {
         capabilityGate.stop()
@@ -1919,7 +1919,7 @@ final class NativeSessionCoordinator {
         telemetryTimer?.invalidate(); telemetryTimer = nil
         clipboardTimer?.invalidate(); clipboardTimer = nil
         NativeTelemetryServer.stop()
-        stopSharing(); disconnectViewer(reason: "MacLink stopped.", leaving: true)
+        stopSharing(); disconnectViewer(reason: "Mooring stopped.", leaving: true)
         systemKeys?.stop(); systemKeys = nil
         privacyGuard?.stop(); privacyGuard = nil
         observerTokens.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }; observerTokens.removeAll()

@@ -1,39 +1,27 @@
-# MacLink identity
+# Mooring identity
 
-![MacLink cobalt connection icon](../app/Assets/MacLink.png)
+**Mooring · Your Macs, within reach.**
 
-**MacLink** · **Your Macs, within reach.**
-
-MacLink combines a bold identity with a focused native macOS interface. Use direct language about connecting, viewing, controlling, and sharing. Describe actual state: “Sharing is off”, “Connecting…”, or “Session ended”. Reserve “connected” for a live session; a saved Mac or a successful reachability check is not a live session.
+The Threshold mark brings two places into reach. The name suggests a dependable place to return. Use these ideas in the identity; use literal verbs in controls. “Pair” establishes trust, “Connect” begins a session, “Share” grants access, and “Return” brings an existing session forward.
 
 ## Mark and color
 
-The mark combines two opposed angular paths with a central bridge, representing a connection in both directions. A white mark on a solid cobalt tile appears in the Dock, Cmd+Tab, Finder, About panel, and window headers. Keep the mark geometric, with square ends and consistent stroke weight. The menu bar uses the same geometry as a monochrome template so macOS supplies the correct contrast.
+The approved [brand kit](brand-pivot/README.md) uses the exact Threshold silhouette. Marigold `#FFD447` and coral `#FF5277` sit on graphite `#242726`. Turquoise `#1CC9B7` supports the identity; small text and symbols use a darker teal in light appearance for contrast. Light windows use a subtle blush; dark windows use graphite. Primary buttons use graphite text on marigold. macOS supplies semantic selection, warning, error, checkbox, and focus colors.
 
-| Role | Color |
-| --- | --- |
-| Primary action / light appearance accent | `#214FCC` |
-| Dark appearance symbols and small labels | `#88AAFF` |
-| Icon tile | `#214FCC` |
-| Icon mark | `#FFFFFF` |
-| Text and window surfaces | Native macOS semantic colors |
+`app/MacLinkBrand.swift` renders the same geometry for all app icon sizes and the monochrome menu-bar template. `scripts/render-brand.swift` renders the iconset at build time. Internal file names remain MacLink for compatibility with existing packaging and updates.
 
-Keep white button text on the darker cobalt fill in either appearance. Use system colors for errors, focus rings, selection, and checkboxes. Color always accompanies text or a recognizable symbol.
+## Words and hierarchy
 
-`app/MacLinkBrand.swift` is the canonical mark and palette. `scripts/render-brand.swift` renders all ten standard macOS icon representations at build time. `scripts/build-app.sh` assembles `MacLink.icns` and embeds it before signing. No downloaded fonts, icon packages, or external artwork are required.
+Lead with the Mac and its next action. Keep the list visible. Pairing uses a code; Apple Screen Sharing uses an address. Name those choices directly. The empty state has one pairing action, an address alternative, and sharing in the top bar. A selected, live native session uses “Return.” A saved Mac uses “Connect.”
 
-## Native interface
+Connection explanations sit behind Details. Errors expand details automatically and remain available for keyboard and assistive-technology users. A reachability check does not establish a live session. Use “Ready,” “Connecting…,” and explicit error states according to actual behavior.
 
-Use the system font: semibold for headings and primary actions, medium for saved Mac names, regular for explanations, and monospaced digits for live telemetry. Window headers use the mark at 48 points; the connection window uses a compact sidebar identity and a larger empty-state mark.
+Pairing and sharing screens give short, ordered instructions. Keep code privacy, the scope of control, and continued sharing after a window closes explicit. Pairing codes stay in secure text fields. Address and port overrides stay behind disclosures. Settings retains Sharing, Viewing, and General with immediate changes, existing permission boundaries, and scrollable device lists.
 
-Keep the saved Mac list visible alongside the selected Mac. Separate MacLink pairing from Apple Screen Sharing by name and explanation. Put pairing and sharing in the Connections window as well as the menu bar. Empty lists give a usable next step. Optional address and port controls stay behind disclosure buttons. Pairing codes remain secure text fields, and invalid input produces an inline error.
+Use the native system font and standard keyboard navigation. Avoid making action labels poetic. Meaning belongs in a few durable phrases; operational words should tell people exactly what happens.
 
-Settings uses Sharing, Viewing, and General categories. General opens the existing Apple Screen Sharing automation preferences. Sharing and Settings use scrollable content so long explanations and saved-device lists remain reachable. Native keyboard focus, Return, Escape, window controls, and standard menus remain available.
+## Compatibility and validation
 
-MacLink uses regular application activation and `LSUIElement=false` to participate in Cmd+Tab and the Dock. Closing the last window keeps sharing and automation alive. Clicking the Dock icon when all windows are closed reopens Connections; Open Connections restores a minimized window. Quitting explicitly stops the app's sessions.
+The visible app name is Mooring. Preserve `dev.maclink.launcher`, Keychain services, defaults, frame autosave names, application-support storage, protocol formats, the CLI name, and the update feed. The bundle directory and executable remain MacLink so current installation and release tooling continue to work. About identifies the transition as “Formerly MacLink.”
 
-## Review
-
-Run `./scripts/ci-local.sh` locally on Apple silicon. Inspect light and dark appearances, the empty list, long saved names, both connection types, pairing validation, address disclosure, Add Mac, the three settings categories, and the sharing window. Verify the icon in Finder, the Dock, and Cmd+Tab, and reopen Connections after closing or minimizing its window.
-
-Use an isolated `MACLINK_HOME` and `MACLINK_DEFAULTS_SUITE` for UI checks. Keep captured screens outside tracked source. A local presentation check does not replace notarized-download verification or the real two-Mac release gate.
+Run `./scripts/ci-local.sh` on this Apple silicon Mac. Inspect empty and populated states, Details, errors, pairing, sharing, settings, and light/dark appearance. UI review images use synthetic Macs and stay outside tracked source. Local tests and development builds do not replace notarized-download and real two-Mac release checks.

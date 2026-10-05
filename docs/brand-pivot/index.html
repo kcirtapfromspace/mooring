@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Mooring: the selected Threshold mark in a bright, festive bohemian palette.">
+  <title>Mooring · Brand identity</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --graphite: #242726;
+      --marigold: #FFD447;
+      --coral: #FF5277;
+      --turquoise: #1CC9B7;
+      --paper: #FFF2F4;
+      --ink: #242726;
+      --muted: #5E6260;
+      --line: #D9C8CE;
+      --panel: #FFFFFF;
+      --wash: #FFE2E9;
+      --focus: #9B2145;
+      font-family: "Avenir Next", Avenir, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); }
+    svg { display: block; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    button { font: inherit; cursor: pointer; color: inherit; }
+    a { color: inherit; text-underline-offset: 4px; }
+    button:focus-visible, a:focus-visible { outline: 3px solid var(--focus); outline-offset: 5px; }
+    main { max-width: 1280px; padding: 30px 56px 54px; margin: auto; }
+    .topline { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-bottom: 22px; border-bottom: 1px solid var(--line); }
+    .eyebrow, .label { font-size: 11px; font-weight: 600; letter-spacing: .15em; text-transform: uppercase; }
+    .top-actions { display: flex; align-items: center; gap: 20px; }
+    .draft { font-size: 12px; color: var(--muted); }
+    .appearance { padding: 9px 13px; border: 1px solid var(--line); border-radius: 7px; background: transparent; font-size: 12px; }
+    .intro { display: grid; grid-template-columns: 1.15fr 1fr; gap: 60px; align-items: center; margin: 36px 0; }
+    h1 { font-size: clamp(70px, 9.2vw, 116px); line-height: 1; letter-spacing: -.065em; font-weight: 600; margin: 0; }
+    h2 { font-size: 28px; letter-spacing: -.04em; line-height: 1.2; font-weight: 500; margin: 0 0 18px; }
+    h3 { font-size: 19px; letter-spacing: -.025em; line-height: 1.3; font-weight: 600; margin: 0 0 10px; }
+    p { line-height: 1.6; margin: 0 0 14px; }
+    .intro p { font-size: 16px; max-width: 415px; margin-bottom: 8px; }
+    .intro .small { color: var(--muted); font-size: 12px; }
+    .stage { display: grid; grid-template-columns: 1.1fr .9fr; min-height: 395px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .story { display: flex; flex-direction: column; align-items: flex-start; padding: 38px 40px 34px 0; }
+    .wordmark { display: flex; align-items: center; gap: 12px; font-size: 27px; font-weight: 600; letter-spacing: -.045em; }
+    .wordmark svg { width: 35px; height: 35px; }
+    .color-mark { --threshold-first: var(--marigold); --threshold-second: var(--coral); }
+    .wordmark .color-mark { background: var(--graphite); border-radius: 9px; padding: 4px; width: 39px; height: 39px; }
+    .brand-headline { font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif; font-size: clamp(36px, 4.5vw, 58px); line-height: 1.05; letter-spacing: -.045em; margin: 29px 0 18px; }
+    .tagline { font-size: 17px; font-weight: 600; }
+    .positioning { font-size: 14px; color: var(--muted); max-width: 350px; }
+    .descriptor { font-size: 10px; font-weight: 600; letter-spacing: .13em; text-transform: uppercase; margin-top: auto; padding-top: 18px; }
+    .specimen { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--marigold); padding: 35px 24px 27px; overflow: hidden; isolation: isolate; }
+    .specimen::before, .specimen::after { content: ""; position: absolute; z-index: -1; border-radius: 50%; border: 20px solid var(--coral); width: 220px; height: 220px; }
+    .specimen::before { left: -137px; top: -86px; }
+    .specimen::after { right: -137px; bottom: -93px; border-color: var(--turquoise); }
+    .tile { display: grid; place-items: center; background: var(--graphite); color: var(--marigold); --threshold-first: var(--marigold); --threshold-second: var(--coral); box-shadow: inset 0 1px 1px #FFFFFF24, 0 7px 14px #24272612; }
+    .tile svg { width: 72%; height: 72%; }
+    .specimen .tile { width: 190px; height: 190px; border-radius: 42px; box-shadow: inset 0 1px 1px #FFFFFF24, 0 16px 26px #24272624; }
+    .glyph-line { display: flex; align-items: center; gap: 26px; color: var(--graphite); margin-top: 25px; }
+    .glyph-line svg { width: 43px; height: 43px; }
+    .specimen-label { color: var(--graphite); font-size: 10px; letter-spacing: .14em; font-weight: 600; text-transform: uppercase; margin-top: 16px; }
+    .details { display: grid; grid-template-columns: .9fr 1.1fr; gap: 54px; margin: 31px 0 44px; }
+    .label { color: var(--muted); margin-bottom: 14px; }
+    .rationale { font-size: 14px; max-width: 410px; }
+    .palette { display: flex; gap: 10px; }
+    .swatch { flex: 1; min-width: 0; max-width: 100px; }
+    .swatch i { display: block; height: 44px; background: var(--swatch); border-radius: 4px; border: 1px solid #24272612; }
+    .swatch span { display: block; font-size: 11px; margin-top: 7px; }
+    .swatch code { font-family: ui-monospace, monospace; font-size: 10px; color: var(--muted); }
+    .palette-note { font-size: 12px; color: var(--muted); margin: 14px 0 0; }
+    .native-specimens { margin-bottom: 43px; }
+    .specimen-grid { display: grid; grid-template-columns: 1fr 1.1fr; gap: 28px; }
+    .small-preview { padding: 24px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+    .size-row { display: flex; gap: 32px; align-items: flex-end; padding: 12px 0 27px; }
+    .size-sample { display: flex; flex-direction: column; align-items: center; gap: 13px; }
+    .size-sample .tile { border-radius: 22%; }
+    .size-sample span { font-size: 11px; color: var(--muted); }
+    .menu-bar { display: flex; align-items: center; justify-content: flex-end; gap: 15px; height: 32px; padding: 0 14px; background: var(--paper); border-bottom: 1px solid var(--line); color: var(--ink); border-radius: 6px 6px 0 0; font-size: 12px; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+    .menu-bar svg { width: 18px; height: 18px; }
+    .tiny-note { font-size: 12px; color: var(--muted); margin: 15px 0 0; }
+    .app-window { border: 1px solid var(--line); border-radius: 11px; background: var(--panel); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+    .titlebar { display: flex; justify-content: space-between; align-items: center; padding: 14px 17px; border-bottom: 1px solid var(--line); font-size: 12px; }
+    .traffic { display: flex; gap: 6px; }
+    .traffic i { width: 9px; height: 9px; background: var(--line); border-radius: 50%; }
+    .window-title { font-weight: 600; }
+    .app-inner { display: grid; grid-template-columns: 155px 1fr; min-height: 239px; }
+    .sidebar { background: var(--paper); padding: 20px 12px; border-right: 1px solid var(--line); }
+    .app-name { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; margin: 0 8px 22px; }
+    .app-name svg { width: 19px; height: 19px; }
+    .device { padding: 10px; border-radius: 6px; font-size: 12px; line-height: 1.7; }
+    .device.active { background: var(--wash); }
+    .device small { display: block; font-size: 10px; color: var(--muted); }
+    .device-content { padding: 26px; display: flex; flex-direction: column; align-items: flex-start; }
+    .device-content svg { width: 28px; height: 28px; margin-bottom: 16px; }
+    .device-content h3 { font-size: 18px; margin-bottom: 7px; }
+    .device-content p { font-size: 12px; color: var(--muted); max-width: 185px; }
+    .mock-action { cursor: default; font-size: 12px; font-weight: 600; color: var(--graphite); background: var(--marigold); border: 1px solid #24272630; border-radius: 6px; padding: 9px 16px; opacity: 1; }
+    .sample-disclaimer { font-size: 11px; color: var(--muted); margin: 11px 0 0; }
+    .strategy { display: grid; grid-template-columns: 1fr 1fr; gap: 54px; border-top: 1px solid var(--line); padding-top: 29px; margin-bottom: 35px; }
+    .strategy p, .strategy li { font-size: 13px; line-height: 1.7; }
+    .strategy ul { padding-left: 18px; margin: 0; }
+    .downloads { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 19px; }
+    .downloads a { padding: 10px 13px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; font-size: 12px; text-decoration: none; }
+    .archive { border-top: 1px solid var(--line); padding-top: 23px; }
+    .archive summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+    .archive img { display: block; width: 100%; height: auto; margin-top: 18px; border-radius: 7px; }
+    .footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 14px; border-top: 1px solid var(--line); margin-top: 28px; padding-top: 20px; color: var(--muted); font-size: 11px; }
+    .hidden-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+    body[data-theme="dark"] { color-scheme: dark; --paper: #242726; --ink: #FFF2F4; --muted: #C8C9C8; --line: #555956; --panel: #303533; --wash: #50303D; --focus: #FFD447; }
+    body[data-theme="dark"] .tagline { color: var(--marigold); }
+    @media (max-width: 900px) {
+      main { padding: 26px 30px 42px; }
+      .intro { gap: 28px; }
+      .stage { grid-template-columns: 1fr 1fr; }
+      .story { padding-right: 22px; }
+      .details, .strategy { gap: 28px; }
+      .specimen-grid { grid-template-columns: 1fr; }
+      .small-preview { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+      .small-preview > .label { grid-column: 1 / -1; }
+      .size-row { padding: 0; }
+    }
+    @media (max-width: 640px) {
+      main { padding: 21px 20px 35px; }
+      .draft { display: none; }
+      .eyebrow { font-size: 10px; letter-spacing: .1em; }
+      .intro { grid-template-columns: 1fr; gap: 20px; margin: 31px 0; }
+      h1 { font-size: clamp(68px, 17vw, 96px); }
+      .intro p { font-size: 14px; }
+      .stage { grid-template-columns: 1fr; }
+      .story { padding: 27px 0; }
+      .brand-headline { font-size: 44px; }
+      .specimen { min-height: 332px; padding: 28px 20px; }
+      .specimen .tile { width: 172px; height: 172px; border-radius: 38px; }
+      .details, .strategy { grid-template-columns: 1fr; gap: 22px; }
+      .palette { gap: 7px; }
+      .small-preview { display: block; }
+      .size-row { gap: 28px; margin-bottom: 24px; }
+      .app-inner { grid-template-columns: 126px 1fr; }
+      .device-content { padding: 24px 17px; }
+      .app-name { margin-left: 3px; gap: 5px; }
+    }
+    @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+  </style>
+</head>
+<body data-theme="light">
+  <svg class="hidden-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <defs>
+      <symbol id="threshold" viewBox="0 0 128 128">
+        <path style="fill:var(--threshold-first,currentColor)" d="M24 22C36 26 50 32 54 36C57 38 58 41 58 45V90C58 96 45 107 24 114Z"/>
+        <path style="fill:var(--threshold-second,currentColor)" d="M70 34C70 31 73 30 76 31L94 37C106 41 108 45 108 54V114C96 111 82 105 82 98V58C82 54 80 51 76 48L72 45C70 44 70 42 70 40Z"/>
+      </symbol>
+    </defs>
+  </svg>
+  <main>
+    <header class="topline">
+      <span class="eyebrow">MacLink → Mooring</span>
+      <div class="top-actions"><span class="draft">Selected name · Color study</span><button class="appearance" type="button" aria-pressed="false" id="appearance">Dark preview</button></div>
+    </header>
+    <section class="intro">
+      <h1>mooring</h1>
+      <div><p>A place to connect.<br>A workspace to come back to.</p><p class="small">Mooring is the selected name. The Threshold mark keeps its shape, with a bright, festive bohemian palette.</p></div>
+    </section>
+    <section class="stage" id="stage">
+      <div class="story">
+        <div class="wordmark"><svg class="color-mark" aria-hidden="true"><use href="#threshold"/></svg><span>mooring</span></div>
+        <h2 class="brand-headline">Somewhere else.<br>Still your Mac.</h2>
+        <p class="tagline">Your Macs, within reach.</p>
+        <p class="positioning">A native remote workspace for the Macs you own. Your work stays on your Mac; your desktop comes into reach.</p>
+        <span class="descriptor">Remote desktop for Mac</span>
+      </div>
+      <div class="specimen">
+        <div class="tile" role="img" aria-label="Mooring app icon: marigold and coral pink Threshold panels on graphite" id="hero-icon"><svg aria-hidden="true"><use href="#threshold"/></svg></div>
+        <div class="glyph-line" role="img" aria-label="The Threshold silhouette in monochrome"><svg><use href="#threshold"/></svg><svg style="width:32px;height:32px"><use href="#threshold"/></svg><svg style="width:18px;height:18px"><use href="#threshold"/></svg></div>
+        <span class="specimen-label">Same shape. More sunshine.</span>
+      </div>
+    </section>
+    <section class="details">
+      <div><div class="label">The identity</div><p class="rationale">Mooring suggests a connection to a familiar place. The two facing panels keep the Threshold idea of a passage between workspaces. Marigold and coral pink bring the celebration; graphite gives them a steady foundation.</p></div>
+      <div><div class="label">The palette</div><div class="palette" id="palette">
+        <div class="swatch"><i style="--swatch:#FFD447"></i><span>Marigold</span><code>#FFD447</code></div>
+        <div class="swatch"><i style="--swatch:#FF5277"></i><span>Coral pink</span><code>#FF5277</code></div>
+        <div class="swatch"><i style="--swatch:#1CC9B7"></i><span>Turquoise</span><code>#1CC9B7</code></div>
+        <div class="swatch"><i style="--swatch:#242726"></i><span>Graphite</span><code>#242726</code></div>
+      </div><p class="palette-note">Marigold replaces ivory. Coral pink replaces ember. Turquoise supports the wider brand; the icon uses two colors on graphite.</p></div>
+    </section>
+    <section class="native-specimens">
+      <h2>A bright identity. A familiar Mac app.</h2>
+      <div class="specimen-grid">
+        <div class="small-preview">
+          <div class="label">Actual pixel sizes · concept proof</div>
+          <div class="size-row">
+            <div class="size-sample"><div class="tile" style="width:64px;height:64px"><svg aria-hidden="true"><use href="#threshold"/></svg></div><span>64 px</span></div>
+            <div class="size-sample"><div class="tile" style="width:32px;height:32px"><svg aria-hidden="true"><use href="#threshold"/></svg></div><span>32 px</span></div>
+            <div class="size-sample"><div class="tile" style="width:16px;height:16px"><svg aria-hidden="true"><use href="#threshold"/></svg></div><span>16 px</span></div>
+          </div>
+          <div><div class="menu-bar" aria-label="Illustrative menu-bar placement"><svg aria-hidden="true"><use href="#threshold"/></svg><span>Sun 4 Oct</span><b>4:30 PM</b></div><p class="tiny-note">The menu-bar mark stays monochrome. The Dock icon carries the full palette.</p></div>
+        </div>
+        <div>
+          <div class="app-window" aria-label="Mooring Connections window design preview">
+            <div class="titlebar"><div class="traffic" aria-hidden="true"><i></i><i></i><i></i></div><span class="window-title">Connections</span><span>Concept</span></div>
+            <div class="app-inner"><aside class="sidebar"><div class="app-name"><svg aria-hidden="true"><use href="#threshold"/></svg><span>Mooring</span></div><div class="device active">Studio Mac<small>Saved Mac</small></div><div class="device">Laptop<small>Saved Mac</small></div></aside><div class="device-content"><svg aria-hidden="true"><use href="#threshold"/></svg><h3>Studio Mac</h3><p>Connect there. Work here.</p><button class="mock-action" disabled>Connect</button></div></div>
+          </div><p class="sample-disclaimer">Illustrative layout and device names. Native controls keep their system behavior.</p>
+        </div>
+      </div>
+    </section>
+    <section class="strategy">
+      <div><div class="label">Color & voice</div><h3>Festive, warm, and capable.</h3><p>Use saturated color, curved shapes, and a little editorial character around the brand. Keep everyday app surfaces and text easy to read. The mark stays crisp, without texture or extra detail at small sizes.</p><ul><li>Graphite text on marigold actions; avoid white text on bright fills.</li><li>Use turquoise as a supporting accent, with labels for status.</li><li>Plain language: pair, connect, share, view.</li><li>Keep the native system font in the application.</li></ul><div class="downloads"><a href="threshold-icon.svg" download="Mooring-icon.svg">Download color icon SVG</a><a href="threshold-mark.svg" download="Mooring-mark.svg">Download monochrome mark SVG</a></div></div>
+      <div><div class="label">The native experience</div><h3>Pair once. Return anytime.</h3><p>Choose a Mac. Connect. Return to your workspace. The native app now carries Mooring’s name, mark, and palette.</p><ul><li>Pair with a code. Connect with an address.</li><li>Keep your Macs in view.</li><li>Details appear when you need them.</li><li>A code grants access. Keep it private.</li></ul></div>
+    </section>
+    <details class="archive"><summary>Earlier logo exploration · archived colors and names</summary><img src="brand-study.png" alt="Archived Aperture, Threshold, and Traverse logo explorations with their earlier names and palettes." width="1536" height="1024"><p class="tiny-note">The center Threshold silhouette was selected. This earlier image predates Mooring and the festive palette. The editable SVGs above contain the current colors. <a href="logo-study-prompt.txt">Original image-generation prompt</a>.</p></details>
+    <footer class="footer"><span>Mooring · Threshold mark · Marigold + coral pink</span><span>Brand design · 04 Oct 2026</span></footer>
+  </main>
+  <script>
+    (() => {
+      const body = document.body;
+      document.getElementById("appearance").addEventListener("click", event => {
+        const dark = body.dataset.theme !== "dark";
+        body.dataset.theme = dark ? "dark" : "light";
+        event.currentTarget.textContent = dark ? "Light preview" : "Dark preview";
+        event.currentTarget.setAttribute("aria-pressed", String(dark));
+      });
+    })();
+  </script>
+</body>
+</html>

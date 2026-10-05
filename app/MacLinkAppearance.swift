@@ -5,7 +5,7 @@ enum MacLinkAppearance {
     static func prepare(_ window: NSWindow) {
         window.titlebarAppearsTransparent = true
         window.toolbarStyle = .unified
-        window.backgroundColor = .windowBackgroundColor
+        window.backgroundColor = MacLinkBrand.canvas
         window.contentView?.setAccessibilityIdentifier("MacLink." + window.title)
     }
 
@@ -29,9 +29,23 @@ enum MacLinkAppearance {
         button.bezelStyle = .rounded
         button.controlSize = .large
         button.font = .systemFont(ofSize: 13, weight: .semibold)
-        // The key button uses white text in both appearances. Keep its fill
-        // dark enough for contrast; lighter cobalt is for dark-mode symbols.
-        button.bezelColor = MacLinkBrand.cobalt
+        let title = button.title
+        let target = button.target
+        let action = button.action
+        let key = button.keyEquivalent
+        let modifiers = button.keyEquivalentModifierMask
+        let enabled = button.isEnabled
+        let font = button.font
+        let cell = MooringActionCell(textCell: title)
+        cell.bezelStyle = .rounded
+        cell.controlSize = .large
+        cell.font = font
+        button.cell = cell
+        button.target = target
+        button.action = action
+        button.keyEquivalent = key
+        button.keyEquivalentModifierMask = modifiers
+        button.isEnabled = enabled
     }
 
     static func sectionTitle(_ title: String, symbol: String) -> NSStackView {
@@ -106,5 +120,21 @@ final class MacLinkSurface: NSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
+    }
+}
+
+/// A bright action keeps graphite text, including when it is the default key.
+/// AppKit still handles focus, keyboard activation, disabled state and tracking.
+private final class MooringActionCell: NSButtonCell {
+    override func drawBezel(withFrame frame: NSRect, in controlView: NSView) {
+        let color = isEnabled ? MacLinkBrand.marigold : NSColor.quaternaryLabelColor
+        (isHighlighted ? color.blended(withFraction: 0.12, of: MacLinkBrand.graphite)! : color).setFill()
+        NSBezierPath(roundedRect: frame.insetBy(dx: 1, dy: 2), xRadius: 8, yRadius: 8).fill()
+    }
+    override func drawTitle(_ title: NSAttributedString, withFrame frame: NSRect, in controlView: NSView) -> NSRect {
+        let copy = NSMutableAttributedString(attributedString: title)
+        copy.addAttribute(.foregroundColor, value: isEnabled ? MacLinkBrand.graphite : NSColor.secondaryLabelColor,
+                          range: NSRange(location: 0, length: copy.length))
+        return super.drawTitle(copy, withFrame: frame, in: controlView)
     }
 }
