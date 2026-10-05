@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="currentColor" role="img" aria-labelledby="title desc">
+  <title id="title">Mooring monochrome Threshold mark</title>
+  <desc id="desc">Two facing curved panels create a passage between workspaces.</desc>
+  <path d="M24 22C36 26 50 32 54 36C57 38 58 41 58 45V90C58 96 45 107 24 114Z"/>
+  <path d="M70 34C70 31 73 30 76 31L94 37C106 41 108 45 108 54V114C96 111 82 105 82 98V58C82 54 80 51 76 48L72 45C70 44 70 42 70 40Z"/>
+</svg>
