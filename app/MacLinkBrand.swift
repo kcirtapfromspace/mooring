@@ -66,9 +66,42 @@ enum MacLinkBrand {
     }
 
     static var menuBarImage: NSImage {
-        let image = image(size: 18, appIcon: false)
+        menuBarImage(isSharingScreen: false)
+    }
+
+    static func menuBarImage(isSharingScreen: Bool) -> NSImage {
+        let mark = image(size: 18, appIcon: false)
+        let image: NSImage
+        if isSharingScreen {
+            image = NSImage(size: NSSize(width: 24, height: 18), flipped: true) { _ in
+                guard let context = NSGraphicsContext.current?.cgContext else { return false }
+                mark.draw(in: NSRect(x: 0, y: 0, width: 18, height: 18))
+                context.saveGState()
+                defer { context.restoreGState() }
+                // A cutout around the outgoing-share badge keeps it readable
+                // in both menu-bar appearances and the selected menu state.
+                context.setBlendMode(.clear)
+                context.fillEllipse(in: CGRect(x: 14, y: 7, width: 11, height: 11))
+                context.setBlendMode(.normal)
+                context.setFillColor(NSColor.black.cgColor)
+                context.fillEllipse(in: CGRect(x: 15, y: 8, width: 9, height: 9))
+                context.setBlendMode(.clear)
+                context.setLineWidth(1.1)
+                context.setLineCap(.round)
+                context.setLineJoin(.round)
+                context.move(to: CGPoint(x: 17.5, y: 14.5))
+                context.addLine(to: CGPoint(x: 21, y: 11))
+                context.move(to: CGPoint(x: 18.5, y: 11))
+                context.addLine(to: CGPoint(x: 21, y: 11))
+                context.addLine(to: CGPoint(x: 21, y: 13.5))
+                context.strokePath()
+                return true
+            }
+        } else {
+            image = mark
+        }
         image.isTemplate = true
-        image.accessibilityDescription = name
+        image.accessibilityDescription = isSharingScreen ? "Mooring — sharing this Mac" : name
         return image
     }
 }

@@ -202,6 +202,10 @@ final class NativeSessionCoordinator {
             && (!isSharing || sharesAutomatically || viewerAwaitsInstall)
     }
     var isSharing: Bool { sharingToken?.isActive == true }
+    /// True only after ScreenCaptureKit starts for an authenticated viewer.
+    private(set) var isSharingScreen = false {
+        didSet { if isSharingScreen != oldValue { onChange?() } }
+    }
     var isConnected: Bool { viewerChannel?.token.isActive == true }
     /// Start sharing when MacLink opens and resume after sleep, lock or a user switch.
     var sharesAutomatically: Bool {
@@ -615,7 +619,9 @@ final class NativeSessionCoordinator {
         capture.start { [weak self, weak channel] result in
             guard let self, let channel, live.isActive, self.hostChannel === channel, channel.token.isActive else { return }
             switch result {
-            case .success: self.refreshShare(NativeInputInjector.isTrusted ? "Encrypted session · keyboard and mouse enabled." : "Encrypted session · view only. Enable Keyboard & Mouse to allow control.")
+            case .success:
+                self.isSharingScreen = true
+                self.refreshShare(NativeInputInjector.isTrusted ? "Encrypted session · keyboard and mouse enabled." : "Encrypted session · view only. Enable Keyboard & Mouse to allow control.")
             case .failure(let error): channel.fail(error.localizedDescription)
             }
         }
@@ -624,6 +630,7 @@ final class NativeSessionCoordinator {
     /// Stops the running capture and keeps its encoder counters.
     private func retireCapture() {
         captureToken?.cancel(); captureToken = nil
+        isSharingScreen = false
         if let metrics = capture?.encoderMetrics { retiredEncoderCounters.add(metrics) }
         capture?.stop(); capture = nil
     }

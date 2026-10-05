@@ -348,6 +348,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     private var automationStarted = false
     private var initialLoad = true
     private var statusItem: NSStatusItem!
+    private var statusShowsScreenSharing: Bool?
     private var updateTimer: Timer?
     private let statusMenu = NSMenu()
     private var lastMenuAction: String?
@@ -445,7 +446,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     private func buildStatusItem() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.image = MacLinkBrand.menuBarImage
             button.setAccessibilityLabel("Mooring")
@@ -470,7 +471,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         status.isEnabled = false
         status.toolTip = automationState.detail
         statusMenu.addItem(status)
-        statusItem.button?.toolTip = "Mooring — \(native.status ?? automationState.title)"
+        let statusDescription = "Mooring — \(native.status ?? automationState.title)"
+        statusItem.button?.toolTip = statusDescription
+        statusItem.button?.setAccessibilityLabel(statusDescription)
+        if statusShowsScreenSharing != native.isSharingScreen {
+            statusShowsScreenSharing = native.isSharingScreen
+            statusItem.button?.image = MacLinkBrand.menuBarImage(isSharingScreen: native.isSharingScreen)
+        }
         if let lastMenuAction {
             let recent = NSMenuItem(title: lastMenuAction, action: nil, keyEquivalent: "")
             recent.isEnabled = false
@@ -478,13 +485,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         }
         statusMenu.addItem(.separator())
         let available = !busy && !automationState.isBusy && addController == nil && window?.attachedSheet == nil
+        MacLinkStatusMenu.addRecentMacs(native.peers, connectedPeerID: native.connectedPeerID,
+                                       to: statusMenu, target: self, action: #selector(connectNativePeer(_:)),
+                                       enabled: available)
+        statusMenu.addItem(.separator())
         let nativeConnect = NSMenuItem(title: "Pair a Mac…", action: #selector(connectNative), keyEquivalent: "")
         nativeConnect.target = self; nativeConnect.isEnabled = available; statusMenu.addItem(nativeConnect)
-        for peer in native.peers {
-            let item = NSMenuItem(title: String(peer.name.prefix(50)), action: #selector(connectNativePeer(_:)), keyEquivalent: "")
-            item.target = self; item.representedObject = peer.id; item.isEnabled = available
-            statusMenu.addItem(item)
-        }
         let share = NSMenuItem(title: native.isSharing ? "Sharing This Mac…" : "Share this Mac…", action: #selector(shareNative), keyEquivalent: "")
         share.target = self; statusMenu.addItem(share)
         if native.isSharing {
