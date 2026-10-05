@@ -1,6 +1,6 @@
 # Testing the preview on another Mac
 
-Download `MacLink-v0.3.0-preview.30-macos-arm64.zip` and `SHA256SUMS.txt` from the [public release](https://github.com/kcirtapfromspace/maclink-releases/releases/tag/v0.3.0-preview.30). MacLink supports Apple silicon only and requires macOS 14 or later. Apple's High Performance mode additionally requires compatible Macs at both ends. The experimental native session requires this preview on both Macs.
+Download `MacLink-v0.3.0-preview.35-macos-arm64.zip` and `SHA256SUMS.txt` from the [public release](https://github.com/kcirtapfromspace/mooring-releases/releases/tag/v0.3.0-preview.35). Mooring supports Apple silicon only and requires macOS 14 or later. Apple's High Performance mode additionally requires compatible Macs at both ends. The experimental native session requires this preview on both Macs. The bundle retains the name `MacLink.app` for update compatibility.
 
 1. In the download directory, verify the ZIP with `shasum -a 256 -c SHA256SUMS.txt`.
 2. Quit older MacLink copies. Extract the ZIP and replace `MacLink.app` in Applications. Saved Macs and existing configured preferences are preserved.
@@ -43,7 +43,7 @@ Download `MacLink-v0.3.0-preview.30-macos-arm64.zip` and `SHA256SUMS.txt` from t
 15. Updates: the menu bar shows **Check for Updates…**. When the next release is published, leave both Macs idle, with no session connected; within about four hours each should relaunch on the new version by itself. Choosing **Check for Updates…** checks immediately. Report whether an update ever interrupted a session.
 16. **Save Diagnostics…** in the Share window and **Diagnostics…** in the viewer save measurements only. Attach them, or a few telemetry lines, to your report.
 
-The distribution is Developer ID signed, notarized and stapled. macOS may still show its normal first-launch downloaded-app confirmation. If **Apple could not verify MacLink.app** appears, confirm that you opened the extracted 0.3.0 preview 30 app rather than an older copy; do not change Gatekeeper settings. Local development builds are ad hoc by default.
+The distribution is Developer ID signed, notarized and stapled. macOS may still show its normal first-launch downloaded-app confirmation. If **Apple could not verify MacLink.app** appears, confirm that you opened the extracted 0.3.0 preview 35 app rather than an older copy; do not change Gatekeeper settings. Local development builds are ad hoc by default.
 
 ## What to report
 
@@ -64,9 +64,11 @@ All compilation, tests, linting, signing, archive creation and Gatekeeper valida
 ./scripts/ci-local.sh
 MACLINK_CODESIGN_IDENTITY='Developer ID Application: YOUR NAME (TEAM_ID)' \
   MACLINK_NOTARY_PROFILE=MacLink \
-  ./scripts/notarize-release.sh 0.3.0-preview.30
+  ./scripts/notarize-release.sh 0.3.0-preview.35
 ```
 
 The local suite includes 232 Rust tests (10 CLI, 41 core, 18 platform, 163 session), 73 Swift session-parser checks, the defaults/home-state regressions, loopback CLI integration, and the native Swift checks: input boundary, gesture events read back through AppKit, Command key-up dispatch and local diagnostic shortcuts (110 checks), Opus sound encode, decode, playout buffer and send bound, privacy classification, hardware H.264 encode/decode with recovery and the two-frame in-flight bound, session boundary with pairing over loopback, the pointer image and diagnostic sample freshness, and an encrypted 1080p loopback stream. The public release includes the app archive, signed update feed and checksums.
 
 Local tests do not verify live two-Mac negotiation, a real native session between two Macs, display behavior or performance. Complete the checks above on the second Apple silicon Mac.
+
+When changing the updater or its feed, also run `./scripts/test-update-local.sh`. Its isolated old installation must follow a legacy feed redirect, verify and install an update, relaunch carrying the canonical feed URL, and refuse a tampered archive and an altered feed. This loopback test is separate from checking public GitHub downloads and updating an installed copy on another Mac.

@@ -13,6 +13,7 @@ root="$project_root/target/update-test"
 port=$((47000 + RANDOM % 1000))
 identifier=dev.maclink.updatetest
 feed="http://127.0.0.1:$port/appcast.xml"
+legacy_feed="http://127.0.0.1:$port/legacy-appcast.xml"
 [[ ! -e "$root" ]] || mv "$root" "$(mktemp -d "$project_root/target/update-test-old.XXXXXX")"
 mkdir -p "$root/feed" "$root/home"
 server=""
@@ -23,14 +24,33 @@ cleanup() {
 trap cleanup EXIT
 
 build() {
-    MACLINK_BUNDLE_IDENTIFIER=$identifier MACLINK_BUNDLE_VERSION="$1" MACLINK_UPDATE_FEED="$feed" \
+    MACLINK_BUNDLE_IDENTIFIER=$identifier MACLINK_BUNDLE_VERSION="$1" MACLINK_UPDATE_FEED="${3:-$feed}" \
         MACLINK_APP_OUTPUT="$2" ./scripts/build-app.sh >/dev/null
 }
-build 9000 "$root/installed/MacLink.app"
+# An existing installation follows its old repository URL through a redirect;
+# the installed update must then carry the new canonical feed URL.
+build 9000 "$root/installed/MacLink.app" "$legacy_feed"
 build 9001 "$root/new/MacLink.app"
 COPYFILE_DISABLE=1 /usr/bin/ditto -c -k --norsrc --noextattr --noqtn --keepParent "$root/new/MacLink.app" "$root/feed/MacLink-9001.zip"
 ./scripts/make-appcast.sh "$root/feed/MacLink-9001.zip" "http://127.0.0.1:$port/MacLink-9001.zip" "$root/feed" >/dev/null
-python3 -m http.server "$port" --bind 127.0.0.1 --directory "$root/feed" >"$root/server.log" 2>&1 &
+python3 - "$port" "$root/feed" >"$root/server.log" 2>&1 <<'PY' &
+import functools
+import http.server
+import sys
+from urllib.parse import urlsplit
+
+class FeedHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if urlsplit(self.path).path == '/legacy-appcast.xml':
+            self.send_response(301)
+            self.send_header('Location', '/appcast.xml')
+            self.end_headers()
+            return
+        super().do_GET()
+
+handler = functools.partial(FeedHandler, directory=sys.argv[2])
+http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), handler).serve_forever()
+PY
 server=$!
 sleep 1
 
@@ -49,8 +69,11 @@ until [[ "$(version)" = 9001 ]] && pgrep -f "$root/installed/MacLink.app/Content
     sleep 1
 done
 codesign --verify --deep --strict "$root/installed/MacLink.app"
+/usr/bin/grep -q 'GET /legacy-appcast.xml' "$root/server.log"
+/usr/bin/grep -q 'GET /appcast.xml' "$root/server.log"
 /usr/bin/grep -q 'GET /MacLink-9001.zip' "$root/server.log"
-printf 'In-place update passed: build 9000 verified, installed and relaunched build 9001 within %s s of launch.\n' "$((SECONDS - launched))"
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$root/installed/MacLink.app/Contents/Info.plist")" = "$feed" ]]
+printf 'In-place update passed: the legacy feed redirected, build 9000 verified, installed and relaunched build 9001 with the canonical feed within %s s of launch.\n' "$((SECONDS - launched))"
 
 # Refusals. A newer build whose archive changed after signing, then a feed
 # changed after signing, must never be installed.

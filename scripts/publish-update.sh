@@ -1,6 +1,6 @@
 #!/bin/bash
 # Publishes a notarized release to the public update feed that installed copies
-# of MacLink follow (default kcirtapfromspace/maclink-releases):
+# of Mooring follow (default kcirtapfromspace/mooring-releases):
 #   scripts/publish-update.sh VERSION
 # Run after notarize-release.sh. Only a stapled, Gatekeeper-accepted build
 # signed by the MacLink Developer ID team, whose own feed URL is this feed, is
@@ -14,7 +14,7 @@ if [[ $# != 1 || ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.
     printf '%s\n' 'Usage: scripts/publish-update.sh VERSION' >&2
     exit 1
 fi
-repo="${MACLINK_UPDATE_REPO:-kcirtapfromspace/maclink-releases}"
+repo="${MACLINK_UPDATE_REPO:-kcirtapfromspace/mooring-releases}"
 team=67C7724279
 name="MacLink-v$version-macos-arm64.zip"
 archive="$project_root/dist/$name"
@@ -49,11 +49,23 @@ fi
 ./scripts/make-appcast.sh "$archive" "https://github.com/$repo/releases/download/v$version/$name" "$state"
 cp "$archive" "$state/$name"
 (cd "$state" && shasum -a 256 "$name" > SHA256SUMS.txt)
-gh release create "v$version" --repo "$repo" --title "MacLink $version" --notes-file "$notes" --latest \
+gh release create "v$version" --repo "$repo" --title "Mooring $version" --notes-file "$notes" --latest \
     "$state/$name" "$state/appcast.xml" "$state/SHA256SUMS.txt"
 
-# Confirm what installed copies will read.
-served="$(curl -fsSL "$feed")"
-/usr/bin/grep -q "<sparkle:version>$(value CFBundleVersion)</sparkle:version>" <<<"$served" \
-    || { printf '%s\n' 'The public feed does not serve this build yet.' >&2; exit 1; }
-printf 'Published MacLink %s to %s; installed copies update within about four hours.\n' "$version" "$feed"
+# GitHub's latest-download redirect may briefly serve the previous release.
+# Poll within a fixed budget; a delayed feed never invites a duplicate publish.
+expected="<sparkle:version>$build</sparkle:version>"
+feed_ready=false
+for attempt in {1..12}; do
+    served="$(curl -fsSL --max-time 20 -H 'Cache-Control: no-cache' "$feed" || true)"
+    if /usr/bin/grep -Fq "$expected" <<<"$served"; then
+        feed_ready=true
+        break
+    fi
+    [[ "$attempt" = 12 ]] || sleep 5
+done
+if [[ "$feed_ready" != true ]]; then
+    printf 'Release v%s is published, but the feed has not caught up. Verify the existing release; do not publish it again.\n' "$version" >&2
+    exit 1
+fi
+printf 'Published Mooring %s to %s; installed copies update within about four hours.\n' "$version" "$feed"

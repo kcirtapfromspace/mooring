@@ -39,7 +39,11 @@ The app is reconstructed from the checksum-verified submitted archive before sta
 
 ## Publish to the update feed
 
-Installed copies update themselves from the public feed at `kcirtapfromspace/maclink-releases`. After notarizing, and after the Apple log has been reviewed:
+Installed copies update themselves from the public feed at `kcirtapfromspace/mooring-releases`.
+
+The former `maclink-releases` repository URL redirects to `mooring-releases`, so existing installations still reach the signed feed and archives. Do not reuse the old repository name: GitHub would remove that redirect. New signed builds use the canonical Mooring feed URL. The app bundle identifier, Developer ID and Sparkle key stay the same.
+
+After notarizing and reviewing the Apple log, publish with:
 
 ```sh
 ./scripts/publish-update.sh 0.3.0-preview.6
@@ -50,6 +54,8 @@ The script only publishes a stapled, Gatekeeper-accepted archive for that versio
 Only the public key is in the app (`SUPublicEDKey`). To move the private key to another Mac, export it with Sparkle's `generate_keys -x` and import it there with `-f`. Never put it in chat, source files or GitHub.
 
 Before a release that changes the updater, run `./scripts/test-update-local.sh`. It builds ad hoc copies under a separate bundle ID and serves them over loopback only. An old copy must verify, install and relaunch a new one in place, and must refuse both a tampered archive and a feed altered after signing.
+
+The old test copy starts on a legacy feed URL that redirects to the canonical feed. After the update, the installed app must carry the canonical URL. This exercises the redirect migration without reading real connections or changing a running user session.
 
 ## Opening the existing preview
 
