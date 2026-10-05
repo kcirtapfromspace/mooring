@@ -93,7 +93,7 @@ cp "$project_root/app/Info.plist" "$staged_bundle/Contents/Info.plist"
 signing_identity="${MOORING_CODESIGN_IDENTITY:--}"
 update_feed="${MOORING_UPDATE_FEED:-}"
 if [[ -z "$update_feed" && "$signing_identity" != "-" ]]; then
-    update_feed="https://github.com/kcirtapfromspace/mooring-releases/releases/latest/download/appcast.xml"
+    update_feed="https://github.com/kcirtapfromspace/mooring/releases/latest/download/appcast.xml"
 fi
 if [[ -n "$update_feed" && "$update_feed" != none ]]; then
     /usr/libexec/PlistBuddy -c "Add :SUFeedURL string $update_feed" "$staged_bundle/Contents/Info.plist"

@@ -1,6 +1,6 @@
 # Testing the preview on another Mac
 
-Download `Mooring-v0.3.0-preview.36-macos-arm64.zip` and `SHA256SUMS.txt` from the [public release](https://github.com/kcirtapfromspace/mooring-releases/releases/tag/v0.3.0-preview.36). Mooring supports Apple silicon only and requires macOS 14 or later. Apple's High Performance mode additionally requires compatible Macs at both ends. The experimental native session requires this preview on both Macs. The download contains `Mooring.app`. Automatic updates preserve the existing installation location.
+Download `Mooring-v0.3.0-preview.37-macos-arm64.zip` and `SHA256SUMS.txt` from the [public release](https://github.com/kcirtapfromspace/mooring/releases/tag/v0.3.0-preview.37). Mooring supports Apple silicon only and requires macOS 14 or later. Apple's High Performance mode additionally requires compatible Macs at both ends. The experimental native session requires this preview on both Macs. The download contains `Mooring.app`. Automatic updates preserve the existing installation location.
 
 1. In the download directory, verify the ZIP with `shasum -a 256 -c SHA256SUMS.txt`.
 2. Quit older Mooring copies. Extract the ZIP and replace the previous app in Applications with `Mooring.app`. Saved Macs and existing configured preferences are preserved.
@@ -43,7 +43,7 @@ Download `Mooring-v0.3.0-preview.36-macos-arm64.zip` and `SHA256SUMS.txt` from t
 15. Updates: the menu bar shows **Check for Updates…**. When the next release is published, leave both Macs idle, with no session connected; within about four hours each should relaunch on the new version by itself. Choosing **Check for Updates…** checks immediately. Report whether an update ever interrupted a session.
 16. **Save Diagnostics…** in the Share window and **Diagnostics…** in the viewer save measurements only. Attach them, or a few telemetry lines, to your report.
 
-The distribution is Developer ID signed, notarized and stapled. macOS may still show its normal first-launch downloaded-app confirmation. If **Apple could not verify Mooring.app** appears, confirm that you opened the extracted 0.3.0 preview 36 app rather than an older copy; do not change Gatekeeper settings. Local development builds are ad hoc by default.
+The distribution is Developer ID signed, notarized and stapled. macOS may still show its normal first-launch downloaded-app confirmation. If **Apple could not verify Mooring.app** appears, confirm that you opened the extracted 0.3.0 preview 37 app rather than an older copy; do not change Gatekeeper settings. Local development builds are ad hoc by default.
 
 ## What to report
 
@@ -64,7 +64,7 @@ All compilation, tests, linting, signing, archive creation and Gatekeeper valida
 ./scripts/ci-local.sh
 MOORING_CODESIGN_IDENTITY='Developer ID Application: YOUR NAME (TEAM_ID)' \
   MOORING_NOTARY_PROFILE=Mooring \
-  ./scripts/notarize-release.sh 0.3.0-preview.36
+  ./scripts/notarize-release.sh 0.3.0-preview.37
 ```
 
 The local suite includes 232 Rust tests (10 CLI, 41 core, 18 platform, 163 session), 73 Swift session-parser checks, the defaults/home-state regressions, loopback CLI integration, and the native Swift checks: input boundary, gesture events read back through AppKit, Command key-up dispatch and local diagnostic shortcuts (110 checks), Opus sound encode, decode, playout buffer and send bound, privacy classification, hardware H.264 encode/decode with recovery and the two-frame in-flight bound, session boundary with pairing over loopback, the pointer image and diagnostic sample freshness, and an encrypted 1080p loopback stream. The public release includes the app archive, signed update feed and checksums.

@@ -39,9 +39,9 @@ The app is reconstructed from the checksum-verified submitted archive before sta
 
 ## Publish to the update feed
 
-Installed copies update themselves from the public feed at `kcirtapfromspace/mooring-releases`.
+Installed copies update themselves from the public feed at `kcirtapfromspace/mooring`.
 
-The former release repository URL redirects to `mooring-releases`, so existing installations still reach the signed feed and archives. Do not reuse the old repository name: GitHub would remove that redirect. New signed builds use the canonical Mooring feed URL. The app bundle identifier, Developer ID and Sparkle key stay the same.
+Source and release files share the public `mooring` repository. Existing release repository URLs redirect to it, so installed apps still reach the signed feed and archives. Never reuse a retired release repository name: that would remove its redirect. New signed builds use the consolidated feed URL. The app bundle identifier, Developer ID and Sparkle key stay the same.
 
 After notarizing and reviewing the Apple log, publish with:
 

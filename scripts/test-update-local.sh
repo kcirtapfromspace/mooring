@@ -35,7 +35,7 @@ build() {
 legacy_apps=("$project_root/dist/notarization/v0.3.0-preview.35/"*.app)
 if [[ ! -d "${legacy_apps[0]}" ]]; then
     mkdir -p "$root/legacy-download" "$root/legacy"
-    gh release download v0.3.0-preview.35 --repo kcirtapfromspace/mooring-releases \
+    gh release download v0.3.0-preview.35 --repo kcirtapfromspace/mooring \
         --pattern '*-macos-arm64.zip' --dir "$root/legacy-download"
     archives=("$root/legacy-download/"*.zip)
     /usr/bin/ditto -x -k "${archives[0]}" "$root/legacy"

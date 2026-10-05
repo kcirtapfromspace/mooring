@@ -1,6 +1,6 @@
 #!/bin/bash
 # Publishes a notarized release to the public update feed that installed copies
-# of Mooring follow (default kcirtapfromspace/mooring-releases):
+# of Mooring follow (default kcirtapfromspace/mooring):
 #   scripts/publish-update.sh VERSION
 # Run after notarize-release.sh. Only a stapled, Gatekeeper-accepted build
 # signed by the Mooring Developer ID team, whose own feed URL is this feed, is
@@ -14,7 +14,7 @@ if [[ $# != 1 || ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.
     printf '%s\n' 'Usage: scripts/publish-update.sh VERSION' >&2
     exit 1
 fi
-repo="${MOORING_UPDATE_REPO:-kcirtapfromspace/mooring-releases}"
+repo="${MOORING_UPDATE_REPO:-kcirtapfromspace/mooring}"
 team=67C7724279
 name="Mooring-v$version-macos-arm64.zip"
 archive="$project_root/dist/$name"

@@ -1,12 +1,16 @@
+<p><img src="site/assets/icon.svg" width="88" height="88" alt="Mooring Threshold icon"></p>
+
 # Mooring
 
-Source lives in [mooring](https://github.com/kcirtapfromspace/mooring); public downloads and the update feed live in [mooring-releases](https://github.com/kcirtapfromspace/mooring-releases).
+Source, downloads, and the signed update feed live together in the public [Mooring repository](https://github.com/kcirtapfromspace/mooring).
+
+**[Download the preview](https://github.com/kcirtapfromspace/mooring/releases/latest)** · **[Website](https://kcirtapfromspace.github.io/mooring/)** · [Preview guide](docs/TESTING.md)
 
 **Your Macs, within reach.** A native Mac connection app with a Rust core. The product goal is reliable, responsive Mac-to-Mac remote control that chooses sensible quality automatically.
 
 **Current milestone:** enter a Mac's address and connect. Auto mode, full screen and reconnection on learned networks are the defaults. Mooring can request Standard or High Performance and supervise a uniquely identified Apple Screen Sharing session. Apple supplies authentication and video. Its mode URL options are undocumented; actual negotiation, full screen, and switching still need two-Mac validation. There is no claim of performance parity or measured video bandwidth.
 
-**Experimental:** a direct native session. **Share This Mac** captures the main display with ScreenCaptureKit and hardware H.264; **Connect with Mooring** pairs with a one-time code and views or controls it over an encrypted, authenticated connection: at home, or away through a VPN such as Tailscale, trying every address the code lists. Each viewing Mac has its own key, and the sharing Mac can remove any one of them. Sharing can start automatically and continues without its window. A dropped viewer reconnects on its own, including after its lid was closed, and a sharing Mac whose display has turned off wakes for it. The clipboard is shared both ways while connected. Trackpad pinch, rotate and smart zoom reach the remote Mac, and its sound plays on the viewing Mac. With Accessibility on the viewing Mac, ⌘-Tab and other system shortcuts go to the remote Mac. Early two-Mac testing is in progress. Live telemetry and tuning (`mooring telemetry`, `mooring tune`) are described in [TELEMETRY.md](docs/TELEMETRY.md). Mooring updates itself in place from [mooring-releases](https://github.com/kcirtapfromspace/mooring-releases) when no session is connected. See the [release notes](docs/release-notes-v0.3.0-preview.36.md) for limits.
+**Experimental:** a direct native session. **Share This Mac** captures the main display with ScreenCaptureKit and hardware H.264; **Connect with Mooring** pairs with a one-time code and views or controls it over an encrypted, authenticated connection: at home, or away through a VPN such as Tailscale, trying every address the code lists. Each viewing Mac has its own key, and the sharing Mac can remove any one of them. Sharing can start automatically and continues without its window. A dropped viewer reconnects on its own, including after its lid was closed, and a sharing Mac whose display has turned off wakes for it. The clipboard is shared both ways while connected. Trackpad pinch, rotate and smart zoom reach the remote Mac, and its sound plays on the viewing Mac. With Accessibility on the viewing Mac, ⌘-Tab and other system shortcuts go to the remote Mac. Early two-Mac testing is in progress. Live telemetry and tuning (`mooring telemetry`, `mooring tune`) are described in [TELEMETRY.md](docs/TELEMETRY.md). Mooring updates itself in place from [Mooring releases](https://github.com/kcirtapfromspace/mooring) when no session is connected. See the [release notes](docs/release-notes-v0.3.0-preview.37.md) for limits.
 
 ## Run
 
@@ -25,7 +29,7 @@ For Apple Screen Sharing, choose **Add Mac**, enter its hostname or IP, and clic
 
 No home-network marking or capability checkbox is required to start. Auto starts with Standard and learns a direct network after an explicitly opened, identified session and sustained healthy checks. It may then make a bounded High Performance trial without claiming that support or bandwidth has been verified. Settings contains optional display, login and connection preferences; **Advanced** contains home overrides and detailed tuning. Previously configured preferences are preserved.
 
-Builds and GitHub preview releases target Apple silicon (arm64) only. Download the [native session preview](https://github.com/kcirtapfromspace/mooring-releases/releases/latest). Distribution uses Developer ID signing, Apple notarization, and a stapled ticket checked after extracting the final ZIP. Local development builds remain ad hoc by default. See [testing instructions](docs/TESTING.md), [automation behavior](docs/AUTOMATION.md), and the [notarization workflow](docs/NOTARIZATION.md).
+Builds and GitHub preview releases target Apple silicon (arm64) only. Download the [native session preview](https://github.com/kcirtapfromspace/mooring/releases/latest). Distribution uses Developer ID signing, Apple notarization, and a stapled ticket checked after extracting the final ZIP. Local development builds remain ad hoc by default. See [testing instructions](docs/TESTING.md), [automation behavior](docs/AUTOMATION.md), and the [notarization workflow](docs/NOTARIZATION.md).
 
 ## CLI
 
