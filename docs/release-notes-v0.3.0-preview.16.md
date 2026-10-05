@@ -1,10 +1,10 @@
-# MacLink 0.3.0 preview 16 — Full quality right after an update
+# Mooring 0.3.0 preview 16 — Full quality right after an update
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected.
 
 ## No more reduced session after a relaunch
 
-When a Mac relaunched, for example after an update, a paired Mac could reconnect in the fraction of a second before MacLink had finished its launch checks. Those checks confirm sharp-text HEVC, sound and screen matching work on this Mac. Each Mac tells the other what it supports once, at the start of a session. So that session ran with H.264 at 1920×1080, no sound, no screen matching and no latency figures until you reconnected.
+When a Mac relaunched, for example after an update, a paired Mac could reconnect in the fraction of a second before Mooring had finished its launch checks. Those checks confirm sharp-text HEVC, sound and screen matching work on this Mac. Each Mac tells the other what it supports once, at the start of a session. So that session ran with H.264 at 1920×1080, no sound, no screen matching and no latency figures until you reconnected.
 
 Now a Mac doesn't start sharing or connecting until those checks finish, which takes well under a second. If the checks ever stall, it goes ahead after 5 seconds without sharp-text HEVC and sound, rather than not sharing at all.
 

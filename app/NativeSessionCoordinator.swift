@@ -172,7 +172,7 @@ final class NativeSessionCoordinator {
     var onChange: (() -> Void)?
     var onPeersChange: (() -> Void)?
     /// A connection closed during the handshake, which usually means the Macs
-    /// run different MacLink versions.
+    /// run different Mooring versions.
     var onVersionMismatch: (() -> Void)?
     /// Set by the app before launch self-tests finish: this is a release build
     /// that updates itself, so viewers may ask it to.
@@ -181,7 +181,7 @@ final class NativeSessionCoordinator {
     var onUpdateRequest: (() -> Void)?
     /// Viewer: the sharing Mac is newer; check for an update to this Mac.
     var onCheckForUpdates: (() -> Void)?
-    /// The other Mac's MacLink version in the current session, if it sent one.
+    /// The other Mac's Mooring version in the current session, if it sent one.
     private(set) var viewerPeerVersion: NativeVersion?
     private(set) var hostPeerVersion: NativeVersion?
     /// Viewer: the sharing Mac's answer to "Update It".
@@ -207,7 +207,7 @@ final class NativeSessionCoordinator {
         didSet { if isSharingScreen != oldValue { onChange?() } }
     }
     var isConnected: Bool { viewerChannel?.token.isActive == true }
-    /// Start sharing when MacLink opens and resume after sleep, lock or a user switch.
+    /// Start sharing when Mooring opens and resume after sleep, lock or a user switch.
     var sharesAutomatically: Bool {
         get { defaults.bool(forKey: Self.automaticSharingKey) }
         set { defaults.set(newValue, forKey: Self.automaticSharingKey) }
@@ -268,7 +268,7 @@ final class NativeSessionCoordinator {
     private var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
 
     init() {
-        defaults = ProcessInfo.processInfo.environment["MACLINK_DEFAULTS_SUITE"].flatMap { UserDefaults(suiteName: $0) } ?? .standard
+        defaults = ProcessInfo.processInfo.environment["MOORING_DEFAULTS_SUITE"].flatMap { UserDefaults(suiteName: $0) } ?? .standard
         // Earlier builds kept peer metadata in preferences; Rust imports it once.
         if let legacy = defaults.data(forKey: "native.peers.v1"), (try? peerStore.importLegacy(legacy)) != nil {
             defaults.removeObject(forKey: "native.peers.v1")
@@ -461,7 +461,7 @@ final class NativeSessionCoordinator {
         if afterUpdate { defaults.removeObject(forKey: Self.resumeAfterUpdateKey) }
         startSharing(automatic: true)
     }
-    /// Just before an update installs and MacLink relaunches: stop taking
+    /// Just before an update installs and Mooring relaunches: stop taking
     /// connections, so a viewer waiting for the new version doesn't reach this
     /// one, and remember to share again if sharing was on.
     func prepareForUpdateInstall() {
@@ -808,7 +808,7 @@ final class NativeSessionCoordinator {
                         channel.deliverControl { [weak self, weak channel] in
                             guard let self, let channel, self.hostChannel === channel else { return }
                             self.hostPeerVersion = version
-                            NativeLog.session.notice("viewer runs MacLink \(version.name, privacy: .public) (build \(version.build))")
+                            NativeLog.session.notice("viewer runs Mooring \(version.name, privacy: .public) (build \(version.build))")
                             self.refreshShare()
                         }
                     case .control(.updateRequest):
@@ -930,7 +930,7 @@ final class NativeSessionCoordinator {
     }
 
     /// Stop Sharing in the window or menu. Automatic sharing stays off until
-    /// the user starts sharing again or MacLink next opens.
+    /// the user starts sharing again or Mooring next opens.
     func stopSharingByUser() {
         userStoppedSharing = true
         stopSharing(reason: sharesAutomatically
@@ -959,7 +959,7 @@ final class NativeSessionCoordinator {
         hostActivity = nil
     }
 
-    /// Reasons are MacLink's own text or fixed Rust and Apple error text: never
+    /// Reasons are Mooring's own text or fixed Rust and Apple error text: never
     /// addresses, names or pairing material, so they are logged as public.
     private func recordEnd(_ role: String, _ reason: String) {
         lastEnd = (reason, uptime)
@@ -1075,7 +1075,7 @@ final class NativeSessionCoordinator {
         } catch { connectFailed(error, peerID: peerID) }
     }
     /// `automatic` attempts come from the reconnect budget: they never bring
-    /// MacLink forward or take keyboard focus from another app.
+    /// Mooring forward or take keyboard focus from another app.
     /// `addresses` are tried together, the first preferred.
     private func connect(code: NativePairingCode, addresses: [String], pairing: Bool = false, automatic: Bool = false) {
         guard !isConnected, !capabilityGate.isStopped else { return }
@@ -1481,7 +1481,7 @@ final class NativeSessionCoordinator {
             if capabilities & UInt64(ML_CAPABILITY_VERSION) != 0 { channel.control(.version(.local)) }
         case .version(let version):
             viewerPeerVersion = version
-            NativeLog.session.notice("sharing Mac runs MacLink \(version.name, privacy: .public) (build \(version.build))")
+            NativeLog.session.notice("sharing Mac runs Mooring \(version.name, privacy: .public) (build \(version.build))")
             refreshVersionNotice()
         case .updateStatus(let state, let ready):
             peerUpdate = (state, ready, uptime)
@@ -1505,7 +1505,7 @@ final class NativeSessionCoordinator {
             window.setVersionNotice(nil); return
         }
         let local = NativeVersion.local
-        window.status.toolTip = "The sharing Mac runs MacLink \(peer.name); this Mac runs \(local.name)."
+        window.status.toolTip = "The sharing Mac runs Mooring \(peer.name); this Mac runs \(local.name)."
         switch local.compared(to: peer) {
         case .orderedDescending:
             guard channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_REMOTE_UPDATE) != 0 else {
@@ -1911,7 +1911,7 @@ final class NativeSessionCoordinator {
 
     private func saveDiagnostics(_ measurements: NativeSessionMeasurements?) {
         guard let measurements else { showError("Connect a native session before saving diagnostics."); return }
-        let panel = NSSavePanel(); panel.nameFieldStringValue = "MacLink-diagnostics.json"
+        let panel = NSSavePanel(); panel.nameFieldStringValue = "Mooring-diagnostics.json"
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do { try measurements.report().write(to: url, options: .atomic) }

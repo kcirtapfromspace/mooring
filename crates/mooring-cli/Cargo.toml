@@ -1,0 +1,15 @@
+[package]
+name = "mooring-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mooring"
+path = "src/main.rs"
+
+[dependencies]
+mooring-core = { path = "../mooring-core" }
+mooring-platform = { path = "../mooring-platform" }
+serde.workspace = true
+serde_json.workspace = true

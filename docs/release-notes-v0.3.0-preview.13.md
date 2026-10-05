@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 13 — Viewer-sized screen fix
+# Mooring 0.3.0 preview 13 — Viewer-sized screen fix
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected.
 
@@ -6,7 +6,7 @@ Installed copies of preview 6 or later update to this version by themselves when
 
 With preview 10 or later on both Macs, a session could end about 3 seconds after it started and then reconnect, over and over. The sharing Mac showed "Screen capture stopped: Failed to find any displays or windows to capture".
 
-This happened when the viewing Mac asked for a screen of its own size (**Match Shared Screen to This Mac**). When the sharing Mac created that screen, macOS stopped the screen capture before it reported the new screen, and MacLink treated that as fatal. The session then ended, the screen was removed, and the next connection asked for it again.
+This happened when the viewing Mac asked for a screen of its own size (**Match Shared Screen to This Mac**). When the sharing Mac created that screen, macOS stopped the screen capture before it reported the new screen, and Mooring treated that as fatal. The session then ended, the screen was removed, and the next connection asked for it again.
 
 Now the sharing Mac pauses capture itself before switching screens, and resumes on the new screen once macOS has it ready. It resumes on its current screen after at most 5 seconds if the switch doesn't finish. If macOS stops capture during any other display change, capture restarts and the session continues.
 

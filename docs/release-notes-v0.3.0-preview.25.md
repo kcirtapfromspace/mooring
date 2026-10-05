@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 25 — Pacing that knows how fast the link is
+# Mooring 0.3.0 preview 25 — Pacing that knows how fast the link is
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected. The change is on the sharing Mac.
 
@@ -18,7 +18,7 @@ The Mac Studio's telemetry showed why:
 - **A cut goes below what the link carries:** three quarters of the measured rate, when that's lower than three quarters of the target. On a 9.5 Mbps link that's about 7 Mbps, which leaves room for bursts.
 - **It remembers where the link ran out.** Climbing back stops at nine tenths of that rate, instead of going all the way to 25 Mbps and overfilling the link again.
 - **It still finds a faster connection.** Every 30 seconds without trouble, the remembered rate rises a tenth. A faster rate, measured while video waits, is believed at once.
-- **New telemetry:** `link_mbps` in `maclink telemetry` on the sharing Mac shows the measured rate whenever video waited in that second.
+- **New telemetry:** `link_mbps` in `mooring telemetry` on the sharing Mac shows the measured rate whenever video waited in that second.
 
 On a slow link, a busy screen now looks a little softer during motion instead of stalling. A calm screen is unchanged; it never needed much.
 

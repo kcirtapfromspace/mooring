@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 32 — Streamed viewer diagnostics
+# Mooring 0.3.0 preview 32 — Streamed viewer diagnostics
 
 The native viewer's diagnostic footer can now be hidden, and Stats for Nerds shows live session measurements over the picture. Existing connections, pairings, and preferences are preserved.
 

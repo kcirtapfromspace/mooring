@@ -4,7 +4,7 @@ import AppKit
 private enum RenderBrand {
     static func main() throws {
         guard CommandLine.arguments.count == 2 else {
-            throw NSError(domain: "MacLinkBrand", code: 1, userInfo: [NSLocalizedDescriptionKey: "Pass an output iconset directory."])
+            throw NSError(domain: "MooringBrand", code: 1, userInfo: [NSLocalizedDescriptionKey: "Pass an output iconset directory."])
         }
         let directory = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -17,10 +17,10 @@ private enum RenderBrand {
                 bitmap.size = NSSize(width: pixels, height: pixels)
                 NSGraphicsContext.saveGraphicsState()
                 NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
-                MacLinkBrand.image(size: CGFloat(pixels)).draw(in: NSRect(x: 0, y: 0, width: pixels, height: pixels))
+                MooringBrand.image(size: CGFloat(pixels)).draw(in: NSRect(x: 0, y: 0, width: pixels, height: pixels))
                 NSGraphicsContext.restoreGraphicsState()
                 guard let png = bitmap.representation(using: .png, properties: [:]) else {
-                    throw NSError(domain: "MacLinkBrand", code: 2)
+                    throw NSError(domain: "MooringBrand", code: 2)
                 }
                 let suffix = scale == 2 ? "@2x" : ""
                 try png.write(to: directory.appendingPathComponent("icon_\(pointSize)x\(pointSize)\(suffix).png"))

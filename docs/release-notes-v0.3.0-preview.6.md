@@ -1,14 +1,14 @@
-# MacLink 0.3.0 preview 6 — Automatic updates
+# Mooring 0.3.0 preview 6 — Automatic updates
 
-This is the last version you install by hand. From now on MacLink updates itself in place.
+This is the last version you install by hand. From now on Mooring updates itself in place.
 
 ## How it works
 
-- **Checks:** every four hours, and at launch, MacLink reads the update feed at [kcirtapfromspace/maclink-releases](https://github.com/kcirtapfromspace/maclink-releases).
-- **Download:** a newer version downloads in the background and is verified before anything is installed. The feed and the archive must each carry a valid signature from the MacLink release key, and the new app must be signed by the same Developer ID team.
-- **Install:** the update installs and MacLink relaunches only while no session is connected. That means no connect or reconnect under way, and sharing, if on, is set to resume automatically. Settings, pairings and the Keychain are kept, and automatic sharing starts again after the relaunch.
+- **Checks:** every four hours, and at launch, Mooring reads the update feed at [kcirtapfromspace/mooring-releases](https://github.com/kcirtapfromspace/mooring-releases).
+- **Download:** a newer version downloads in the background and is verified before anything is installed. The feed and the archive must each carry a valid signature from the Mooring release key, and the new app must be signed by the same Developer ID team.
+- **Install:** the update installs and Mooring relaunches only while no session is connected. That means no connect or reconnect under way, and sharing, if on, is set to resume automatically. Settings, pairings and the Keychain are kept, and automatic sharing starts again after the relaunch.
 - **Menu:** the menu bar shows **Check for Updates…**, or **Install Update … & Relaunch** when one is waiting.
-- **Version mismatch:** if a connection fails because the other Mac runs a different version, MacLink checks for an update right away.
+- **Version mismatch:** if a connection fails because the other Mac runs a different version, Mooring checks for an update right away.
 
 Development builds never update themselves. The updater is [Sparkle](https://sparkle-project.org) 2.10.0 (MIT). It is embedded for Apple silicon only, and its license is included in the app.
 

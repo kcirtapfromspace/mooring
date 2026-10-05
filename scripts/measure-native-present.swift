@@ -32,14 +32,14 @@ enum NativePresentMeasurement {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 800, height: 450), styleMask: [.titled], backing: .buffered, defer: false)
-        window.title = "MacLink presentation measurement"
+        window.title = "Mooring presentation measurement"
         window.level = .floating
         let view = NativeVideoView(frame: window.contentView!.bounds, device: MTLCreateSystemDefaultDevice())
         view.autoresizingMask = [.width, .height]
         window.contentView!.addSubview(view)
         view.geometry = NativeDisplayGeometry(x: 0, y: 0, width: 1920, height: 1080, pixelWidth: 1920, pixelHeight: 1080)
-        // MACLINK_PRESENT_NO_SYNC=1 measures Lower Display Latency.
-        view.waitsForDisplayRefresh = ProcessInfo.processInfo.environment["MACLINK_PRESENT_NO_SYNC"] != "1"
+        // MOORING_PRESENT_NO_SYNC=1 measures Lower Display Latency.
+        view.waitsForDisplayRefresh = ProcessInfo.processInfo.environment["MOORING_PRESENT_NO_SYNC"] != "1"
         window.orderFrontRegardless()
 
         var pool: CVPixelBufferPool?

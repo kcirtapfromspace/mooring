@@ -1,12 +1,12 @@
-# MacLink 0.3.0 preview 30 — Reconnect after lid sleep
+# Mooring 0.3.0 preview 30 — Reconnect after lid sleep
 
 This preview includes the wake-recovery fix and the code-audit fixes. Update both Macs before testing; the wake change runs on the sharing Mac. Existing connections, pairings and preferences are preserved.
 
 ## Reconnect fix
 
-The sharing Mac could miss a wake request, label the timeout as a password lock, and stop listening. An RDP or Apple Screen Sharing connection could then clear macOS's display cover, making MacLink work again.
+The sharing Mac could miss a wake request, label the timeout as a password lock, and stop listening. An RDP or Apple Screen Sharing connection could then clear macOS's display cover, making Mooring work again.
 
-An approved connection now makes up to three wake requests, a second apart, within the existing five-second wait. MacLink holds the display awake through that attempt and releases the power assertions when it finishes or is canceled. An unlocked console can resume listening even while its display sleeps, and a display-only timeout keeps the listener available for another approved connection. The timeout message no longer assumes a password is required.
+An approved connection now makes up to three wake requests, a second apart, within the existing five-second wait. Mooring holds the display awake through that attempt and releases the power assertions when it finishes or is canceled. An unlocked console can resume listening even while its display sleeps, and a display-only timeout keeps the listener available for another approved connection. The timeout message no longer assumes a password is required.
 
 Capture and input still require an unlocked, active console session. A screen that remains covered after the wake attempt waits for an unlock.
 

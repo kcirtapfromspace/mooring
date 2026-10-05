@@ -1,16 +1,16 @@
 # Live telemetry and tuning
 
-While a native MacLink session is connected, each Mac sends the other a small measurement record once a second over the encrypted session. Each running app serves the combined view on an owner-only local socket, `telemetry/telemetry.sock` in `~/Library/Application Support/MacLink` (or `MACLINK_HOME`); the `telemetry` folder is readable only by you. No network port is opened, and telemetry contains measurements only: no screen content, input, addresses or keys.
+While a native Mooring session is connected, each Mac sends the other a small measurement record once a second over the encrypted session. Each running app serves the combined view on an owner-only local socket, `telemetry/telemetry.sock` in `~/Library/Application Support/Mooring` (or `MOORING_HOME`); the `telemetry` folder is readable only by you. No network port is opened, and telemetry contains measurements only: no screen content, input, addresses or keys.
 
 Run the bundled CLI on either Mac:
 
 ```sh
-maclink=/Applications/MacLink.app/Contents/Resources/maclink
-"$maclink" telemetry              # one JSON line per second until interrupted
-"$maclink" telemetry --count 10   # stop after ten snapshots
-"$maclink" tune --bitrate-mbps 15 --max-width 2560
-"$maclink" tune --fps 30 --in-flight 1
-"$maclink" tune --reset           # restore the defaults
+mooring=/Applications/Mooring.app/Contents/Resources/mooring
+"$mooring" telemetry              # one JSON line per second until interrupted
+"$mooring" telemetry --count 10   # stop after ten snapshots
+"$mooring" tune --bitrate-mbps 15 --max-width 2560
+"$mooring" tune --fps 30 --in-flight 1
+"$mooring" tune --reset           # restore the defaults
 ```
 
 Tuning typed on the viewing Mac during a session is sent to the sharing Mac; tuning on the sharing Mac applies there, and without a session it is kept for the next time this Mac shares. Settings last until the sharing Mac's app quits, including across reconnects. Changes apply within about a second; a new maximum width restarts capture at that size, which briefly pauses the picture.
@@ -22,7 +22,7 @@ Tuning typed on the viewing Mac during a session is sent to the sharing Mac; tun
  "local":{"received_fps":38.0,"rtt_ms":9.0,...},"peer":{"capture_fps":41.0,"encode_ms":24.5,...},"peer_age_s":0.4,"last_end":null}
 ```
 
-`role` is `host` (this Mac is sharing), `viewer`, or `idle`. `last_end` is `null`, or `{"reason": …, "age_s": …}`: MacLink's reason for the latest session on this Mac ending and how many seconds ago, so a drop can be diagnosed after the fact. `local` holds this Mac's measurements and `peer` the other Mac's latest, `peer_age_s` seconds old. `tuning` is this Mac's own sharing settings; while viewing, the sharing Mac's settings appear in `peer` as `bitrate_mbps`, `fps_cap` and the capture size. Rates are per second over the last interval.
+`role` is `host` (this Mac is sharing), `viewer`, or `idle`. `last_end` is `null`, or `{"reason": …, "age_s": …}`: Mooring's reason for the latest session on this Mac ending and how many seconds ago, so a drop can be diagnosed after the fact. `local` holds this Mac's measurements and `peer` the other Mac's latest, `peer_age_s` seconds old. `tuning` is this Mac's own sharing settings; while viewing, the sharing Mac's settings appear in `peer` as `bitrate_mbps`, `fps_cap` and the capture size. Rates are per second over the last interval.
 
 Sharing Mac:
 
@@ -59,10 +59,10 @@ Viewing Mac:
 
 ## Session log
 
-Session starts and ends, reconnect attempts, automatic sharing, tuning changes and shared-clipboard transfers (their kinds and sizes) are also written to the macOS log with MacLink's reason text; never addresses, names, pairing codes, input or screen content:
+Session starts and ends, reconnect attempts, automatic sharing, tuning changes and shared-clipboard transfers (their kinds and sizes) are also written to the macOS log with Mooring's reason text; never addresses, names, pairing codes, input or screen content:
 
 ```sh
-/usr/bin/log show --last 2h --style compact --predicate 'subsystem == "dev.maclink"'
+/usr/bin/log show --last 2h --style compact --predicate 'subsystem == "dev.mooring"'
 ```
 
 In zsh, `log` alone is a shell built-in; use `/usr/bin/log`.

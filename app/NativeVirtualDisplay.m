@@ -1,7 +1,7 @@
 // The private CGVirtualDisplay API, declared here only as the selectors this
 // file sends. Classes are looked up at runtime and every selector is checked,
 // so a macOS that removes or changes them makes MLVirtualDisplay unavailable
-// instead of crashing; MacLink then shares the physical display.
+// instead of crashing; Mooring then shares the physical display.
 #import "NativeVirtualDisplay.h"
 
 @interface NSObject (MLCGVirtualDisplayPrivate)

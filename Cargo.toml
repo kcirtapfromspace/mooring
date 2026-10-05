@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/maclink-core", "crates/maclink-platform", "crates/maclink-cli", "crates/maclink-session"]
+members = ["crates/mooring-core", "crates/mooring-platform", "crates/mooring-cli", "crates/mooring-session"]
 resolver = "2"
 
 [workspace.package]

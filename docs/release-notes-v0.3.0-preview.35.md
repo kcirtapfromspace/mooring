@@ -2,7 +2,7 @@
 
 The GitHub repositories now match the product name: source is in `kcirtapfromspace/mooring`, and public downloads and updates are in `kcirtapfromspace/mooring-releases`.
 
-Existing installations follow the old release URL through GitHub's redirect. This update carries the canonical Mooring feed URL, so later checks use the new name directly. The Developer ID, Sparkle signing key, app bundle identifier, `MacLink.app` bundle, CLI and saved-data paths stay compatible. Saved Macs and pairings carry forward.
+Existing installations follow the old release URL through GitHub's redirect. This update carries the canonical Mooring feed URL, so later checks use the new name directly. The Developer ID, Sparkle signing key, app bundle identifier, packaging and saved-data paths stay compatible. Saved Macs and pairings carry forward.
 
 This preview also includes preview 34's UX changes: a separate **Recent Macs** section with three quick connections and a **More Macs** flyout, plus a sharing badge on the Mooring menu bar logo once screen capture starts for a connected viewer. The macOS privacy indicator remains separate.
 

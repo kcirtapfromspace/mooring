@@ -19,7 +19,7 @@ struct NativeClipboardContent: Equatable {
 
     /// Keeps text, then the image, then rich text, within the size bound, and
     /// only representations Rust accepts. nil when nothing is left: text over
-    /// the bound, or a MacLink pairing code, is not shared at all.
+    /// the bound, or a Mooring pairing code, is not shared at all.
     func fitted() -> NativeClipboardContent? {
         if let text, NativePasteboard.containsPairingCode(text) { return nil }
         var result = NativeClipboardContent(text: text?.isEmpty == false ? text : nil)
@@ -74,7 +74,7 @@ enum NativePasteboard {
     static let remoteClipboardType = NSPasteboard.PasteboardType("com.apple.is-remote-clipboard")
     /// Larger TIFF images are not converted; their PNG would exceed the bound anyway.
     static let maxTIFFBytes = 64 * 1024 * 1024
-    /// MacLink's own pairing codes are secrets, even after an app drops their
+    /// Mooring's own pairing codes are secrets, even after an app drops their
     /// concealed marker on the way to the other Mac.
     static func containsPairingCode(_ text: String) -> Bool { containsPairingCode(Data(text.utf8)) }
     private static func containsPairingCode(_ bytes: Data) -> Bool {
@@ -174,7 +174,7 @@ final class NativeClipboardSync: @unchecked Sendable {
     private var exchanged: SHA256.Digest?
 
     init(pasteboard: NSPasteboard = .general,
-         queue: DispatchQueue = DispatchQueue(label: "dev.maclink.clipboard", qos: .utility),
+         queue: DispatchQueue = DispatchQueue(label: "dev.mooring.clipboard", qos: .utility),
          read: @escaping (NSPasteboard) -> NativePasteboard.ReadResult? = NativePasteboard.read) {
         self.pasteboard = pasteboard; self.queue = queue; readPasteboard = read
     }

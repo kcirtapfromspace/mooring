@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 15 — Encoding about three times faster
+# Mooring 0.3.0 preview 15 — Encoding about three times faster
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected.
 
@@ -22,7 +22,7 @@ Only the sharing Mac's encoder changed. The picture is still HEVC with full 4:4:
 
 ## Latency figures now appear
 
-Preview 14 measured latency, but each Mac left the new capability out of what it announces, so the figures never started. Preview 15 announces it, and a test now checks what each Mac announces. With preview 15 on both Macs, the status bar shows "NN ms latency" while the picture changes, and `maclink telemetry` shows the breakdown.
+Preview 14 measured latency, but each Mac left the new capability out of what it announces, so the figures never started. Preview 15 announces it, and a test now checks what each Mac announces. With preview 15 on both Macs, the status bar shows "NN ms latency" while the picture changes, and `mooring telemetry` shows the breakdown.
 
 ## Validation
 

@@ -1,4 +1,4 @@
-# MacLink 0.2.0 preview 2 — Home setup fix
+# Mooring 0.2.0 preview 2 — Home setup fix
 
 Fixes home-network setup failing or staying on “Checking.” The old check depended on the remote Mac answering Screen Sharing and competed with background connection checks.
 

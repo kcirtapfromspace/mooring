@@ -34,7 +34,7 @@ struct NativeStreamIntegration {
     /// A loopback listener with a temporary device list, and a one-time code
     /// for it; remove the folder when done.
     static func loopbackListener(_ identity: NativeHostIdentity, name: String) throws -> (NativeTransport, NativePairingCode, URL) {
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("maclink-stream-devices-\(UUID().uuidString)")
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("mooring-stream-devices-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
         let devices = NativeDeviceStore(directory: folder.path)
         try devices.prepare(acceptOldCode: false)

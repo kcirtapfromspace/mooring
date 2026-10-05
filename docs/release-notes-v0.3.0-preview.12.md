@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 12 — Sound
+# Mooring 0.3.0 preview 12 — Sound
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected.
 
@@ -9,9 +9,9 @@ The sharing Mac's sound now plays on the viewing Mac: videos, music, alerts and 
 - **Delay:** designed for about a tenth of a second, which should keep sound in step with the picture. This hasn't yet been measured between two Macs.
 - **Your output:** sound plays through the viewing Mac's current output. If you switch to headphones mid-session, it follows within a second or two.
 - **Turning it off:** **Play Sound from Shared Mac** in the menu bar, on the viewing Mac. It's on by default and takes effect at once.
-- **On the sharing Mac:** sound keeps playing there as well. MacLink doesn't change its volume. Mute it there if you don't want both.
+- **On the sharing Mac:** sound keeps playing there as well. Mooring doesn't change its volume. Mute it there if you don't want both.
 
-MacLink captures sound with the same ScreenCaptureKit permission it already uses for the screen, and never includes its own sound. No new permission is needed.
+Mooring captures sound with the same ScreenCaptureKit permission it already uses for the screen, and never includes its own sound. No new permission is needed.
 
 ## Built to stay smooth
 

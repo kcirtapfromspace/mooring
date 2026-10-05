@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 10 — Your screen size, and the real pointer
+# Mooring 0.3.0 preview 10 — Your screen size, and the real pointer
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected.
 
@@ -11,10 +11,10 @@ Now the viewing Mac tells the sharing Mac the exact size of its video area and i
 - **Timing:** the request goes out once the window's size has held steady for a second, such as after entering full screen. Resizing the window resizes the virtual display.
 - **Headless sharing Mac:** the virtual display replaces macOS's placeholder.
 - **Sharing Mac with a monitor:** the monitor mirrors the virtual display for the session, and its windows may be rearranged, as when you plug in a display.
-- **When the session ends:** the virtual display is removed and the original arrangement returns. macOS also removes it if MacLink quits.
+- **When the session ends:** the virtual display is removed and the original arrangement returns. macOS also removes it if Mooring quits.
 - **Turning it off:** **Match Shared Screen to This Mac** in the menu bar, on the viewing Mac. It's on by default.
 
-The virtual display uses a private macOS API, the one Apple's own Screen Sharing uses for High Performance mode. MacLink looks it up before using it; if a future macOS removes it, MacLink shares the sharing Mac's own display as before.
+The virtual display uses a private macOS API, the one Apple's own Screen Sharing uses for High Performance mode. Mooring looks it up before using it; if a future macOS removes it, Mooring shares the sharing Mac's own display as before.
 
 ## The pointer shows what it would on the other Mac
 
@@ -26,7 +26,7 @@ While you control the sharing Mac, the pointer over the video now takes that Mac
 
 ## Display changes no longer end the session
 
-If the sharing Mac's display changes during a session, whether from a viewer-sized display appearing or disappearing, or a resolution change, MacLink now restarts capture on the new display and sends the viewer the new geometry. No input is accepted until the viewer has the new size. Before, the session ended with "Display geometry changed". Restarts are limited to six in 30 seconds.
+If the sharing Mac's display changes during a session, whether from a viewer-sized display appearing or disappearing, or a resolution change, Mooring now restarts capture on the new display and sends the viewer the new geometry. No input is accepted until the viewer has the new size. Before, the session ended with "Display geometry changed". Restarts are limited to six in 30 seconds.
 
 ## Needs both Macs on preview 10
 

@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 20 — A key for each Mac
+# Mooring 0.3.0 preview 20 — A key for each Mac
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected. Update both Macs before pairing a new one: earlier versions can't read the new pairing codes.
 
@@ -35,7 +35,7 @@ A connection dropped at exactly that moment reads the same way. If you didn't re
 
 The handshake is Noise IK: the viewing Mac proves its own key, and the sharing Mac refuses an unknown key before it answers. Pairing and moving over use Noise IKpsk1, which also mixes in the one-time or old secret, so a wrong code is refused on the first message. The sharing Mac records an approval only after the viewing Mac proves fresh session keys, and before its last answer. So a Mac that finished connecting was approved, and a failed attempt approves no one and doesn't use up the code.
 
-The list holds public keys and names only, never a secret, in `native-devices.json` in MacLink's Application Support folder. It's owner-only, and holds at most 32 Macs.
+The list holds public keys and names only, never a secret, in `native-devices.json` in Mooring's Application Support folder. It's owner-only, and holds at most 32 Macs.
 
 ## Validation
 

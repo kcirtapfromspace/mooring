@@ -61,7 +61,7 @@ struct AppleSessionTests {
         try expect(AppleSessionDocument.parse(Data("invalid".utf8)) == nil, "invalid plist")
         try expect(AppleSessionDocument.parse(Data(repeating: 32, count: 65_537)) == nil, "oversized data")
 
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("maclink-session-tests-" + UUID().uuidString, isDirectory: true)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("mooring-session-tests-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: directory) }
         let valid = directory.appendingPathComponent("test.vncloc")

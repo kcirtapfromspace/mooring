@@ -40,13 +40,13 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 610, height: 540),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "Screen Sharing Settings"
-        MacLinkAppearance.prepare(window)
+        MooringAppearance.prepare(window)
         window.minSize = NSSize(width: 580, height: 540)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
         window.center()
-        window.setFrameAutosaveName("MacLinkSimpleSettings")
+        window.setFrameAutosaveName("MooringSimpleSettings")
         configureControls(connections: connections)
         buildLayout()
         updatePreference()
@@ -100,7 +100,7 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
         saveButton.target = self
         saveButton.action = #selector(save)
         saveButton.keyEquivalent = "\r"
-        MacLinkAppearance.primary(saveButton)
+        MooringAppearance.primary(saveButton)
     }
 
     private func section(_ title: String, _ views: [NSView]) -> NSStackView {
@@ -121,7 +121,7 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
 
     private func buildLayout() {
         guard let window, let root = window.contentView else { return }
-        let heading = MacLinkAppearance.header("Screen Sharing", subtitle: "Display and automation preferences for Apple Screen Sharing.")
+        let heading = MooringAppearance.header("Screen Sharing", subtitle: "Display and automation preferences for Apple Screen Sharing.")
         root.addSubview(heading)
 
         let target = NSGridView(views: [[label("Mac"), targetPopup]])

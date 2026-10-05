@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 26 — Less waiting in the buffer from away
+# Mooring 0.3.0 preview 26 — Less waiting in the buffer from away
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected. The change is on the sharing Mac.
 
@@ -8,7 +8,7 @@ Pacing on round-trip time was the plan, so first I measured the round trip the o
 
 - **Busy screen from away, preview 25:** 55–58 fps, with one brief stall in a minute.
 - **The network round trip stayed flat**, 20–48 ms, even during that stall.
-- **MacLink's own ping read as high as 116 ms**, and earlier 200–330 ms. Ping replies queue behind video in the Mac Studio's send buffer, so those figures showed MacLink's own buffer, not the network.
+- **Mooring's own ping read as high as 116 ms**, and earlier 200–330 ms. Ping replies queue behind video in the Mac Studio's send buffer, so those figures showed Mooring's own buffer, not the network.
 
 Pacing on the network's round trip wouldn't have caught anything, so it wasn't built. The delay to remove was in that buffer.
 
@@ -39,7 +39,7 @@ Local validation passed with the full suite, including 155 Rust session tests.
   - It never goes above the earlier rule.
 - **Swift:** the limit follows the busiest of the last ten seconds, so one quiet second doesn't shrink it.
 - **Between the two Macs, from away:**
-  - `send_queue_kib` in `maclink telemetry` on the sharing Mac should mostly sit around 60–95, and rarely above 100 during bursts. It was 80–130 normally and 150+ in bursts.
+  - `send_queue_kib` in `mooring telemetry` on the sharing Mac should mostly sit around 60–95, and rarely above 100 during bursts. It was 80–130 normally and 150+ in bursts.
   - The viewer's ping time should drop by about 10–20 ms.
   - `sent_mbps` for a busy screen should stay where it was, about 9–10. If it falls, the smaller limit is starving the link.
 

@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 24 — No more hitch every two seconds
+# Mooring 0.3.0 preview 24 — No more hitch every two seconds
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected. The change is on the sharing Mac.
 
@@ -18,9 +18,9 @@ From away, over Tailscale, the stream ran at about 48 fps but caught every two t
   - after an encoder hiccup;
   - when the viewing Mac asks, which it does whenever its decoder needs one, and again every 0.75 s until it arrives.
 
-  MacLink's connection never loses data, so a periodic keyframe repairs nothing.
+  Mooring's connection never loses data, so a periodic keyframe repairs nothing.
 - **Pacing ignores a keyframe's drain.** A slow second during or right after an on-demand keyframe no longer lowers the bitrate. A slow connection still shows in the seconds between.
-- **You can still ask for periodic keyframes:** `maclink tune --keyframe-seconds N` for one every N seconds (1–10), and `--keyframe-seconds 0` for only when needed, the default. With a periodic interval tuned, pacing counts every slow second as before.
+- **You can still ask for periodic keyframes:** `mooring tune --keyframe-seconds N` for one every N seconds (1–10), and `--keyframe-seconds 0` for only when needed, the default. With a periodic interval tuned, pacing counts every slow second as before.
 
 ## What still costs a moment
 
@@ -36,7 +36,7 @@ Local validation passed with the full suite, including 152 Rust session tests.
 
 - **Encoder:** a new test on the hardware HEVC encoder checks 3.5 s of changing frames. On demand, only the first frame and one requested frame are keyframes. With an interval of 1 s, there are four.
 - **Pacing:** slow seconds during or just after a keyframe are left out, even two keyframes close together as at a session's start. Slow seconds between keyframes still lower the bitrate.
-- **Between the two Macs:** check from away with `maclink telemetry` on the sharing Mac. `keyframes` should stay at 0 between changes of screen size, and `skipped_fps` and `queue_wait_ms` near 0. `bitrate_mbps` should climb back toward 25 over the first minute; before, it fell to 4.
+- **Between the two Macs:** check from away with `mooring telemetry` on the sharing Mac. `keyframes` should stay at 0 between changes of screen size, and `skipped_fps` and `queue_wait_ms` near 0. `bitrate_mbps` should climb back toward 25 over the first minute; before, it fell to 4.
 
 A tuning of `--keyframe-seconds 0` sent from a viewing Mac to a sharing Mac before preview 24 is refused by that Mac, which ends the session. Update the sharing Mac first.
 

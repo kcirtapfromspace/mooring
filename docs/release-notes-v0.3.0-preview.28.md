@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 28 — The wait survives an update
+# Mooring 0.3.0 preview 28 — The wait survives an update
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected. Both changes help most with both Macs on preview 28.
 
@@ -8,18 +8,18 @@ The MacBook's session dropped at 21:47 without a goodbye. The Mac Studio began i
 
 | Time | What happened |
 |---|---|
-| 01:10 | With no session connected, preview 27 installed itself and MacLink relaunched. The wait was held only in memory, so it was lost. |
-| 01:15 | The display turned off and the screen locked, so MacLink stopped sharing. |
-| 08:08 | Screen Sharing unlocked the Mac Studio, and MacLink reconnected seven seconds later. |
+| 01:10 | With no session connected, preview 27 installed itself and Mooring relaunched. The wait was held only in memory, so it was lost. |
+| 01:15 | The display turned off and the screen locked, so Mooring stopped sharing. |
+| 08:08 | Screen Sharing unlocked the Mac Studio, and Mooring reconnected seven seconds later. |
 
-From away, the MacBook said "Operation timed out". The Mac Studio's Tailscale address had actually answered at once, with nothing listening on MacLink's port. The local name and home address can't be reached from away, so they used up the time, and their timeout is what was reported. No address changed.
+From away, the MacBook said "Operation timed out". The Mac Studio's Tailscale address had actually answered at once, with nothing listening on Mooring's port. The local name and home address can't be reached from away, so they used up the time, and their timeout is what was reported. No address changed.
 
 ## What changes
 
 - **The wait survives a relaunch.** It's saved when it starts.
-  - **An update or a crash** resumes it. MacLink takes back its hold on the display as soon as it launches, if sharing will start by itself. If the display went dark in the gap, MacLink wakes it before it can lock. A Mac that's already locked can't share, so its wait is dropped.
-  - **The viewer reconnecting, Stop Sharing, a lock, or quitting MacLink** ends it.
-- **"Reachable, but not sharing" is said plainly.** When the sharing Mac answers but MacLink isn't accepting connections there, the viewing Mac now says so. It says the Mac may be locked or asleep and that unlocking it, for example with Screen Sharing, lets MacLink reconnect. It keeps trying in the meantime. That answer takes precedence over a timeout from other addresses.
+  - **An update or a crash** resumes it. Mooring takes back its hold on the display as soon as it launches, if sharing will start by itself. If the display went dark in the gap, Mooring wakes it before it can lock. A Mac that's already locked can't share, so its wait is dropped.
+  - **The viewer reconnecting, Stop Sharing, a lock, or quitting Mooring** ends it.
+- **"Reachable, but not sharing" is said plainly.** When the sharing Mac answers but Mooring isn't accepting connections there, the viewing Mac now says so. It says the Mac may be locked or asleep and that unlocking it, for example with Screen Sharing, lets Mooring reconnect. It keeps trying in the meantime. That answer takes precedence over a timeout from other addresses.
 
 ## Validation
 

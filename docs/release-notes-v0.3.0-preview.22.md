@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 22 — Open the lid and pick up where you left off
+# Mooring 0.3.0 preview 22 — Open the lid and pick up where you left off
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected. It also carries preview 21's fixes: the pointer now lines up with clicks, and in full screen the sharing Mac's menu bar can be reached. See the [preview 21 notes](release-notes-v0.3.0-preview.21.md).
 
@@ -7,12 +7,12 @@ Installed copies of preview 6 or later update to this version by themselves when
 Last night the MacBook's lid closed with a session on, and in the morning it couldn't reconnect until Apple Screen Sharing woke the Mac Studio. Here's what happened:
 
 - Closing the lid ended the session, and the sharing Mac treated that like any other goodbye.
-- MacLink keeps the sharing Mac's display on only during a session. Ten minutes later, with no session, macOS turned the display off and locked the screen.
-- MacLink stops sharing when the screen locks: it never shows a lock screen. The sharing Mac stayed awake and on the network, but nothing was listening.
+- Mooring keeps the sharing Mac's display on only during a session. Ten minutes later, with no session, macOS turned the display off and locked the screen.
+- Mooring stops sharing when the screen locks: it never shows a lock screen. The sharing Mac stayed awake and on the network, but nothing was listening.
 
 Now the sharing Mac tells the two apart:
 
-- **You end the session:** you close the viewer or quit MacLink, and the viewing Mac says it's leaving. The sharing Mac then lets its display turn off and lock as before.
+- **You end the session:** you close the viewer or quit Mooring, and the viewing Mac says it's leaving. The sharing Mac then lets its display turn off and lock as before.
 - **The session drops:** a lid closes, Wi-Fi drops, or anything else ends it without a goodbye. The sharing Mac keeps its display on and keeps taking connections for up to 12 hours, so it doesn't lock. Its Share window says it's waiting, and until when. **Stop Sharing** ends the wait.
 
 The viewing Mac also reconnects on its own after it wakes. When its sleep or lock ended a session, it waits until it's awake and unlocked, then reconnects in the same window. Before, it said "Reconnect when ready" and waited for you.

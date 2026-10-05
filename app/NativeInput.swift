@@ -12,7 +12,7 @@ enum NativeInputError: LocalizedError {
         switch self {
         case .invalidEvent(let detail): return "Invalid remote input: \(detail)"
         case .invalidGeometry: return "The shared display geometry is unavailable."
-        case .accessibilityRequired: return "Allow MacLink in Accessibility on the sharing Mac to control it."
+        case .accessibilityRequired: return "Allow Mooring in Accessibility on the sharing Mac to control it."
         case .eventCreationFailed: return "macOS could not create the remote input event."
         case .sessionClosed: return "This remote control session has ended."
         }

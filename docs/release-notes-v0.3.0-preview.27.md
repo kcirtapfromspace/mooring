@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 27 — Back to preview 25's pacing
+# Mooring 0.3.0 preview 27 — Back to preview 25's pacing
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected. The change is on the sharing Mac.
 
@@ -6,7 +6,7 @@ Installed copies of preview 6 or later update to this version by themselves when
 
 Preview 26 gave the sharing Mac's network send buffer a smaller limit on slow links, to cut delay from away. Measured from away right after both Macs updated, it made things worse:
 
-- MacLink sent about 4.2 Mbps instead of 9.3, and the bitrate target sat at the 4 Mbps floor, so the picture was softer.
+- Mooring sent about 4.2 Mbps instead of 9.3, and the bitrate target sat at the 4 Mbps floor, so the picture was softer.
 - Frames waited 100 ms or more in 25 seconds of a minute, against one in preview 25's minute, and 333 frames were skipped.
 - Frames waited 170–500 ms with only 55–85 KiB queued. The smaller limit held them even though the link had room.
 

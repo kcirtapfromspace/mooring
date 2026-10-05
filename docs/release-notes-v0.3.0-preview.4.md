@@ -1,21 +1,21 @@
-# MacLink 0.3.0 preview 4 — Shared clipboard and steadier sessions
+# Mooring 0.3.0 preview 4 — Shared clipboard and steadier sessions
 
 Both Macs must run this preview; earlier previews cannot connect to it.
 
 ## Shared clipboard
 
-While a MacLink session is connected, copy on one Mac and paste on the other. It works both ways and carries text, rich text and images, up to 4 MiB per copy. When you connect, whatever you already copied on the viewing Mac becomes available on the sharing Mac. This isn't done for a brand-new pairing, and a reconnect doesn't send the same item again.
+While a Mooring session is connected, copy on one Mac and paste on the other. It works both ways and carries text, rich text and images, up to 4 MiB per copy. When you connect, whatever you already copied on the viewing Mac becomes available on the sharing Mac. This isn't done for a brand-new pairing, and a reconnect doesn't send the same item again.
 
 The clipboard is on by default. Turn it off on either Mac with **Shared Clipboard** in the menu bar or the checkbox in **Share This Mac**; when it's off, that Mac neither sends nor accepts clipboard content.
 
 Privacy protections:
 
 - Items that password managers mark as private or temporary are never sent.
-- MacLink pairing codes are never sent, even after the app that carried the code drops its privacy marker.
+- Mooring pairing codes are never sent, even after the app that carried the code drops its privacy marker.
 - Copied files send only their names, not the files.
 - The session log records only the kind and size of each transfer, never the contents.
 
-macOS 15.4 and later can ask before an app reads the clipboard in the background. The first time you copy something during a session, macOS may ask whether MacLink can access it; allow it for the clipboard to cross. If you choose to always deny, MacLink stops reading this Mac's clipboard. You can change that choice in System Settings → Privacy & Security.
+macOS 15.4 and later can ask before an app reads the clipboard in the background. The first time you copy something during a session, macOS may ask whether Mooring can access it; allow it for the clipboard to cross. If you choose to always deny, Mooring stops reading this Mac's clipboard. You can change that choice in System Settings → Privacy & Security.
 
 ## Fewer dropped sessions
 
@@ -31,7 +31,7 @@ When several frames arrived together after a brief network pause, the viewing Ma
 
 - **Mouse moves:** they merge while a large clipboard is sending, so the session can't overflow its send queue.
 - **Rejected items:** clipboard items Rust would reject are left out instead of ending the session.
-- **Version mismatch:** a connection refused because the Macs run different MacLink versions now says to update both Macs.
+- **Version mismatch:** a connection refused because the Macs run different Mooring versions now says to update both Macs.
 
 ## Clearer frame rate
 

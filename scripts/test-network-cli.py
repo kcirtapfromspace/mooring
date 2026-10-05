@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 binary = str(Path(sys.argv[1]).resolve())
-with tempfile.TemporaryDirectory(prefix="maclink-network-cli-") as directory:
+with tempfile.TemporaryDirectory(prefix="mooring-network-cli-") as directory:
     def run(*args):
         result = subprocess.run([binary, "--config-dir", directory, *args], check=True,
                                 capture_output=True, text=True, timeout=10)

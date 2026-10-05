@@ -2,12 +2,12 @@ import Foundation
 import CoreGraphics
 import os
 
-/// Session lifecycle in the macOS log (subsystem dev.maclink, category session):
-/// starts, ends with MacLink's own reason text, reconnects and tuning. Never
+/// Session lifecycle in the macOS log (subsystem dev.mooring, category session):
+/// starts, ends with Mooring's own reason text, reconnects and tuning. Never
 /// addresses, names, pairing material, input or screen content.
 enum NativeLog {
-    static let session = Logger(subsystem: "dev.maclink", category: "session")
-    static let updates = Logger(subsystem: "dev.maclink", category: "updates")
+    static let session = Logger(subsystem: "dev.mooring", category: "session")
+    static let updates = Logger(subsystem: "dev.mooring", category: "updates")
 }
 
 final class NativeRunToken: @unchecked Sendable {
@@ -66,7 +66,7 @@ enum NativeControlMessage: Equatable {
     /// Protocol 5, host to a viewer that measures latency: a pong carrying the
     /// host's clock when it received the ping, in microseconds.
     case clock(UInt64, hostUs: UInt64)
-    /// Protocol 5, either way, once: the sender's MacLink version.
+    /// Protocol 5, either way, once: the sender's Mooring version.
     case version(NativeVersion)
     /// Protocol 5, viewer to a sharing Mac that updates itself.
     case updateRequest
@@ -233,19 +233,19 @@ enum NativeUpdateState: UInt32 {
     case checking = 1, upToDate, ready, failed
 }
 
-/// A MacLink version: the build number and the release, packed by Rust so
+/// A Mooring version: the build number and the release, packed by Rust so
 /// later releases compare greater. Release 0 is a development build.
 struct NativeVersion: Equatable {
     let build: UInt32
     let release: UInt64
 
-    /// This copy of MacLink. Only release builds carry an update feed; others
+    /// This copy of Mooring. Only release builds carry an update feed; others
     /// report as development builds so they never claim to be newer.
     static let local: NativeVersion = {
         let info = Bundle.main.infoDictionary ?? [:]
         let build = UInt32(info["CFBundleVersion"] as? String ?? "") ?? 1
         var release: UInt64 = 0
-        if info["SUFeedURL"] != nil, let text = info["MacLinkReleaseVersion"] as? String, ml_release_pack(text, &release) != ML_SESSION_OK {
+        if info["SUFeedURL"] != nil, let text = info["MooringReleaseVersion"] as? String, ml_release_pack(text, &release) != ML_SESSION_OK {
             release = 0
         }
         return NativeVersion(build: max(1, build), release: release)
@@ -520,7 +520,7 @@ final class NativeSessionChannel: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return (peerStats, peerStatsTime.map { ProcessInfo.processInfo.systemUptime - $0 })
     }
-    init(_ transport: NativeTransport, writer: DispatchQueue = DispatchQueue(label: "dev.maclink.native.writer", qos: .userInteractive)) {
+    init(_ transport: NativeTransport, writer: DispatchQueue = DispatchQueue(label: "dev.mooring.native.writer", qos: .userInteractive)) {
         self.transport = transport; self.writer = writer
     }
     func send(_ message: NativeSessionMessage, whileActive intent: NativeRunToken? = nil, completion: (() -> Void)? = nil) {

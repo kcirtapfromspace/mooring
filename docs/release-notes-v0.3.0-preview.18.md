@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 18 — Steadier on Wi-Fi, and never a stale picture
+# Mooring 0.3.0 preview 18 — Steadier on Wi-Fi, and never a stale picture
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected.
 
@@ -14,12 +14,12 @@ The latency measurements showed occasional spikes to nearly 300 ms, at the same 
 
 Now the sharing Mac:
 
-- **Waits for the queue:** it starts a frame only while little video is queued, and the newest frame waits in MacLink instead, where a newer one can replace it. On a longer connection, such as a VPN, it allows more in flight so the link stays busy.
+- **Waits for the queue:** it starts a frame only while little video is queued, and the newest frame waits in Mooring instead, where a newer one can replace it. On a longer connection, such as a VPN, it allows more in flight so the link stays busy.
 - **Adapts the bitrate:** when frames spend 150 ms or more of a second waiting, in two of any four seconds, it lowers the bitrate to three quarters. It raises it 10% for each three clear seconds, up to your setting, and never goes below 4 Mbps, where text stays legible. A single slow moment, such as one large keyframe, changes nothing.
 
 On a steady home network nothing changes. During a slowdown, you should see a lower frame rate or a slightly softer picture for a moment instead of a long freeze.
 
-`maclink telemetry` on the sharing Mac shows the bitrate in use, the send queue and how long frames waited. The session log notes each reduction ("pacing:").
+`mooring telemetry` on the sharing Mac shows the bitrate in use, the send queue and how long frames waited. The session log notes each reduction ("pacing:").
 
 ## Validation
 

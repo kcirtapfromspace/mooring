@@ -1,6 +1,6 @@
 # Mooring 0.3.0 preview 33 — Within reach
 
-MacLink is now Mooring. Your saved Macs, pairings, preferences, and update feed carry forward.
+Mooring introduces the Threshold identity. Your saved Macs, pairings, preferences, and update feed carry forward.
 
 - The Threshold icon uses marigold and coral on graphite. Light and dark appearances follow macOS automatically.
 - Your Macs stay in view. Pair with a code, connect with an address, and return to an existing native session.
@@ -8,7 +8,7 @@ MacLink is now Mooring. Your saved Macs, pairings, preferences, and update feed 
 - Pairing, sharing, and settings use shorter, clearer copy. Code privacy and control permissions remain explicit.
 - A saved Apple Screen Sharing Mac correctly shows Connect, rather than Return.
 
-The app bundle, executable, CLI, bundle identifier, and credential storage retain their existing MacLink names for update compatibility. About identifies Mooring as formerly MacLink.
+This preview preserves the existing packaging and credential storage for update compatibility.
 
 Local Apple silicon validation covers Rust, native media and input, encrypted loopback streaming, the packaged CLI, and the app build. Isolated UX checks cover action targets, keyboard shortcuts, pairing validation, busy states, error details, minimum window size, and both appearances. Real two-Mac connections, Apple mode switching, downloaded-app behavior, and wake recovery remain separate acceptance checks. Native sessions remain experimental.
 

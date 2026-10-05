@@ -4,7 +4,7 @@ import AppKit
 /// the viewer's request, a virtual display of the viewer's size that becomes
 /// the main display. On a headless Mac it replaces macOS's placeholder; any
 /// real monitors mirror it. Releasing it restores the previous arrangement,
-/// and macOS also removes it if MacLink quits. Main thread.
+/// and macOS also removes it if Mooring quits. Main thread.
 final class NativeSharedDisplay {
     static var isAvailable: Bool { MLVirtualDisplay.isAvailable }
     private var virtual: MLVirtualDisplay?
@@ -33,7 +33,7 @@ final class NativeSharedDisplay {
             guard virtual.resize(toPointWidth: points.0, pointHeight: points.1, scale: points.2) else { fail(completion); return }
         } else {
             guard topology.capture() else { completion(false); return }
-            guard let created = MLVirtualDisplay(name: "MacLink", pointWidth: points.0, pointHeight: points.1, scale: points.2) else {
+            guard let created = MLVirtualDisplay(name: "Mooring", pointWidth: points.0, pointHeight: points.1, scale: points.2) else {
                 fail(completion); return
             }
             virtual = created
@@ -44,7 +44,7 @@ final class NativeSharedDisplay {
     /// macOS brings a new display online asynchronously; wait up to 3 s for
     /// the exact Retina mode (normally already the default), select it if
     /// needed, and mirror other displays into it. Changes apply for this app
-    /// only, so macOS undoes them if MacLink quits.
+    /// only, so macOS undoes them if Mooring quits.
     private func configure(width: Int, height: Int, scale: Int, attempt: Int, generation: UInt64,
                            completion: @escaping (Bool) -> Void) {
         guard generation == self.generation, let virtual else { return }

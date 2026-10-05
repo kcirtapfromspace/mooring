@@ -6,22 +6,22 @@ final class ConnectionPermissionController: NSWindowController, NSWindowDelegate
     private var timer: Timer?
     private var finished = false
     private var deadline: TimeInterval = 0
-    private let detail = label("Allow MacLink in macOS Accessibility to open your remote Mac in full screen and adjust its connection automatically.", color: .secondaryLabelColor)
+    private let detail = label("Allow Mooring in macOS Accessibility to open your remote Mac in full screen and adjust its connection automatically.", color: .secondaryLabelColor)
     private let allow = NSButton(title: "Enable & Connect…", target: nil, action: nil)
 
     init(macName: String) {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 330),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Connect to \(macName)"
-        MacLinkAppearance.prepare(window)
+        MooringAppearance.prepare(window)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
-        let heading = MacLinkAppearance.header("Allow session control", subtitle: "For full screen and automatic connections.")
+        let heading = MooringAppearance.header("Allow session control", subtitle: "For full screen and automatic connections.")
         let manual = NSButton(title: "Connect Without Automation", target: self, action: #selector(connectManually))
         manual.bezelStyle = .rounded
         allow.target = self; allow.action = #selector(requestAccess); allow.bezelStyle = .rounded
-        MacLinkAppearance.primary(allow)
+        MooringAppearance.primary(allow)
         allow.keyEquivalent = "\r"
         let note = label("You can change your preferences later in Settings.", size: 12, color: .secondaryLabelColor)
         let content = stack([heading, detail, note, allow, manual], spacing: 18)
@@ -40,7 +40,7 @@ final class ConnectionPermissionController: NSWindowController, NSWindowDelegate
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     @objc private func requestAccess() {
         AppleSession.requestPermission()
-        detail.stringValue = "Turn on MacLink in macOS Accessibility. Your connection will open as soon as access is enabled."
+        detail.stringValue = "Turn on Mooring in macOS Accessibility. Your connection will open as soon as access is enabled."
         allow.title = "Open Accessibility Settings…"
         // Open the relevant system pane; macOS still requires the user to grant access.
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {

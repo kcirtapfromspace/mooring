@@ -1,4 +1,4 @@
-# MacLink working rules
+# Mooring working rules
 
 - Target Apple silicon (arm64) and macOS 14 or later. Do not build Intel or universal artifacts unless the user changes this requirement.
 - Run all CI, tests, builds, signing, and packaging on this local Mac. Do not add GitHub Actions workflows or enable GitHub Actions. GitHub is for source and release assets only.

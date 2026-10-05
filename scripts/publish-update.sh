@@ -3,7 +3,7 @@
 # of Mooring follow (default kcirtapfromspace/mooring-releases):
 #   scripts/publish-update.sh VERSION
 # Run after notarize-release.sh. Only a stapled, Gatekeeper-accepted build
-# signed by the MacLink Developer ID team, whose own feed URL is this feed, is
+# signed by the Mooring Developer ID team, whose own feed URL is this feed, is
 # published. The archive and the feed are EdDSA-signed with the Sparkle key in
 # this Mac's Keychain. No GitHub Actions are involved.
 set -euo pipefail
@@ -14,9 +14,9 @@ if [[ $# != 1 || ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.
     printf '%s\n' 'Usage: scripts/publish-update.sh VERSION' >&2
     exit 1
 fi
-repo="${MACLINK_UPDATE_REPO:-kcirtapfromspace/mooring-releases}"
+repo="${MOORING_UPDATE_REPO:-kcirtapfromspace/mooring-releases}"
 team=67C7724279
-name="MacLink-v$version-macos-arm64.zip"
+name="Mooring-v$version-macos-arm64.zip"
 archive="$project_root/dist/$name"
 notes="$project_root/docs/release-notes-v$version.md"
 feed="https://github.com/$repo/releases/latest/download/appcast.xml"
@@ -27,7 +27,7 @@ mkdir -p "$state"
 check="$(mktemp -d "$state/.check.XXXXXX")"
 trap 'rm -rf "$check"' EXIT
 /usr/bin/ditto -x -k "$archive" "$check"
-app="$check/MacLink.app"
+app="$check/Mooring.app"
 xcrun stapler validate -q "$app"
 spctl --assess --type execute "$app"
 codesign --verify --deep --strict "$app"
@@ -35,7 +35,7 @@ codesign -dv --verbose=2 "$app" 2> "$check/signature.txt"
 /usr/bin/grep -q "^TeamIdentifier=$team$" "$check/signature.txt" \
     || { printf 'The archive is not signed by team %s.\n' "$team" >&2; exit 1; }
 value() { /usr/libexec/PlistBuddy -c "Print :$1" "$app/Contents/Info.plist"; }
-[[ "$(value MacLinkReleaseVersion)" = "$version" ]] || { printf '%s\n' 'The archive is a different release.' >&2; exit 1; }
+[[ "$(value MooringReleaseVersion)" = "$version" ]] || { printf '%s\n' 'The archive is a different release.' >&2; exit 1; }
 [[ "$(value SUFeedURL)" = "$feed" ]] || { printf 'The archive follows %s, not this feed.\n' "$(value SUFeedURL)" >&2; exit 1; }
 # Never move the feed back: this release becomes the latest, so an older build
 # would reach new installs, and copies on the newer build would stop updating.

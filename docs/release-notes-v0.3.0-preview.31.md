@@ -1,15 +1,15 @@
-# MacLink 0.3.0 preview 31 — Branding and native UX
+# Mooring 0.3.0 preview 31 — Branding and native UX
 
-MacLink has a cobalt geometric connection icon and a more consistent native interface. It now appears in the Dock and Cmd+Tab, as well as the menu bar. Closing its windows keeps the app running; the Dock and Open Connections bring its window back. Existing connections, pairings, and preferences are preserved.
+Mooring has a cobalt geometric connection icon and a more consistent native interface. It now appears in the Dock and Cmd+Tab, as well as the menu bar. Closing its windows keeps the app running; the Dock and Open Connections bring its window back. Existing connections, pairings, and preferences are preserved.
 
 ## Interface changes
 
-- Connections puts Pair a Mac and Share this Mac within reach, with separate guidance for MacLink pairing and Apple Screen Sharing.
+- Connections puts Pair a Mac and Share this Mac within reach, with separate guidance for Mooring pairing and Apple Screen Sharing.
 - Pairing, sharing, session-control permission, and settings windows use consistent branding and spacing. Sharing and Settings scroll when their content grows.
 - Settings has Sharing, Viewing, and General categories. General opens the existing Apple Screen Sharing automation settings.
 - Pairing requires a nonempty code before connecting; address overrides stay behind a disclosure control. Invalid input remains visible in the form.
 - Standard Hide, Window, and Dock menus are available. Open Connections restores a minimized window, and a Dock reopen leaves an already visible session available.
-- The Apple Screen Sharing menu selects the intended saved Mac when MacLink pairings also appear in the list.
+- The Apple Screen Sharing menu selects the intended saved Mac when Mooring pairings also appear in the list.
 
 ## Validation and testing
 

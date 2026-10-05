@@ -434,6 +434,6 @@
   "ffprobe_executable" : "\/opt\/homebrew\/bin\/ffprobe",
   "generated_at_utc" : "2026-09-29T02:11:19Z",
   "os" : "Version 26.6.2 (Build 25G83)",
-  "output_directory" : "\/Users\/thinkstudio\/maclink\/target\/encode-probe\/artifacts",
+  "output_directory" : "\/Users\/thinkstudio\/mooring\/target\/encode-probe\/artifacts",
   "scope" : "Six generated 1280x720 BGRA frames per case. No screen capture, remote input, external downloads, fidelity measurement, or performance benchmark. Frame timestamps request 60 fps; real-time 60 fps throughput is not established."
 }

@@ -22,12 +22,12 @@ final class NativeShareWindow: NSWindowController, NSWindowDelegate {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 620),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "Share this Mac"
-        MacLinkAppearance.prepare(window)
+        MooringAppearance.prepare(window)
         window.contentMinSize = NSSize(width: 540, height: 460)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
-        let heading = MacLinkAppearance.header("Share this Mac", subtitle: "Your workspace, on your other Mac.")
+        let heading = MooringAppearance.header("Share this Mac", subtitle: "Your workspace, on your other Mac.")
         let note = label("A code grants access. Keep it private. Sharing stays on when this window closes.", size: 12, color: .secondaryLabelColor)
         let automaticNote = label("Starts with Mooring. Resumes when this Mac wakes and unlocks.", size: 12, color: .secondaryLabelColor)
         let reset = NSButton(title: "Reset pairing", target: self, action: #selector(resetPairing))
@@ -39,18 +39,18 @@ final class NativeShareWindow: NSWindowController, NSWindowDelegate {
         clipboard.target = self; clipboard.action = #selector(changeClipboard)
         clipboard.toolTip = "Copy on one Mac and paste on the other while connected. Items password managers mark as private are never shared."
         for button in [toggle, copy, control, reset, diagnostics] { button.bezelStyle = .rounded }
-        MacLinkAppearance.primary(toggle)
+        MooringAppearance.primary(toggle)
         let actions = stack([toggle, copy], orientation: .horizontal, spacing: 10)
         let extras = stack([reset, NSView(), diagnostics], orientation: .horizontal, spacing: 10)
         let state = stack([status, detail, actions], spacing: 12)
         detail.widthAnchor.constraint(equalTo: state.widthAnchor).isActive = true
-        let preferences = stack([MacLinkAppearance.sectionTitle("Access", symbol: "slider.horizontal.3"),
+        let preferences = stack([MooringAppearance.sectionTitle("Access", symbol: "slider.horizontal.3"),
                                  controlNote, control, stack([automatic, automaticNote], spacing: 4), clipboard], spacing: 12)
         preferences.detachesHiddenViews = true
         controlNote.widthAnchor.constraint(equalTo: preferences.widthAnchor).isActive = true
         automaticNote.widthAnchor.constraint(equalTo: preferences.widthAnchor).isActive = true
-        let body = stack([heading, MacLinkAppearance.surface(state), preferences, note, extras], spacing: 24)
-        MacLinkAppearance.scrollBody(body, in: window.contentView!)
+        let body = stack([heading, MooringAppearance.surface(state), preferences, note, extras], spacing: 24)
+        MooringAppearance.scrollBody(body, in: window.contentView!)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     func showControlPermission(_ allowed: Bool) {
@@ -80,11 +80,11 @@ final class NativePairWindow: NSWindowController, NSWindowDelegate, NSTextFieldD
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 380),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Pair a Mac"
-        MacLinkAppearance.prepare(window)
+        MooringAppearance.prepare(window)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
-        let heading = MacLinkAppearance.header("Pair a Mac", subtitle: "Pair once. Connect anytime.")
+        let heading = MooringAppearance.header("Pair a Mac", subtitle: "Pair once. Connect anytime.")
         let note = label("On your other Mac: Mooring → Share this Mac → Start sharing. Copy its code here.", color: .secondaryLabelColor)
         code.placeholderString = "Paste pairing code"; code.setAccessibilityLabel("Pairing code")
         address.placeholderString = "Optional address"; address.setAccessibilityLabel("Mac address override")
@@ -101,7 +101,7 @@ final class NativePairWindow: NSWindowController, NSWindowDelegate, NSTextFieldD
         options.target = self; options.action = #selector(toggleOptions)
         options.toolTip = "Use a different address, such as the sharing Mac’s VPN address."
         connect.target = self; connect.action = #selector(pair); connect.keyEquivalent = "\r"
-        MacLinkAppearance.primary(connect)
+        MooringAppearance.primary(connect)
         connect.isEnabled = false
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelPairing))
         cancel.bezelStyle = .rounded; cancel.keyEquivalent = "\u{1b}"
@@ -221,7 +221,7 @@ final class NativeViewerStatsView: NSVisualEffectView {
         translatesAutoresizingMaskIntoConstraints = false
         material = .hudWindow; blendingMode = .withinWindow; state = .active
         wantsLayer = true; layer?.cornerRadius = 12
-        setAccessibilityIdentifier("MacLink.StatsForNerds")
+        setAccessibilityIdentifier("Mooring.StatsForNerds")
         let close = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close stats")!, target: self, action: #selector(closeStats))
         close.bezelStyle = .inline; close.toolTip = "Close stats (⌃⌘I)"
         let heading = stack([label("Stats for nerds", size: 15, weight: .semibold), NSView(), close], orientation: .horizontal, spacing: 8)
@@ -250,7 +250,7 @@ final class NativeViewerStatsView: NSVisualEffectView {
         }
         let scrollRoot = NSView(); scrollRoot.translatesAutoresizingMaskIntoConstraints = false
         addSubview(scrollRoot)
-        MacLinkAppearance.scrollBody(body, in: scrollRoot)
+        MooringAppearance.scrollBody(body, in: scrollRoot)
         let note = label("Local rates cover a rolling second; host stats arrive once a second. Recovery counts cover this session. Still screens send fewer frames. Screen → display uses synchronized clocks, not input latency. — means unavailable. Audio gaps are unsent packets, not measured network loss.", size: 10, color: .secondaryLabelColor)
         note.preferredMaxLayoutWidth = 404
         let save = NSButton(title: "Save diagnostics…", target: self, action: #selector(saveStats))
@@ -317,7 +317,7 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
     private let closeButton = NSButton(title: "Close", target: nil, action: nil)
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let allowSystemKeys = NSButton(title: "Allow ⌘-Tab…", target: nil, action: nil)
-    /// When the two Macs run different MacLink versions: what that means and,
+    /// When the two Macs run different Mooring versions: what that means and,
     /// when there is one, the next step.
     private let versionNotice = NSButton(title: "", target: nil, action: nil)
     private let exitFullScreen = NSButton(title: "Exit Full Screen", target: nil, action: nil)
@@ -326,7 +326,7 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
         window.title = name + " — Mooring"
-        MacLinkAppearance.prepare(window)
+        MooringAppearance.prepare(window)
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.fullScreenPrimary]
         window.minSize = NSSize(width: 540, height: 360)
@@ -348,8 +348,8 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
         exitFullScreen.target = self; exitFullScreen.action = #selector(leaveFullScreen); exitFullScreen.bezelStyle = .inline
         exitFullScreen.toolTip = "Or press ⌃⌘F. Swiping between Spaces also shows this Mac without leaving full screen."
         exitFullScreen.isHidden = true
-        let mark = NSImageView(image: MacLinkBrand.menuBarImage)
-        mark.contentTintColor = MacLinkBrand.accent
+        let mark = NSImageView(image: MooringBrand.menuBarImage)
+        mark.contentTintColor = MooringBrand.accent
         mark.translatesAutoresizingMaskIntoConstraints = false
         mark.widthAnchor.constraint(equalToConstant: 18).isActive = true
         mark.heightAnchor.constraint(equalToConstant: 18).isActive = true
@@ -396,7 +396,7 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
         closeButton.target = self; closeButton.action = #selector(closeWindow)
         cancelButton.target = self; cancelButton.action = #selector(cancelReconnect)
         for button in [reconnectButton, closeButton, cancelButton] { button.bezelStyle = .rounded }
-        MacLinkAppearance.primary(reconnectButton)
+        MooringAppearance.primary(reconnectButton)
         endedReason.alignment = .center
         let content = stack([endedTitle, endedReason,
                              stack([closeButton, cancelButton, reconnectButton], orientation: .horizontal, spacing: 10)], spacing: 12)

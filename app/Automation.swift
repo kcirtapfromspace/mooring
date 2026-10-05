@@ -11,7 +11,7 @@ private final class AutomationIntent: @unchecked Sendable {
 
 /// Main-thread coordinator; all Accessibility work is isolated on its serial queue.
 /// Rust evaluates measured target reachability. Apple still owns the video stream.
-final class AutomationCoordinator: MacLinkAutomationService {
+final class AutomationCoordinator: MooringAutomationService {
     private let cli: CLIClient
     private var settings: AutomationSettings
     private var connections: [SavedMac] = []
@@ -21,7 +21,7 @@ final class AutomationCoordinator: MacLinkAutomationService {
     private var trialPaths = Set<String>()
     private var currentTrialKey: String?
     private let session = AppleSession()
-    private let sessionQueue = DispatchQueue(label: "dev.maclink.session")
+    private let sessionQueue = DispatchQueue(label: "dev.mooring.session")
     private let monitor = NWPathMonitor()
     private var path: NWPath?
     private var timer: Timer?
@@ -57,7 +57,7 @@ final class AutomationCoordinator: MacLinkAutomationService {
     init(cli: CLIClient) {
         self.cli = cli
         // Isolated QA never reads or changes the installed app's settings.
-        if let suite = ProcessInfo.processInfo.environment["MACLINK_DEFAULTS_SUITE"] {
+        if let suite = ProcessInfo.processInfo.environment["MOORING_DEFAULTS_SUITE"] {
             defaults = UserDefaults(suiteName: suite) ?? .standard
         } else { defaults = .standard }
         if let data = defaults.data(forKey: "automation.v1"),
@@ -97,7 +97,7 @@ final class AutomationCoordinator: MacLinkAutomationService {
                 }
             }
         }
-        monitor.start(queue: DispatchQueue(label: "dev.maclink.network-path"))
+        monitor.start(queue: DispatchQueue(label: "dev.mooring.network-path"))
         let center = NSWorkspace.shared.notificationCenter
         workspaceObservers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             self?.invalidateNetwork("The Mac is going to sleep. Detect the network again after waking.")
@@ -335,7 +335,7 @@ final class AutomationCoordinator: MacLinkAutomationService {
     private func connectManually(_ connection: SavedMac, completion: @escaping (Result<Data, CLIError>) -> Void) {
         learningNetworkGeneration = nil
         settings.paused = true; save()
-        publish("Manual session", "Enable Accessibility from the MacLink menu for full screen and automatic changes on your next connection.")
+        publish("Manual session", "Enable Accessibility from the Mooring menu for full screen and automatic changes on your next connection.")
         cli.run(["connect-mode", connection.id, settings.preference == "high_performance" ? "high_performance" : "standard"], completion: completion)
     }
     private func connectPrepared(_ connection: SavedMac, completion: @escaping (Result<Data, CLIError>) -> Void) {
@@ -379,7 +379,7 @@ final class AutomationCoordinator: MacLinkAutomationService {
                     } else if !AppleSession.isTrusted {
                         self.pauseForAttention("Opened without supervision", "Enable Accessibility in Settings for full screen and automatic reconnects.")
                     } else {
-                        self.publish("Waiting for Screen Sharing", "Sign in if prompted. MacLink will manage only a new window matching this target’s connection document.")
+                        self.publish("Waiting for Screen Sharing", "Sign in if prompted. Mooring will manage only a new window matching this target’s connection document.")
                     }
                     completion(result)
                 }
@@ -406,8 +406,8 @@ final class AutomationCoordinator: MacLinkAutomationService {
                 case .appExited:
                     self.sessionRequested = false; self.sessionConnected = false
                     self.crashFallback = true; self.policyState = nil; self.recommendation = "standard"
-                    self.pauseForAttention("Viewer exited · paused", "Resume or Connect when you are ready. The next automatic attempt uses Standard; MacLink cannot distinguish a crash from Quit.")
-                case .unavailable: self.pauseForAttention("Accessibility unavailable", "Restore MacLink’s Accessibility permission to supervise the session.")
+                    self.pauseForAttention("Viewer exited · paused", "Resume or Connect when you are ready. The next automatic attempt uses Standard; Mooring cannot distinguish a crash from Quit.")
+                case .unavailable: self.pauseForAttention("Accessibility unavailable", "Restore Mooring’s Accessibility permission to supervise the session.")
                 case .ambiguous:
                     if self.requestedMode == "high_performance" { self.crashFallback = true; self.recommendation = "standard"; self.policyState = nil }
                     self.pauseForAttention("Session needs attention", (issue ?? "Could not identify one new matching Screen Sharing window.") + " Finish signing in, or close this connection and Resume to try again.")
@@ -448,7 +448,7 @@ final class AutomationCoordinator: MacLinkAutomationService {
                     self.launchBusy = false; self.sessionRequested = false; self.sessionConnected = false
                     self.launch(mac, mode: mode) { _ in }
                 } else if attempts < 15 { self.waitForClose(mac, mode: mode, epoch: epoch, attempts: attempts + 1) }
-                else { self.launchBusy = false; self.pauseForAttention("Close the connection to continue", "Screen Sharing kept the old window open. MacLink will not open a duplicate.") }
+                else { self.launchBusy = false; self.pauseForAttention("Close the connection to continue", "Screen Sharing kept the old window open. Mooring will not open a duplicate.") }
             }
         }
     }

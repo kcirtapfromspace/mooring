@@ -4,7 +4,7 @@ import CoreMedia
 import os
 
 /// The session log (see NativeLog), without depending on the session files.
-private let nativeAudioLog = Logger(subsystem: "dev.maclink", category: "session")
+private let nativeAudioLog = Logger(subsystem: "dev.mooring", category: "session")
 
 /// One Opus packet of the sharing Mac's sound. Rust validates it on send and receive.
 struct NativeAudioPacket: Equatable {
@@ -305,7 +305,7 @@ struct NativeAudioStats: Equatable {
 /// restarts at most once a second.
 final class NativeAudioPlayer: @unchecked Sendable {
     static let maxWaiting = 32
-    private let queue = DispatchQueue(label: "MacLink.native.audio", qos: .userInteractive)
+    private let queue = DispatchQueue(label: "Mooring.native.audio", qos: .userInteractive)
     private let buffer = NativeAudioBuffer()
     private let lock = NSLock()
     private var waiting = 0

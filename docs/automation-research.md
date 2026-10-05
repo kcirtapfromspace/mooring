@@ -15,7 +15,7 @@ The exact generated queries are:
 | Standard, adaptive quality | `quality=adaptive&numVirtualDisplays=0` |
 | Standard, full quality | `quality=full&numVirtualDisplays=0` |
 
-MacLink implements only one virtual display for High Performance and the adaptive variant for Standard. It validates the host separately and appends a fixed query selected by a Rust enum. User-provided URLs, query parameters, usernames, and passwords remain rejected.
+Mooring implements only one virtual display for High Performance and the adaptive variant for Standard. It validates the host separately and appends a fixed query selected by a Rust enum. User-provided URLs, query parameters, usernames, and passwords remain rejected.
 
 This is an **experimental compatibility adapter**, not a documented Apple API. It requests a mode for a new connection; it does not prove the mode was negotiated or turn an existing session into a different session in place. Apple may reuse a session, reject High Performance, or ask the user to make a choice. Actual mode changes require cross-Mac validation and independently observed results.
 
@@ -44,13 +44,13 @@ The bundled `ScreenSharing.sdef` defines only `GetURL` with a text VNC URL. `Inf
 
 Apple documents that a successful connection is saved, and that a user-created connection's Screen Sharing Type can be edited in Window → Connections → All Connections → Info. [Connection settings](https://support.apple.com/en-sa/guide/mac-help/mchl67d5398b/mac), [connection persistence](https://support.apple.com/en-il/guide/mac-help/mchl89584923/mac).
 
-Static strings identify a private `com.apple.screensharing.configuration` domain, `UserDefaultsBackedKeyValueStorage`, connection/session metadata, and `displayConfiguration`. These are not a supported persistence API. MacLink must not edit Apple's stored connection dictionaries or manufacture private saved IDs. An app-owned, credential-free `.vncloc` can carry a native-generated URL, but whether Apple preserves that document's identity on the resulting window still needs a live test.
+Static strings identify a private `com.apple.screensharing.configuration` domain, `UserDefaultsBackedKeyValueStorage`, connection/session metadata, and `displayConfiguration`. These are not a supported persistence API. Mooring must not edit Apple's stored connection dictionaries or manufacture private saved IDs. An app-owned, credential-free `.vncloc` can carry a native-generated URL, but whether Apple preserves that document's identity on the resulting window still needs a live test.
 
 Apple's supported device-management declarations offer `Virtual1` and `Virtual2`, not an ordinary application's per-launch mode setter. [Display configuration declaration](https://developer.apple.com/documentation/devicemanagement/screensharingconnectiondisplayconfigurationobject). Enrollment is not part of this consumer workflow.
 
 ## Safe session ownership and full screen
 
-Accessibility is the practical public mechanism for observing and operating another application's windows. The app needs user-granted Accessibility access; use an AX client in the signed MacLink app, bounded messaging timeouts, and state-based actions. [Apple AX API](https://developer.apple.com/documentation/applicationservices/axuielement_h).
+Accessibility is the practical public mechanism for observing and operating another application's windows. The app needs user-granted Accessibility access; use an AX client in the signed Mooring app, bounded messaging timeouts, and state-based actions. [Apple AX API](https://developer.apple.com/documentation/applicationservices/axuielement_h).
 
 Do not identify an owned session only by a new window appearing. Another connection can appear concurrently. Require a unique correlation to the requested endpoint and retain the AX window identity for that one session. If correlation is absent or ambiguous, stop automatic closing/switching and request user attention. Never close every Screen Sharing window or terminate Screen Sharing to switch modes.
 

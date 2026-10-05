@@ -78,9 +78,9 @@ For `v0.3.0-preview.3`, the complete local validation script passed with 145 Rus
 - the bounded reconnect backoff;
 - the chords that stay on the viewing Mac.
 
-The encrypted hardware loopback now carries stats both ways and a tuning command to the host. The session suite drives the real `maclink telemetry` and `tune` commands against the app's socket.
+The encrypted hardware loopback now carries stats both ways and a tuning command to the host. The session suite drives the real `mooring telemetry` and `tune` commands against the app's socket.
 
-Automatic sharing, ⌘-Tab capture through an event tap, reconnection in the same window, and capture restarts for a new width are AppKit and ScreenCaptureKit behavior, verified here only by compilation and by the Swift boundary checks. They need the two-Mac checks in the testing guide. The cause of the preview 2 disconnects is not yet known. This build logs every session end with MacLink's reason and reports it in telemetry.
+Automatic sharing, ⌘-Tab capture through an event tap, reconnection in the same window, and capture restarts for a new width are AppKit and ScreenCaptureKit behavior, verified here only by compilation and by the Swift boundary checks. They need the two-Mac checks in the testing guide. The cause of the preview 2 disconnects is not yet known. This build logs every session end with Mooring's reason and reports it in telemetry.
 
 Review made these corrections before release:
 
@@ -115,7 +115,7 @@ Review before release led to these changes:
 - a version mismatch at connect is explained;
 - a keyframe queued during recovery is kept.
 
-macOS 15.4 and later may ask before MacLink reads the clipboard in the background; that prompt has not been exercised here.
+macOS 15.4 and later may ask before Mooring reads the clipboard in the background; that prompt has not been exercised here.
 
 A live preview 3 session between two Macs, watched from the sharing Mac, recorded one drop: `The other Mac sent an invalid or incomplete session message`. It came right after round-trip spikes of 104–136 ms, and the viewer reconnected in 0.8 s. The receive grace addresses that path. Whether it removes every drop still needs two-Mac confirmation.
 
@@ -190,7 +190,7 @@ Encode cost at MacBook Pro sizes on the build Mac: HEVC 4:4:4 averaged about 17 
 A first run of the private API on the build Mac (headless, with macOS's 1920×1080 placeholder):
 
 - it created, resized and removed a Retina virtual display;
-- macOS chose a doubled mode unless the exact Retina mode was selected, so MacLink now selects it;
+- macOS chose a doubled mode unless the exact Retina mode was selected, so Mooring now selects it;
 - the virtual display replaced the placeholder, and a new placeholder appeared after release.
 
 That run interrupted a live session three times, because the old capture code ended the session on a display change. It now restarts capture instead.
@@ -238,7 +238,7 @@ Capture of real system sound, playback, output device changes and lip sync are c
 
 ## Viewer-sized display between two Macs
 
-The first real two-Mac run of the viewer-sized display (preview 12 on both Macs) failed. Each session ended about 3 s after it started with "Screen capture stopped: Failed to find any displays or windows to capture", and the viewer reconnected in a loop. ScreenCaptureKit stopped the stream when the virtual display replaced the headless placeholder, before CoreGraphics reported the new main display, so MacLink treated it as fatal.
+The first real two-Mac run of the viewer-sized display (preview 12 on both Macs) failed. Each session ended about 3 s after it started with "Screen capture stopped: Failed to find any displays or windows to capture", and the viewer reconnected in a loop. ScreenCaptureKit stopped the stream when the virtual display replaced the headless placeholder, before CoreGraphics reported the new main display, so Mooring treated it as fatal.
 
 For `v0.3.0-preview.13`:
 
@@ -285,7 +285,7 @@ What changed and what didn't:
 - **What didn't matter:** colour tagging (about 2 ms), the power-efficiency setting, and frame pacing with evenly spaced timestamps.
 - **Why not switch encoders:** low-latency HEVC 4:2:0 and H.264 took 25–27 ms, so HEVC 4:4:4 without real-time mode is both the fastest and the sharpest.
 - **Decoding:** it didn't depend on real-time mode (8–10 ms on the build Mac).
-- **The fix:** preview 15 turns real-time mode off for HEVC and keeps Apple's low-latency mode for H.264. Through MacLink's own encoder, a frame after a 500 ms pause now takes 18 ms instead of 54 ms.
+- **The fix:** preview 15 turns real-time mode off for HEVC and keeps Apple's low-latency mode for H.264. Through Mooring's own encoder, a frame after a 500 ms pause now takes 18 ms instead of 54 ms.
 - **Local suite:** 1080p HEVC 4:4:4 encode averages about 7 ms, down from about 10 ms. The loopback median from capture timestamp to decoded fell from about 12 ms to 9 ms.
 
 ## Sessions wait for the launch self-tests
@@ -312,7 +312,7 @@ Totals fell in 16.6 ms steps, the display's refresh.
 For `v0.3.0-preview.17`:
 
 - **Decode to YCbCr.** The viewer asks the decoder for YCbCr at the stream's chroma (4:4:4 for HEVC, 4:2:0 for H.264) instead of BGRA. On the build Mac, decoding 3360×2032 text frames took 4.6 ms median against 7.6 ms. Rendered through Core Image into the same sRGB target, the two pictures differed by 0.1 colour levels on average, at most 2 of 255, and the YCbCr path was marginally closer to the source. The encrypted loopback median from capture timestamp to decoded fell from about 9.7 to 7.6 ms.
-- **Draw frames on arrival.** Tried and not shipped. Drawing a frame as soon as it was decoded, with MacLink's own display link instead of MTKView's timer, was measured with `scripts/measure-native-present.swift` (now with a sparse, typing-like case and a decoded-to-presented figure). Isolated frames were at best about 5 ms sooner. Steady 60 fps streams were often a refresh later, and the build Mac's virtual display gives no presentation time, so the figures are the presented handler's time. The change was reverted.
+- **Draw frames on arrival.** Tried and not shipped. Drawing a frame as soon as it was decoded, with Mooring's own display link instead of MTKView's timer, was measured with `scripts/measure-native-present.swift` (now with a sparse, typing-like case and a decoded-to-presented figure). Isolated frames were at best about 5 ms sooner. Steady 60 fps streams were often a refresh later, and the build Mac's virtual display gives no presentation time, so the figures are the presented handler's time. The change was reverted.
 - **Lower Display Latency (May Tear).** A new viewer option, off by default, turns off CAMetalLayer display sync. On the build Mac, over two runs each: steady 60 fps into a window, 46–69 ms with sync against 14 ms without; retina-sized, 19–30 against 20–23; isolated frames, 25 against 19–22. Its effect on a real display, including any tearing, is checked between two Macs.
 
 ## Pacing and the newest frame
@@ -340,7 +340,7 @@ Local checks:
 
 ## Versions, remote updates and Settings
 
-For `v0.3.0-preview.19`, each Mac tells the other its MacLink version, and a viewer can ask an older sharing Mac to update itself.
+For `v0.3.0-preview.19`, each Mac tells the other its Mooring version, and a viewer can ask an older sharing Mac to update itself.
 
 - **Version messages.** Rust adds three control messages, each sent only to a peer that announced the matching capability, so an older Mac never receives an ID it would reject:
   - Version: either way, once per session;
@@ -368,7 +368,7 @@ Between two Macs, the update request needs preview 19 or later on both, and is f
 
 For `v0.3.0-preview.20`, each viewing Mac has its own Noise static key, and the sharing Mac approves keys rather than sharing one secret.
 
-- **Handshakes.** A 16-byte plain-text mode record precedes the first Noise message. The mode is also bound into the prologue (`MacLink direct session v2` plus the mode byte):
+- **Handshakes.** A 16-byte plain-text mode record precedes the first Noise message. The mode is also bound into the prologue (`Mooring direct session v2` plus the mode byte):
   - pair: `Noise_IKpsk1_25519_ChaChaPoly_BLAKE2s` with a one-time secret;
   - device: `Noise_IK_25519_ChaChaPoly_BLAKE2s` with an approved key;
   - migrate: IKpsk1 with the old long-lived secret, while the sharing Mac still accepts it.
@@ -429,7 +429,7 @@ For `v0.3.0-preview.22`, a sharing Mac tells a session the viewer ended apart fr
 - **Host.**
   - After an end without `Leaving`, the host keeps the session's display and sleep assertion, and keeps its listener, for up to 12 hours or until the next session, **Stop Sharing**, or a lock.
   - Remove and Stop Now never wait.
-  - Only a viewer closing its window or quitting MacLink says it's leaving; sleep, lock, dropped connections and the update hand-off don't.
+  - Only a viewer closing its window or quitting Mooring says it's leaving; sleep, lock, dropped connections and the update hand-off don't.
 - **Viewer.** A session ended by this Mac's sleep or lock is reconnected by the one-second tick, once this Mac is awake and unlocked, with a fresh budget. Notifications still only stop sessions; nothing starts from one.
 - **Not verified.** Whether the display assertion also keeps a screen saver from starting and locking is untested. The overnight lid-close check (TESTING.md step 11) is the gate.
 
@@ -450,7 +450,7 @@ For `v0.3.0-preview.23`, a pairing code lists the sharing Mac's addresses, and t
   - Moving over falls back to the old handshake on the first address that connected.
 - **Saved peers.** `alternates` default to none, so earlier files load. After a saved peer connects, the address that worked moves to the front.
 - **Logs.** The log names the address's position, never the address.
-- **Known limit.** Another MacLink host at a stale address can refuse while the real one is unreachable. That reads as a refusal and stops reconnecting. **Reconnect** tries again.
+- **Known limit.** Another Mooring host at a stale address can refuse while the real one is unreachable. That reads as a refusal and stops reconnecting. **Reconnect** tries again.
 - **Checks.** Loopback tests put the sharing Mac on 127.0.0.1 and a stand-in on ::1 at the same port. They cover a stand-in that never answers, one that closes at once, every address refusing, none answering, and the move-over fallback. Unit tests cover the format, size and strictness, the address ordering, and saved-peer ordering. Three mutations were each caught: no per-candidate time slice, a close ending the attempt, and no reconnect after waiting.
 
 ## Keyframes only when needed
@@ -521,7 +521,7 @@ For `v0.3.0-preview.26`, the host's send-buffer limit fits a slow link across th
 
 For `v0.3.0-preview.28`.
 
-- **Found.** The Mac Studio's log showed a wait start at 21:47 after an unexpected drop. Sparkle installed preview 27 at 01:10 with no session connected, which relaunched MacLink. The wait was held only in memory, so the display turned off and the screen locked at 01:15, and sharing stopped until Screen Sharing unlocked it at 08:08.
+- **Found.** The Mac Studio's log showed a wait start at 21:47 after an unexpected drop. Sparkle installed preview 27 at 01:10 with no session connected, which relaunched Mooring. The wait was held only in memory, so the display turned off and the screen locked at 01:15, and sharing stopped until Screen Sharing unlocked it at 08:08.
 - **Persistence.**
   - The wait's end is saved in defaults (`native.waitForViewerUntil`) when it starts.
   - `stopSharing` clears it unless `keepWait`. Only the update preparation passes that, and the quit after it.
@@ -530,7 +530,7 @@ For `v0.3.0-preview.28`.
   - A viewer reconnecting, Stop Sharing, the privacy guard, a user's quit, or the wait's own expiry clear it.
   - This was traced against the log, not run on the live host. It's first exercised when an update after preview 28 installs during a wait.
   - Last night's wait ran 3 h 23 min without the 3-hour screen saver locking the Mac Studio: one data point that the display assertion also holds off the screen saver.
-- **Error.** `ConnectionRefused` now maps to the new `ML_SESSION_UNAVAILABLE` (−13): the other Mac answered, but MacLink isn't sharing there. In a multi-address connect it's kept over a later timeout from other addresses. The viewer shows it with the likely cause and keeps reconnecting. The Rust tests cover two closed addresses, and a closed one next to an unroutable one within the deadline.
+- **Error.** `ConnectionRefused` now maps to the new `ML_SESSION_UNAVAILABLE` (−13): the other Mac answered, but Mooring isn't sharing there. In a multi-address connect it's kept over a later timeout from other addresses. The viewer shows it with the likely cause and keeps reconnecting. The Rust tests cover two closed addresses, and a closed one next to an unroutable one within the deadline.
 - **Toolchain.** Rust 1.99 deprecates `AtomicU64::fetch_update` and `AtomicUsize::fetch_update` in favor of `try_update`, and the two uses were renamed.
 
 ## Waking for a returning viewer
@@ -539,31 +539,31 @@ For `v0.3.0-preview.29`, which replaces the 12-hour wait of previews 22 to 28.
 
 - **Found (2026-10-02).**
   - On the Mac Studio, the "lock" after display sleep is loginwindow's shield (`kLWLockFromDisplayDim`). It sets `CGSSessionScreenIsLocked`, but needs no password there: `sysadminctl -screenLock status` reports off.
-  - At 16:57:55, Screen Sharing declared user activity ("Remote user active"). loginwindow logged "Keybag was NOT locked" and lowered the shield 52 ms later, and MacLink resumed a second after that.
+  - At 16:57:55, Screen Sharing declared user activity ("Remote user active"). loginwindow logged "Keybag was NOT locked" and lowered the shield 52 ms later, and Mooring resumed a second after that.
   - The waits that day had been ended at 09:54 and 17:01 by the viewer's `Leaving`.
 - **Measured, with the user's consent.**
   - `pmset displaysleepnow` raised the shield. A separate process's `IOPMAssertionDeclareUserActivity(kIOPMUserActiveRemote)` lowered it in 192 ms, with no password.
   - 3.3 s later, Codex Computer Use's lock-screen guardian on that Mac locked the screen properly (`kAELockScreenEvent`). It does that for an unlock it didn't see a person cause. Screen Sharing's wakes hadn't triggered it.
-  - The user turned that feature off. MacLink does not try to look like a person to such tools.
+  - The user turned that feature off. Mooring does not try to look like a person to such tools.
 - **Host.**
   - **Listening.** With automatic sharing, display sleep or a shield no longer stops sharing. A live session still ends at once, since a covered screen is never captured, but the listener stays open. `NativePrivacyGuard.mayListenNow` needs the user's session on the console and logged in, whatever the lock flag says. Pure checks cover it.
   - **Waking.** An approved connection while the display sleeps or the screen is covered declares user activity; Rust has already authenticated it before Swift sees it. The host then checks every 100 ms, for up to `ML_HOST_WAKE_WAIT_MS` (5 s), until the session may share and the display is awake.
     - The transport stays unread meanwhile, and the viewer's pings queue within `IDLE_LIMIT` (10 s). A Rust test keeps the wait at most half of it.
     - Removal during the wait is checked again before the session starts.
   - **A password.** A screen still asking for its password stops sharing. Later attempts are refused (`ML_SESSION_UNAVAILABLE`), so the display isn't woken again, and automatic sharing restarts only after an unlock: one wake per lock.
-  - **Starting.** Automatic sharing starts listening while the screen is covered, as after an update relaunched MacLink with the display off. Manual sharing still stops on a lock or display sleep.
+  - **Starting.** Automatic sharing starts listening while the screen is covered, as after an update relaunched Mooring with the display off. Manual sharing still stops on a lock or display sleep.
   - **The old wait.** Hosts no longer announce `ML_CAPABILITY_WAITS`, so viewers don't send them `Leaving`. Launch removes preview 28's saved wait (`native.waitForViewerUntil`). Viewers still send `Leaving` to previews 22–28.
 - **Viewer.** `ML_SESSION_UNAVAILABLE` switches reconnecting to the update schedule, every 3 s for two minutes, so an unlock is noticed within seconds.
 - **Cost.**
-  - A sharing Mac that asks for a password after its display sleeps stayed connectable through the 12-hour wait. Now it needs unlocking, with Screen Sharing for example, and MacLink says so.
+  - A sharing Mac that asks for a password after its display sleeps stayed connectable through the 12-hour wait. Now it needs unlocking, with Screen Sharing for example, and Mooring says so.
   - After a session drops, the display now turns off on its usual schedule.
-- **Not verified.** The wake was tested from a stand-alone process, not from MacLink, and not with a viewer connecting. Whether ScreenCaptureKit starts cleanly right after the wake is also untested. Both are checked in TESTING.md step 11.
+- **Not verified.** The wake was tested from a stand-alone process, not from Mooring, and not with a viewer connecting. Whether ScreenCaptureKit starts cleanly right after the wake is also untested. Both are checked in TESTING.md step 11.
 
 ## Lid/wake reconnect recovery (2026-10-04)
 
 This revises preview 29's single-activity wake policy above.
 
-- **Observed locally.** At 07:50:41, loginwindow began clearing its display-dim shield after remote user activity but did not complete. At 07:50:46, MacLink's five-second wake deadline expired; it described a password lock and stopped listening. The next remote user activity at 08:03:28 cleared the shield. loginwindow reported that the keybag was not locked and that no password was required; MacLink resumed sharing. This explains the dependence on a subsequent Screen Sharing/RDP connection, but is not a reproduction of the patched two-Mac path.
+- **Observed locally.** At 07:50:41, loginwindow began clearing its display-dim shield after remote user activity but did not complete. At 07:50:46, Mooring's five-second wake deadline expired; it described a password lock and stopped listening. The next remote user activity at 08:03:28 cleared the shield. loginwindow reported that the keybag was not locked and that no password was required; Mooring resumed sharing. This explains the dependence on a subsequent Screen Sharing/RDP connection, but is not a reproduction of the patched two-Mac path.
 - **Change.** An authenticated connection makes at most three remote user activity requests, a second apart, within the existing five-second wait. The public IOKit boundary keeps the returned activity ID for renewal and holds the display through the wait, releasing both on completion or cancellation. The display hold has a five-second powerd timeout as well. Capture and input still require an eligible, uncovered console session; waking does not grant access to a locked screen.
 - **Recovery.** A wake timeout no longer proves a password is required. A still-covered or unavailable session waits for an unlock. An eligible session whose display is asleep keeps listening, and an eligible session clears a prior timeout latch without requiring the display to be awake first. This lets an approved connection supply the wake request instead of depending on another remote-desktop app.
 - **Local regression scope.** Rust tests exercise a shield that needs a second request, the three-request budget, the five-second deadline, missing console access, display/session readiness, and the C ABI's invalid state/flag handling. Swift tests use fake power APIs to check retained/replaced IDs, cleanup after API failures, cancellation cleanup, and the same Rust wake policy. They do not alter the live desktop's power state.

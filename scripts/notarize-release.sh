@@ -20,15 +20,15 @@ if [[ "$(uname -s)" != Darwin || "${GITHUB_ACTIONS:-false}" = true ]]; then
     printf '%s\n' 'Notarization must be initiated from the local development Mac.' >&2
     exit 1
 fi
-profile="${MACLINK_NOTARY_PROFILE:-}"
+profile="${MOORING_NOTARY_PROFILE:-}"
 if [[ -z "$profile" ]]; then
-    printf '%s\n' 'Set MACLINK_NOTARY_PROFILE to an existing notarytool Keychain profile name.' >&2
-    printf '%s\n' 'For first-time setup, run: xcrun notarytool store-credentials MacLink' >&2
+    printf '%s\n' 'Set MOORING_NOTARY_PROFILE to an existing notarytool Keychain profile name.' >&2
+    printf '%s\n' 'For first-time setup, run: xcrun notarytool store-credentials Mooring' >&2
     exit 1
 fi
 
 state="$project_root/dist/notarization/v$release_version"
-bundle="$state/MacLink.app"
+bundle="$state/Mooring.app"
 submission="$state/submission.json"
 input_archive="$state/submitted.zip"
 mkdir -p "$state"
@@ -59,9 +59,9 @@ if [[ "$resume" = true ]]; then
     fi
     (cd "$state" && shasum -a 256 -c submitted.sha256)
 else
-    identity="${MACLINK_CODESIGN_IDENTITY:-}"
+    identity="${MOORING_CODESIGN_IDENTITY:-}"
     if [[ -z "$identity" || "$identity" = - ]]; then
-        printf '%s\n' 'Set MACLINK_CODESIGN_IDENTITY to a valid Developer ID Application identity.' >&2
+        printf '%s\n' 'Set MOORING_CODESIGN_IDENTITY to a valid Developer ID Application identity.' >&2
         exit 1
     fi
     if [[ -e "$submission" || -e "$state/submission-pending.json" ]]; then
@@ -71,8 +71,8 @@ else
     # Validate the named credential without printing or reading its secret value.
     xcrun notarytool history --keychain-profile "$profile" --output-format json >/dev/null
     mkdir -p "$state"
-    MACLINK_CODESIGN_IDENTITY="$identity" MACLINK_RELEASE_VERSION="$release_version" \
-        MACLINK_APP_OUTPUT="$bundle" ./scripts/build-app.sh
+    MOORING_CODESIGN_IDENTITY="$identity" MOORING_RELEASE_VERSION="$release_version" \
+        MOORING_APP_OUTPUT="$bundle" ./scripts/build-app.sh
     codesign -dv --verbose=4 "$bundle" 2> "$state/signature.txt"
     if ! /usr/bin/grep -q '^Authority=Developer ID Application:' "$state/signature.txt"; then
         printf '%s\n' 'The app must be signed with Developer ID Application before submission.' >&2
@@ -109,19 +109,19 @@ fi
 (cd "$state" && shasum -a 256 -c submitted.sha256)
 verification="$(mktemp -d "$state/verify.XXXXXX")"
 /usr/bin/ditto -x -k "$input_archive" "$verification"
-bundle="$verification/MacLink.app"
+bundle="$verification/Mooring.app"
 xcrun stapler staple "$bundle"
 xcrun stapler validate "$bundle"
 codesign --verify --deep --strict "$bundle"
 spctl --assess --type execute --verbose=2 "$bundle"
 
-archive_name="MacLink-v$release_version-macos-arm64.zip"
+archive_name="Mooring-v$release_version-macos-arm64.zip"
 staged_archive="$state/notarized.zip"
 COPYFILE_DISABLE=1 /usr/bin/ditto -c -k --norsrc --noextattr --noqtn --keepParent "$bundle" "$staged_archive"
 /usr/bin/ditto -x -k "$staged_archive" "$verification/final"
-xcrun stapler validate "$verification/final/MacLink.app"
-codesign --verify --deep --strict "$verification/final/MacLink.app"
-spctl --assess --type execute --verbose=2 "$verification/final/MacLink.app"
+xcrun stapler validate "$verification/final/Mooring.app"
+codesign --verify --deep --strict "$verification/final/Mooring.app"
+spctl --assess --type execute --verbose=2 "$verification/final/Mooring.app"
 mv "$staged_archive" "$project_root/dist/$archive_name"
 (cd "$project_root/dist" && shasum -a 256 "$archive_name" > "$archive_name.sha256")
 printf 'Notarized release ready: %s/dist/%s\n' "$project_root" "$archive_name"

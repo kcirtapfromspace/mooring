@@ -214,36 +214,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
-name = "maclink-cli"
+name = "mooring-cli"
 version = "0.3.0"
 dependencies = [
- "maclink-core",
- "maclink-platform",
+ "mooring-core",
+ "mooring-platform",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "maclink-core"
+name = "mooring-core"
 version = "0.3.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
-name = "maclink-platform"
+name = "mooring-platform"
 version = "0.3.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
-name = "maclink-session"
+name = "mooring-session"
 version = "0.3.0"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
- "maclink-platform",
+ "mooring-platform",
  "serde",
  "serde_json",
  "sha2",

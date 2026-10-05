@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 21 — The pointer lines up, and the menu bar is yours
+# Mooring 0.3.0 preview 21 — The pointer lines up, and the menu bar is yours
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected.
 

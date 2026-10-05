@@ -1,10 +1,10 @@
-# MacLink v0.1.0-preview.2
+# Mooring v0.1.0-preview.2
 
-Fixes the "Apple could not verify MacLink.app" warning from the first preview by distributing a Developer ID signed and Apple-notarized app.
+Fixes the "Apple could not verify Mooring.app" warning from the first preview by distributing a Developer ID signed and Apple-notarized app.
 
 **Apple silicon only (arm64), macOS 14 or later.**
 
-Download **MacLink-v0.1.0-preview.2-macos-arm64.zip**. Quit the previous MacLink, extract the ZIP, and replace the old app with this copy. Saved Macs are preserved. Open the new app; macOS may still show its ordinary downloaded-app confirmation.
+Download **the app ZIP attached to this release**. Quit the previous Mooring, extract the ZIP, and replace the old app with this copy. Saved Macs are preserved. Open the new app; macOS may still show its ordinary downloaded-app confirmation.
 
 ## Verification
 
@@ -19,4 +19,4 @@ Assets include the app ZIP, `SHA256SUMS.txt`, `local-validation.txt`, `notarizat
 
 ## Scope
 
-This remains a native connection launcher with a Rust core. Apple Screen Sharing handles the actual remote session. Automatic High Performance switching and a custom video engine are not included yet. No remote passwords are stored by MacLink.
+This remains a native connection launcher with a Rust core. Apple Screen Sharing handles the actual remote session. Automatic High Performance switching and a custom video engine are not included yet. No remote passwords are stored by Mooring.

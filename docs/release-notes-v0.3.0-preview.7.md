@@ -1,6 +1,6 @@
-# MacLink 0.3.0 preview 7 — First automatic update
+# Mooring 0.3.0 preview 7 — First automatic update
 
-This is the first release installed copies can pick up by themselves. If you run preview 6, you don't need to download anything. MacLink installs preview 7 and relaunches the next time no session is connected, usually within four hours. To update right away, choose **Check for Updates…** or **Install Update … & Relaunch** in the menu bar.
+This is the first release installed copies can pick up by themselves. If you run preview 6, you don't need to download anything. Mooring installs preview 7 and relaunches the next time no session is connected, usually within four hours. To update right away, choose **Check for Updates…** or **Install Update … & Relaunch** in the menu bar.
 
 ## Smoother start of each session
 

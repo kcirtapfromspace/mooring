@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 19 — Versions you can see, and one Settings window
+# Mooring 0.3.0 preview 19 — Versions you can see, and one Settings window
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected.
 
@@ -6,7 +6,7 @@ Installed copies of preview 6 or later update to this version by themselves when
 
 Earlier today the Mac Studio sat on an old version while the MacBook had a new one, and nothing said so. Sound and screen matching simply didn't work.
 
-Now each Mac tells the other which MacLink it runs. When they differ, the viewing Mac's window says so in its bottom bar, with the next step:
+Now each Mac tells the other which Mooring it runs. When they differ, the viewing Mac's window says so in its bottom bar, with the next step:
 
 - **The sharing Mac is older:** **Update It** asks it to check for and download its update. When the update is ready, **Disconnect and Update** ends the session so it can install. The viewing Mac then waits up to two minutes for it to come back and reconnects by itself. If the sharing Mac was sharing, it shares again after the update, even if it doesn't share automatically.
 - **This Mac is older:** **Check for Updates** updates this Mac.
@@ -22,7 +22,7 @@ Both Macs need preview 19 or later. The first time **Update It** will do somethi
 
 - **Sharing this Mac:** share automatically, the shared clipboard, keyboard and mouse permission, and the pairing code.
 - **Viewing another Mac:** screen matching, sound, lower display latency, and the Macs this Mac is paired with. Each Mac has a **Remove…** button, disabled while you're connected to it.
-- **MacLink:** launch at login, the version, updates, and Apple Screen Sharing automation, which keeps its own window.
+- **Mooring:** launch at login, the version, updates, and Apple Screen Sharing automation, which keeps its own window.
 
 Changes apply at once, including to a session that's running. Those four toggles are no longer in the menu bar menu.
 

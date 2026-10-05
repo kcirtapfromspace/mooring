@@ -27,7 +27,7 @@ The current update edits the established vector assets and HTML/CSS directly. No
 
 ## App transition
 
-This folder records the selected identity. The working native app now uses Mooring in visible names, artwork, and copy; previously published releases remain MacLink. Preserve the existing bundle ID, Keychain services, application-support directory, preferences, updater feed, saved pairings, and protocol formats. Review app replacement, login registration, and updater relaunch before changing executable or package names. About identifies Mooring as formerly MacLink. Keep the existing `maclink` CLI name.
+This folder records the selected Mooring identity. The app, CLI, source, and downloads use Mooring. Preserve existing signing and pairing identities, preferences, saved connections, and protocol formats; verify app replacement, login registration, and updater relaunch when changing packaging.
 
 Run the existing local validation and notarized preview release process when app implementation and publication are requested. Name selection is recorded here without claiming domain or trademark clearance.
 
@@ -39,4 +39,4 @@ Adopt **Mooring** with **mooringmac.com** as the recommended domain. Namecheap l
 
 Two exact-name software overlaps surfaced: [Mooring, a Docker deployment platform](https://github.com/daboss2003/mooring), and [Mooring, an EFT clinical documentation research project](https://usemooring.com). Neither presents as a remote-desktop product. This preliminary search did not surface an exact-name remote-desktop competitor, but the name is not unique across software and this is not trademark clearance. Use category copy such as **Mooring — remote desktop for Mac** to make the product easy to identify.
 
-Direct product competition includes [Screens](https://edovia.com/en/screens), [Jump Desktop](https://jumpdesktop.com/), [Apple Screen Sharing](https://support.apple.com/en-az/guide/mac-help/mh14066/mac), and [MacLink](https://maclink.space/). Screens uses VNC; Jump Desktop supports RDP, VNC, and its own Fluid protocol. A custom protocol alone is therefore not a unique differentiator. Ground Mooring's positioning in the focused native Mac experience and verify performance claims with real two-Mac testing.
+Direct product competition includes [Screens](https://edovia.com/en/screens), [Jump Desktop](https://jumpdesktop.com/), [Apple Screen Sharing](https://support.apple.com/en-az/guide/mac-help/mh14066/mac). Screens uses VNC; Jump Desktop supports RDP, VNC, and its own Fluid protocol. A custom protocol alone is therefore not a unique differentiator. Ground Mooring's positioning in the focused native Mac experience and verify performance claims with real two-Mac testing.

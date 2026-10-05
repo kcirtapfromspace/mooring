@@ -1,8 +1,8 @@
-# MacLink v0.1.0-preview.1
+# Mooring v0.1.0-preview.1
 
 First Apple silicon preview for testing on a second Mac. Requires an Apple silicon Mac (arm64) and macOS 14 or later.
 
-Download **MacLink-v0.1.0-preview.1-macos-arm64.zip**, extract it, and open MacLink.app. Add the other Mac's hostname/IP, check its Screen Sharing service, then connect.
+Download **the app ZIP attached to this release**, extract it, and open Mooring.app. Add the other Mac's hostname/IP, check its Screen Sharing service, then connect.
 
 ## Included
 
@@ -18,7 +18,7 @@ This preview opens Apple Screen Sharing. **Automatic High Performance switching 
 
 The app is signed ad hoc and is **not notarized**. macOS may require approval for a downloaded app. No Intel build is included.
 
-If macOS shows **Apple could not verify MacLink.app**, after attempting to open the downloaded app, go to **System Settings → Privacy & Security → Open Anyway**, then confirm **Open**. This creates an exception for this app. [Apple's instructions](https://support.apple.com/en-us/102445).
+If macOS shows **Apple could not verify Mooring.app**, after attempting to open the downloaded app, go to **System Settings → Privacy & Security → Open Anyway**, then confirm **Open**. This creates an exception for this app. [Apple's instructions](https://support.apple.com/en-us/102445).
 
 ## Validation and downloads
 

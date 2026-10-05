@@ -434,7 +434,7 @@ struct NativeMediaTests {
                 annex.append(start); annex.append(contentsOf: bytes[offset..<(offset + count)]); offset += count
             }
         }
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("maclink-synthetic-" + UUID().uuidString + (hevc ? ".hevc" : ".h264"))
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("mooring-synthetic-" + UUID().uuidString + (hevc ? ".hevc" : ".h264"))
         try annex.write(to: url); defer { try? FileManager.default.removeItem(at: url) }
         let process = Process(), output = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)

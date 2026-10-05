@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 9 — Sharper text
+# Mooring 0.3.0 preview 9 — Sharper text
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected.
 
@@ -6,7 +6,7 @@ Installed copies of preview 6 or later update to this version by themselves when
 
 The picture used H.264 with 4:2:0 colour, which stores colour at a quarter of the resolution. That blurs coloured and small text: terminals, syntax highlighting, thin UI lines.
 
-Apple silicon can encode and decode HEVC with full 4:4:4 colour in hardware. When both Macs support it, MacLink now streams HEVC 4:4:4 at the same resolution and frame rate.
+Apple silicon can encode and decode HEVC with full 4:4:4 colour in hardware. When both Macs support it, Mooring now streams HEVC 4:4:4 at the same resolution and frame rate.
 
 At launch, each Mac encodes and decodes one small HEVC 4:4:4 frame in hardware and reads back the colour format it actually produced. Only a Mac that passes announces the capability. The sharing Mac streams HEVC 4:4:4 only to a viewer that announced it, and otherwise uses H.264 as before.
 
@@ -21,7 +21,7 @@ The connection protocol now negotiates a version. At the start of a session, eac
 
 ## Menu
 
-**Check for Updates…** now sits at the bottom of the menu, just above **Quit MacLink**, with the installed version on the line above it.
+**Check for Updates…** now sits at the bottom of the menu, just above **Quit Mooring**, with the installed version on the line above it.
 
 ## Validation
 

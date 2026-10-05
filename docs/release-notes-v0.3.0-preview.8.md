@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 8 — Smoother picture on the viewing Mac
+# Mooring 0.3.0 preview 8 — Smoother picture on the viewing Mac
 
 Installed copies of preview 6 or 7 update to this version by themselves: when no session is connected, within about four hours. It is the first update meant to arrive with no action at all.
 
@@ -20,7 +20,7 @@ Now:
 Every 10 seconds of a session, the viewing Mac logs where its frames went: decoded, drawn, waiting for the GPU, or replaced, plus drawing time on the processor and the GPU. This stays on that Mac and is never sent to the other one, so the connection protocol is unchanged. Read it on the viewing Mac with:
 
 ```sh
-/usr/bin/log show --last 1h --style compact --predicate 'subsystem == "dev.maclink" AND eventMessage CONTAINS "viewer drawing"'
+/usr/bin/log show --last 1h --style compact --predicate 'subsystem == "dev.mooring" AND eventMessage CONTAINS "viewer drawing"'
 ```
 
 ## Validation

@@ -17,7 +17,7 @@ private enum StatusMenuTests {
         let peers = (1...32).map { NativePeer(id: "fixture-\($0)", name: "Mac \($0)") }
         func menu(_ peers: [NativePeer], enabled: Bool = true, connected: String? = nil) -> NSMenu {
             let menu = NSMenu(); menu.autoenablesItems = false
-            MacLinkStatusMenu.addRecentMacs(peers, connectedPeerID: connected, to: menu,
+            MooringStatusMenu.addRecentMacs(peers, connectedPeerID: connected, to: menu,
                                            target: target, action: action, enabled: enabled)
             return menu
         }
@@ -54,8 +54,8 @@ private enum StatusMenuTests {
         let long = menu([NativePeer(id: "long", name: longName)]).items[1]
         require(long.title.count == 50 && long.title.hasSuffix("…"), "long name fits the menu")
         require(long.toolTip == "Connect to \(longName)", "full name remains accessible")
-        let idle = MacLinkBrand.menuBarImage
-        let sharing = MacLinkBrand.menuBarImage(isSharingScreen: true)
+        let idle = MooringBrand.menuBarImage
+        let sharing = MooringBrand.menuBarImage(isSharingScreen: true)
         require(idle.isTemplate && sharing.isTemplate, "icons adapt to macOS menu appearance")
         require(idle.size == NSSize(width: 18, height: 18) && sharing.size == NSSize(width: 24, height: 18),
                 "active badge has room without shrinking the Mooring mark")

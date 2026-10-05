@@ -1,5 +1,5 @@
 // Swift session-boundary checks. Pairing, address, control and peer-store rules
-// are Rust's (cargo test -p maclink-session); these cover the Swift wrappers.
+// are Rust's (cargo test -p mooring-session); these cover the Swift wrappers.
 // No Keychain access, live capture, input injection, or permission request.
 // Pairing runs over a loopback-only ephemeral listener with a temporary device
 // list; another is closed immediately to test channel queue state safely;
@@ -83,7 +83,7 @@ enum NativeSessionTests {
         // such a host.
         ml_capabilities_set(NativeCapabilities.local(hevc444: false, virtualDisplay: false, audio: false) | UInt64(ML_CAPABILITY_WAITS))
         defer { ml_capabilities_set(0) }
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("maclink-devices-\(UUID().uuidString)")
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("mooring-devices-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: folder) }
         let devices = NativeDeviceStore(directory: folder.path)
@@ -119,7 +119,7 @@ enum NativeSessionTests {
         guard case .control(.hello) = try next(again), case .control(.hello) = try next(returningHost) else {
             throw Failure("Protocol 5 sessions open with each side's Hello")
         }
-        let writer = DispatchQueue(label: "dev.maclink.tests.blocked-writer")
+        let writer = DispatchQueue(label: "dev.mooring.tests.blocked-writer")
         let writerEntered = DispatchSemaphore(value: 0), writerUnblock = DispatchSemaphore(value: 0)
         writer.async { writerEntered.signal(); writerUnblock.wait() }
         try require(writerEntered.wait(timeout: .now() + 2) == .success, "Writer is blocked before the clipboard packet")
@@ -322,7 +322,7 @@ enum NativeSessionTests {
         try require(earlier.listsDevices == nil && generated.listsDevices == true,
                     "An identity saved by an earlier version may accept its old code; a new one never does")
 
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("maclink-peers-\(UUID().uuidString)")
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("mooring-peers-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: folder) }
         let store = NativePeerStore(directory: folder.path)
         try require(try store.load().isEmpty, "A missing peer store is empty")
@@ -454,7 +454,7 @@ enum NativeSessionTests {
 
 extension NativeSessionTests {
     /// Tuning, telemetry wrappers, measurement intervals, and the real CLI
-    /// against the local socket in a temporary MACLINK_HOME.
+    /// against the local socket in a temporary MOORING_HOME.
     static func testTelemetry() throws {
         let defaults = NativeTuning.defaults
         try require(defaults.bitrate == 25_000_000 && defaults.maxWidth == 3840 && defaults.fps == 60
@@ -489,9 +489,9 @@ extension NativeSessionTests {
         guard arguments.count > 1 else { print("Skipping CLI telemetry check: no CLI path given."); return }
         let home = "/tmp/mls-\(getpid())"
         try? FileManager.default.removeItem(atPath: home)
-        setenv("MACLINK_HOME", home, 1)
+        setenv("MOORING_HOME", home, 1)
         defer { NativeTelemetryServer.stop(); try? FileManager.default.removeItem(atPath: home) }
-        try require(NativeTelemetryServer.start() == 0, "The local telemetry socket starts in MACLINK_HOME")
+        try require(NativeTelemetryServer.start() == 0, "The local telemetry socket starts in MOORING_HOME")
         func cli(_ command: [String]) throws -> Process {
             let process = Process(), output = Pipe()
             process.executableURL = URL(fileURLWithPath: arguments[1])
@@ -515,7 +515,7 @@ extension NativeSessionTests {
         }
         let tune = try cli(["tune", "--fps", "24", "--bitrate-mbps", "18"])
         let tuneOutput = try finish(tune)
-        try require(tune.terminationStatus == 0 && tuneOutput.contains("queued"), "maclink tune queues a command: \(tuneOutput)")
+        try require(tune.terminationStatus == 0 && tuneOutput.contains("queued"), "mooring tune queues a command: \(tuneOutput)")
         let taken = NativeTelemetryServer.takeTuning()
         try require(taken?.fps == 24 && taken?.bitrate == 18_000_000, "The app takes the CLI's tuning")
         let rejected = try cli(["tune", "--fps", "61"])
@@ -526,7 +526,7 @@ extension NativeSessionTests {
         let lines = streamOutput.split(separator: "\n")
         try require(stream.terminationStatus == 0 && lines.count == 2 && lines[0].contains("\"rtt_ms\":7.5")
                     && lines[0].contains("\"capture_fps\":42") && lines[0].contains("\"role\":\"viewer\""),
-                    "maclink telemetry streams snapshots: \(streamOutput)")
+                    "mooring telemetry streams snapshots: \(streamOutput)")
     }
 }
 
@@ -551,7 +551,7 @@ private struct LegacyCredential: Encodable {
 extension NativeSessionTests {
     /// The pasteboard side of the shared clipboard, on a private named pasteboard.
     static func testClipboard() throws {
-        let board = NSPasteboard(name: NSPasteboard.Name("dev.maclink.tests.\(getpid())"))
+        let board = NSPasteboard(name: NSPasteboard.Name("dev.mooring.tests.\(getpid())"))
         defer { board.releaseGlobally() }
         board.clearContents()
         try require(NativePasteboard.read(board) == nil, "An empty pasteboard shares nothing")
@@ -581,7 +581,7 @@ extension NativeSessionTests {
         try require(!NativeClipboardContent(png: Data("GIF89a".utf8)).isValid, "Rust rejects an image that is not PNG")
         let mixed = NativeClipboardContent(text: "keep", rtf: Data("\u{FEFF}{\\rtf1 x}".utf8), png: Data("GIF89a".utf8)).fitted()
         try require(mixed == NativeClipboardContent(text: "keep"), "Representations Rust would reject are dropped, never sent")
-        try require(NativeClipboardContent(text: "code: MLP1.eyJhIjoxfQ==").fitted() == nil, "MacLink pairing codes are never shared")
+        try require(NativeClipboardContent(text: "code: MLP1.eyJhIjoxfQ==").fitted() == nil, "Mooring pairing codes are never shared")
         board.clearContents(); board.setString("MLP1.eyJhIjoxfQ==", forType: .string)
         try require(NativePasteboard.read(board) == nil, "A pairing code without its concealed marker is still not shared")
         let identity = NativeHostIdentity(privateKey: Data(repeating: 1, count: 32), publicKey: Data(repeating: 2, count: 32),
@@ -681,7 +681,7 @@ extension NativeSessionTests {
 
     static func testClipboardCancellation(_ board: NSPasteboard) throws {
         var original: [NativeClipboardContent] = [], replacement: [NativeClipboardContent] = []
-        let queue = DispatchQueue(label: "dev.maclink.tests.clipboard-cancellation")
+        let queue = DispatchQueue(label: "dev.mooring.tests.clipboard-cancellation")
         let sync = NativeClipboardSync(pasteboard: board, queue: queue)
         sync.onSend = { content, _ in original.append(content) }
         NativePasteboard.write(NativeClipboardContent(text: "original local copy"), to: board)

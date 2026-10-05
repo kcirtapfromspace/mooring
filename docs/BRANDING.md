@@ -8,7 +8,7 @@ The Threshold mark brings two places into reach. The name suggests a dependable 
 
 The approved [brand kit](brand-pivot/README.md) uses the exact Threshold silhouette. Marigold `#FFD447` and coral `#FF5277` sit on graphite `#242726`. Turquoise `#1CC9B7` supports the identity; small text and symbols use a darker teal in light appearance for contrast. Light windows use a subtle blush; dark windows use graphite. Primary buttons use graphite text on marigold. macOS supplies semantic selection, warning, error, checkbox, and focus colors.
 
-`app/MacLinkBrand.swift` renders the same geometry for all app icon sizes and the monochrome menu-bar template. `scripts/render-brand.swift` renders the iconset at build time. Internal file names remain MacLink for compatibility with existing packaging and updates.
+`app/MooringBrand.swift` renders the same geometry for all app icon sizes and the monochrome menu-bar template. `scripts/render-brand.swift` renders the iconset at build time.
 
 ## Words and hierarchy
 
@@ -22,6 +22,6 @@ Use the native system font and standard keyboard navigation. Avoid making action
 
 ## Compatibility and validation
 
-The visible app name is Mooring. Preserve `dev.maclink.launcher`, Keychain services, defaults, frame autosave names, application-support storage, protocol formats, the CLI name, and the update feed. The bundle directory and executable remain MacLink so current installation and release tooling continue to work. About identifies the transition as “Formerly MacLink.”
+Use Mooring throughout the app, CLI, source, packaging, and release copy. Keep the existing bundle identifier, signing key, Keychain services, saved-data directory for existing installations, and protocol wire constants stable so updates and paired Macs remain compatible. These identifiers are compatibility details, not product names.
 
 Run `./scripts/ci-local.sh` on this Apple silicon Mac. Inspect empty and populated states, Details, errors, pairing, sharing, settings, and light/dark appearance. UI review images use synthetic Macs and stay outside tracked source. Local tests and development builds do not replace notarized-download and real two-Mac release checks.

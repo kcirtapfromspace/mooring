@@ -1,10 +1,10 @@
-# MacLink 0.3.0 preview 23 — Reach your Mac from anywhere you can reach it
+# Mooring 0.3.0 preview 23 — Reach your Mac from anywhere you can reach it
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected. Update both Macs before pairing anew: earlier versions can't read the new pairing codes, and say "Paste the pairing code from Share This Mac on your other Mac" when given one.
 
 ## What went wrong
 
-Away from home, MacLink on the MacBook said "Operation timed out" while Apple Screen Sharing connected fine. A pairing code carried one address, the Mac Studio's local name `thinkstudio.local`, which only resolves on the home network. Screen Sharing was reaching the Mac Studio over Tailscale. MacLink never tried that route, and its attempts never reached the Mac Studio at all.
+Away from home, Mooring on the MacBook said "Operation timed out" while Apple Screen Sharing connected fine. A pairing code carried one address, the Mac Studio's local name `thinkstudio.local`, which only resolves on the home network. Screen Sharing was reaching the Mac Studio over Tailscale. Mooring never tried that route, and its attempts never reached the Mac Studio at all.
 
 ## What changes
 
@@ -16,7 +16,7 @@ Away from home, MacLink on the MacBook said "Operation timed out" while Apple Sc
 - **The address that connected is tried first next time.** At home that's usually the local name or the home IP; away, the VPN address.
 - **"Refused" means refused.** The viewing Mac stops reconnecting and asks you to pair again only when every address that answered refused it. One stale address that leads elsewhere no longer reads as being removed.
 
-Settings shows each paired Mac's main address, and how many others it has; hover to see them all. The **Address** field in **Connect with MacLink** is now rarely needed. An address typed there is tried first, along with the code's own.
+Settings shows each paired Mac's main address, and how many others it has; hover to see them all. The **Address** field in **Connect with Mooring** is now rarely needed. An address typed there is tried first, along with the code's own.
 
 ## Your existing pairing
 

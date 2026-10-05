@@ -1,5 +1,5 @@
 // Synthetic public-API feasibility probe. Never captures a screen or sends input.
-// Build with: xcrun swiftc -O scripts/encode-probe.swift -o /tmp/maclink-encode-probe
+// Build with: xcrun swiftc -O scripts/encode-probe.swift -o /tmp/mooring-encode-probe
 import Foundation
 import VideoToolbox
 import CoreMedia
@@ -71,7 +71,7 @@ func frame(_ index: Int) throws -> CVPixelBuffer {
             NSAttributedString.Key(kCTFontAttributeName as String): CTFontCreateWithName("Menlo" as CFString, CGFloat(10 + row), nil),
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(red: row % 2 == 0 ? 0.05 : 0.8, green: 0.2, blue: 0.7, alpha: 1)
         ]
-        let text = NSAttributedString(string: "MacLink synthetic frame \(index): let pixel = rgb(255, 0, 255); 0123456789", attributes: attributes)
+        let text = NSAttributedString(string: "Mooring synthetic frame \(index): let pixel = rgb(255, 0, 255); 0123456789", attributes: attributes)
         context.textPosition = CGPoint(x: 40, y: 380 + row * 25)
         CTLineDraw(CTLineCreateWithAttributedString(text), context)
     }
@@ -245,7 +245,7 @@ func probe(id: String, desiredProfile: String?, lowLatency: Bool, outputDirector
     return result
 }
 
-let outputDirectory = URL(fileURLWithPath: CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : NSTemporaryDirectory() + "maclink-encode-probe", isDirectory: true)
+let outputDirectory = URL(fileURLWithPath: CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : NSTemporaryDirectory() + "mooring-encode-probe", isDirectory: true)
 let ffprobePath = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "/opt/homebrew/bin/ffprobe"
 do {
     try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)

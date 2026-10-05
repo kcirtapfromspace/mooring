@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 11 — Trackpad gestures
+# Mooring 0.3.0 preview 11 — Trackpad gestures
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected.
 

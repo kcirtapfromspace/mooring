@@ -9,7 +9,7 @@ struct NativeSessionError: LocalizedError {
     var errorDescription: String? { message }
     /// Authentication failures mean the pairing changed; retrying cannot help.
     var isAuthenticationFailure: Bool { status == Int32(ML_SESSION_AUTH) }
-    /// The other Mac answered, but MacLink isn't sharing there.
+    /// The other Mac answered, but Mooring isn't sharing there.
     var isNotSharing: Bool { status == Int32(ML_SESSION_UNAVAILABLE) }
 }
 
@@ -186,7 +186,7 @@ struct NativeLegacyState: Equatable {
 }
 
 /// Macs approved to connect to this one, in Rust's store: public keys and
-/// names only. A nil directory selects MACLINK_HOME or Application Support.
+/// names only. A nil directory selects MOORING_HOME or Application Support.
 struct NativeDeviceStore {
     var directory: String?
 
@@ -225,7 +225,7 @@ struct NativePeer: Equatable {
 }
 
 /// Saved peer metadata lives in Rust's store: never secrets, at most 32 peers.
-/// A nil directory selects MACLINK_HOME or Application Support.
+/// A nil directory selects MOORING_HOME or Application Support.
 struct NativePeerStore {
     var directory: String?
 
@@ -306,13 +306,13 @@ struct NativeKeychain {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                    kSecAttrService as String: service, kSecAttrAccount as String: account]
         let updates: [String: Any] = [kSecValueData as String: data,
+                                     kSecAttrLabel as String: "Mooring paired connection",
                                      kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
         var status = SecItemUpdate(query as CFDictionary, updates as CFDictionary)
         if status == errSecItemNotFound {
             var insert = query
             updates.forEach { insert[$0.key] = $0.value }
             insert[kSecAttrSynchronizable as String] = false
-            insert[kSecAttrLabel as String] = "MacLink paired connection"
             status = SecItemAdd(insert as CFDictionary, nil)
         }
         guard status == errSecSuccess else { throw failure(status) }

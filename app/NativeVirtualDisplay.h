@@ -1,5 +1,5 @@
 // A virtual display sized to the viewing Mac's screen. The only use of a
-// private Apple API in MacLink (see AGENTS.md): CoreGraphics' CGVirtualDisplay,
+// private Apple API in Mooring (see AGENTS.md): CoreGraphics' CGVirtualDisplay,
 // which Apple's own Screen Sharing uses for High Performance sessions.
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>

@@ -17,7 +17,7 @@ enum NativeInputTests {
     static func main() throws {
         // No injector instance, permission request, global capture, or event post
         // is used by this executable. Validation and held-input policy are Rust's
-        // (cargo test -p maclink-session); these checks cover the Swift boundary.
+        // (cargo test -p mooring-session); these checks cover the Swift boundary.
         let down = try NativeInputEvent(kind: .keyDown, keyCode: 0, modifiers: [.command, .shift])
         let up = try NativeInputEvent(kind: .keyUp, keyCode: 0)
         let move = try NativeInputEvent(kind: .pointerMove, x: 0.25, y: 0.75)

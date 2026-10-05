@@ -81,9 +81,9 @@ struct NativeFrameTiming: Equatable {
     let decodeStartUs: UInt64
     let decodedUs: UInt64
     let presentedUs: UInt64
-    fileprivate static let hostKey = "MacLinkHostTimeUs" as CFString
-    fileprivate static let decodeStartKey = "MacLinkDecodeStartUs" as CFString
-    fileprivate static let decodedKey = "MacLinkDecodedUs" as CFString
+    fileprivate static let hostKey = "MooringHostTimeUs" as CFString
+    fileprivate static let decodeStartKey = "MooringDecodeStartUs" as CFString
+    fileprivate static let decodedKey = "MooringDecodedUs" as CFString
     static func attach(_ buffer: CVPixelBuffer, hostUs: UInt64, decodeStartUs: UInt64, decodedUs: UInt64) {
         for (key, value) in [(hostKey, hostUs), (decodeStartKey, decodeStartUs), (decodedKey, decodedUs)] {
             CVBufferSetAttachment(buffer, key, NSNumber(value: value), .shouldNotPropagate)
@@ -260,7 +260,7 @@ final class NativeVideoEncoder {
     /// send buffer holds too much for another frame. Set before encoding.
     var admitsFrame: (() -> Bool)?
     private let lock = NSLock()
-    private let queue = DispatchQueue(label: "MacLink.native.encode", qos: .userInteractive)
+    private let queue = DispatchQueue(label: "Mooring.native.encode", qos: .userInteractive)
     /// The newest frame refused while the encoder or the connection was
     /// busy. It is encoded as soon as they allow, so the last change always
     /// reaches the viewer even if the screen then stays still.
@@ -597,11 +597,11 @@ final class NativeCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     var onGeometry: ((NativeDisplayGeometry) -> Void)?
     var onEncodedFrame: ((NativeEncodedFrame, @escaping () -> Void) -> Void)?
     var onError: ((String) -> Void)?
-    /// This Mac's sound, excluding MacLink's own, on the audio queue; only
+    /// This Mac's sound, excluding Mooring's own, on the audio queue; only
     /// when created with `capturesAudio`.
     var onAudio: ((CMSampleBuffer) -> Void)?
-    private let captureQueue = DispatchQueue(label: "MacLink.native.capture", qos: .userInteractive)
-    private let audioQueue = DispatchQueue(label: "MacLink.native.capture.audio", qos: .userInteractive)
+    private let captureQueue = DispatchQueue(label: "Mooring.native.capture", qos: .userInteractive)
+    private let audioQueue = DispatchQueue(label: "Mooring.native.capture.audio", qos: .userInteractive)
     private let capturesAudio: Bool
     private let encoderLock = NSLock()
     private var encoder: NativeVideoEncoder?
@@ -834,7 +834,7 @@ final class NativeVideoDecoder {
     /// Milliseconds for each successfully decoded frame, on the decode queue.
     var onDecoded: ((Double) -> Void)?
     private let lock = NSLock()
-    private let queue = DispatchQueue(label: "MacLink.native.decode", qos: .userInteractive)
+    private let queue = DispatchQueue(label: "Mooring.native.decode", qos: .userInteractive)
     private var overflowCount: UInt64 = 0
     /// Packets discarded because decoding fell behind, since the decoder started.
     var overflows: UInt64 { lock.lock(); defer { lock.unlock() }; return overflowCount }

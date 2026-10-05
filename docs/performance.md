@@ -1,17 +1,17 @@
 # Performance and reliability acceptance plan
 
-**Status: proposed two-Mac targets, not comparative measured results.** MacLink has both an Apple Screen Sharing launcher/automation route and a native ScreenCaptureKit, VideoToolbox, encrypted Rust transport, decoder, input, audio, clipboard and Metal presentation route. Local synthetic hardware-codec and encrypted-loopback tests demonstrate that the native engine works; they do not establish physical two-Mac latency, throughput, fidelity or superiority over Apple Screen Sharing.
+**Status: proposed two-Mac targets, not comparative measured results.** Mooring has both an Apple Screen Sharing launcher/automation route and a native ScreenCaptureKit, VideoToolbox, encrypted Rust transport, decoder, input, audio, clipboard and Metal presentation route. Local synthetic hardware-codec and encrypted-loopback tests demonstrate that the native engine works; they do not establish physical two-Mac latency, throughput, fidelity or superiority over Apple Screen Sharing.
 
 The native flow policy uses live TCP send-queue and throughput observations to pace frames and adapt bitrate. The separate adaptive-quality policy below is still tested with simulated samples. The Apple-route TCP/RFB checks measure reachability and service readiness, not bandwidth, loss or video latency. Keep those three sources of evidence distinct.
 
 ## What to prove
 
-Use the same two Macs, displays, scaling, macOS versions, network path, and workloads for MacLink and Apple Screen Sharing High Performance. Do not compare a lower-resolution MacLink picture with a native-resolution Apple picture. Record physical pixels and logical desktop dimensions separately.
+Use the same two Macs, displays, scaling, macOS versions, network path, and workloads for Mooring and Apple Screen Sharing High Performance. Do not compare a lower-resolution Mooring picture with a native-resolution Apple picture. Record physical pixels and logical desktop dimensions separately.
 
 | Acceptance gate | Proposed initial target | Measurement |
 | --- | --- | --- |
 | Click-to-photon on healthy home LAN | p50 ≤ 35 ms; p95 ≤ 60 ms at native capture, 60 Hz presentation | External high-speed video; host-generated visual response to a client click |
-| Apple parity | Both p50 and p95 no more than 10% slower than Apple under the same workload, while also meeting the absolute LAN targets | Alternate Apple/MacLink runs; report both results, not only a ratio |
+| Apple parity | Both p50 and p95 no more than 10% slower than Apple under the same workload, while also meeting the absolute LAN targets | Alternate Apple/Mooring runs; report both results, not only a ratio |
 | Frame pacing | ≥ 58 presented fresh frames/sec during a 60 fps moving workload; p95 presentation interval ≤ 25 ms | Instrument actual presentation; exclude repeated frames from the count |
 | Backlog | One pending raw frame per capture/render handoff; no sustained application video queue exceeding one frame interval | Queue age and depth histogram; track decoder and GPU queues separately |
 | Usability | Already paired, awake Mac: p95 first usable frame ≤ 2 s after Connect | 30 cold and 30 warm application runs; separate authentication time |
@@ -75,4 +75,4 @@ Never discard arbitrary interdependent compressed packets to imitate a latest-fr
 - `ReconnectPolicy` starts at 250 ms, doubles delays, applies deterministic injected jitter within ±20%, clips actual delay at 8 seconds, and stops after eight failed attempts. Pending scheduling is idempotent. A successful connection resets the budget; explicit user Disconnect cannot be undone by a late success callback. Authentication and permission denials require a different path.
 - `PeerContext` keeps network path and pairing trust separate. A private IP, Bonjour name, or fast response never establishes identity. This metadata type does not implement pairing, credential verification or encryption; the native session crate implements those boundaries separately.
 
-Run `cargo test -p maclink-core` for policy, mailbox and retry tests, and `cargo run -p maclink-cli -- simulate` for serializable synthetic scenarios. These verify deterministic behavior only. Native scripted tests cover additional codec, encrypted-loopback and lifecycle boundaries; acceptance remains open until matched real two-Mac trials measure the native pipeline.
+Run `cargo test -p mooring-core` for policy, mailbox and retry tests, and `cargo run -p mooring-cli -- simulate` for serializable synthetic scenarios. These verify deterministic behavior only. Native scripted tests cover additional codec, encrypted-loopback and lifecycle boundaries; acceptance remains open until matched real two-Mac trials measure the native pipeline.

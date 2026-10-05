@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 17 — Faster decoding, and a lower-latency option
+# Mooring 0.3.0 preview 17 — Faster decoding, and a lower-latency option
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected.
 

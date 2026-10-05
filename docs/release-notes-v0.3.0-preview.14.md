@@ -1,4 +1,4 @@
-# MacLink 0.3.0 preview 14 — Measured latency
+# Mooring 0.3.0 preview 14 — Measured latency
 
 Installed copies of preview 6 or later update to this version by themselves when no session is connected.
 
@@ -7,7 +7,7 @@ Installed copies of preview 6 or later update to this version by themselves when
 The viewing Mac now measures, for every frame, the time from a change on the sharing Mac's screen to that frame appearing on its own display. While the picture is changing, the status bar shows it as "NN ms latency" in place of the network round trip.
 
 - **Clock placement:** once a second, the sharing Mac answers the viewing Mac's connection check with its own clock. The viewing Mac lines the two clocks up the way NTP does, and the result is accurate to within half the fastest recent round trip, usually well under a millisecond on a home network.
-- **Breakdown:** telemetry (`maclink telemetry`) splits the figure into:
+- **Breakdown:** telemetry (`mooring telemetry`) splits the figure into:
   - the part until decoding starts: capture, encoding, sending and the network;
   - decoding;
   - waiting for the next display refresh.
