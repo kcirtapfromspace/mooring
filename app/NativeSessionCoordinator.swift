@@ -343,7 +343,24 @@ final class NativeSessionCoordinator {
             controller.onClipboardChange = { [weak self] enabled in self?.sharesClipboard = enabled }
         }
         refreshShare()
+        refreshPrivacy()
         shareWindow?.showWindow(nil); shareWindow?.window?.center(); NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func refreshPrivacy() {
+        let local = NativeNetworkInfo.local()
+        MooringPrivacy.register(name: NativeDeviceKey.computerName, id: "this-mac", addresses: local.map(\.address))
+        for peer in peers { MooringPrivacy.register(name: peer.name, id: peer.id, addresses: peer.addresses) }
+        if let devices = approvedDevices()?.devices {
+            for device in devices { MooringPrivacy.register(name: device.name, id: device.id) }
+        }
+        if let window = viewerWindow {
+            let name = peers.first { $0.id == window.peerID }?.name ?? "Mac"
+            window.window?.title = name + " — Mooring"
+        }
+        pairWindow?.setPrivacy(MooringPrivacy.isEnabled)
+        NotificationCenter.default.post(name: MooringPrivacy.changed, object: nil)
+        refreshShare()
     }
 
     private func refreshShare(_ message: String? = nil) {
@@ -811,6 +828,16 @@ final class NativeSessionCoordinator {
                             NativeLog.session.notice("viewer runs Mooring \(version.name, privacy: .public) (build \(version.build))")
                             self.refreshShare()
                         }
+                    case .control(.revokePairing):
+                        // Rust has already persisted removal of the key this
+                        // session authenticated, before delivering the notice.
+                        channel.deliverControl { [weak self, weak channel] in
+                            guard let self, let channel, self.hostChannel === channel else { return }
+                            self.endHost(reason: "The viewing Mac removed this pairing. A new code is required.")
+                        }
+                        // This is terminal. Reading the sender's immediate EOF
+                        // would cancel the channel before its queued notice runs.
+                        return
                     case .control(.updateRequest):
                         channel.deliverControl { [weak self, weak channel] in
                             guard let self, let channel, self.hostChannel === channel else { return }
@@ -838,9 +865,12 @@ final class NativeSessionCoordinator {
         }
     }
 
-    private func endHost(reason: String) {
+    private func endHost(reason: String, revoking: Bool = false) {
         recordEnd("host", reason)
-        hostChannel?.close(); hostChannel = nil; hostAudioGate = nil; hostPeerVersion = nil
+        if revoking, let channel = hostChannel, channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_PAIRING_REVOCATION) != 0 {
+            channel.close(after: .control(.revokePairing))
+        } else { hostChannel?.close() }
+        hostChannel = nil; hostAudioGate = nil; hostPeerVersion = nil
         refreshClipboardScope(includeCurrent: false)
         cursorWatcher.stop()
         sharedDisplay.release(); pendingDisplayRequest = nil; displayRestarts = []
@@ -1014,7 +1044,7 @@ final class NativeSessionCoordinator {
         try deviceStore.remove(id)
         NativeLog.session.notice("an approved Mac was removed")
         if let channel = hostChannel, channel.transport.peerDevice == id {
-            endHost(reason: "The viewing Mac was removed in Settings.")
+            endHost(reason: "The viewing Mac was removed. Pair again with a new code.", revoking: true)
         }
         refreshShare()
     }
@@ -1045,12 +1075,22 @@ final class NativeSessionCoordinator {
             controller.onClose = { [weak self] in if self?.connecting?.pairing == true { self?.cancelConnect() } }
         }
         pairWindow?.setBusy(false); pairWindow?.error.stringValue = ""
+        pairWindow?.setPrivacy(MooringPrivacy.isEnabled)
         pairWindow?.showWindow(nil); pairWindow?.window?.center(); NSApp.activate(ignoringOtherApps: true)
     }
     /// Remove a pairing from this Mac: its saved metadata and its Keychain secret.
     func forget(peerID: String) throws {
-        try peerStore.forget(peerID)
+        // Erase the credential/key before removing the row. If Keychain refuses
+        // both deletion and erasure, keep the row and session intact for retry.
         try keychain.deletePeerCode(peerID)
+        try peerStore.forget(peerID)
+        if resumeAfterWake == peerID { resumeAfterWake = nil }
+        if connecting?.peerID == peerID { cancelConnect() }
+        if viewerWindow?.peerID == peerID {
+            disconnectViewer(reason: "This pairing was removed. Pair again with a new code.", revoking: true)
+            stopReconnecting()
+            viewerWindow?.showEnded(reason: "This pairing was removed. Pair again with a new code.")
+        }
         peers = (try? peerStore.load()) ?? peers.filter { $0.id != peerID }
     }
     /// A user's connect or Reconnect click; it starts a fresh reconnect budget.
@@ -1108,7 +1148,7 @@ final class NativeSessionCoordinator {
         guard attempt.isActive, connecting?.token === attempt, !capabilityGate.isStopped else { return }
         let peerID = code.peerID
         let deviceKey: NativeDeviceKey
-        do { deviceKey = try keychain.deviceKey() } catch {
+        do { deviceKey = try pairing ? NativeDeviceKey.create() : keychain.peerDeviceKey(peerID) } catch {
             connecting = nil
             if pairing { pairWindow?.setBusy(false) }
             connectFailed(error, peerID: peerID, pairing: pairing); return
@@ -1137,7 +1177,7 @@ final class NativeSessionCoordinator {
                             // The next connect moves over again if this can't be saved.
                             do {
                                 guard let saved else { throw NativeSessionError(message: "Internal error") }
-                                try self.keychain.savePeerCode(saved)
+                                try self.keychain.savePeerCode(saved, deviceKey: deviceKey)
                             } catch { NativeLog.session.error("the device pairing couldn't be saved; the next connection moves over again") }
                         }
                         // The address that worked is tried first next time.
@@ -1152,7 +1192,7 @@ final class NativeSessionCoordinator {
                         guard let saved else { throw NativeSessionError(message: "Internal error") }
                         // Keychain is required to reconnect later. The menu list is a
                         // convenience: an unwritable peer file must not block this session.
-                        try self.keychain.savePeerCode(saved)
+                        try self.keychain.savePeerCode(saved, deviceKey: deviceKey)
                         let tried = [used] + addresses.filter { $0 != used }
                         let peer = (try? self.peerStore.remember(code, tried: tried)) ?? NativePeer(code: code, address: used)
                         self.peers = (try? self.peerStore.load()) ?? self.peers
@@ -1265,6 +1305,7 @@ final class NativeSessionCoordinator {
     /// `pairing`: the clipboard may still hold the code just pasted, so what is
     /// already copied is not shared for this first session.
     private func beginViewer(_ transport: NativeTransport, peer: NativePeer, activate: Bool, pairing: Bool = false) {
+        MooringPrivacy.register(name: peer.name, id: peer.id, addresses: peer.addresses)
         let channel = NativeSessionChannel(transport), decoder = NativeVideoDecoder()
         viewerChannel = channel; self.decoder = decoder; lastViewerMeasurements = channel.measurements
         firstFrame = false; viewerInputEnabled = false; pendingPing = nil; lastPresented = 0; lastStatusTime = uptime
@@ -1425,6 +1466,12 @@ final class NativeSessionCoordinator {
                         channel.measurements.set("video_codec", Double(packet.codec.raw))
                         _ = decoder.decode(packet)
                         channel.measurements.set("decoder_overflows", Double(decoder.overflows))
+                    case .control(.revokePairing):
+                        channel.deliverControl { [weak self, weak channel] in
+                            guard let self, let channel, self.viewerChannel === channel else { return }
+                            self.apply(.revokePairing, channel: channel)
+                        }
+                        return
                     case .control(let control):
                         channel.deliverControl { [weak self, weak channel] in
                             guard let self, let channel, self.viewerChannel === channel, channel.token.isActive else { return }
@@ -1487,6 +1534,13 @@ final class NativeSessionCoordinator {
             peerUpdate = (state, ready, uptime)
             NativeLog.updates.notice("sharing Mac update check: \(String(describing: state), privacy: .public)")
             refreshVersionNotice()
+        case .revokePairing:
+            let peerID = viewerWindow?.peerID
+            disconnectViewer(reason: "The sharing Mac removed this pairing. Pair again with a new code.")
+            if let peerID {
+                // A failed Keychain cleanup must never restart a revoked session.
+                try? keychain.deletePeerCode(peerID)
+            }
         case .ping, .keyframe, .displayRequest, .updateRequest, .leaving:
             break
         }
@@ -1688,7 +1742,7 @@ final class NativeSessionCoordinator {
     /// `reconnect` is set only for an unexpected end. Privacy, sleep, quitting
     /// and closing the window end any reconnecting instead. `leaving`: the
     /// user ended it, so a sharing Mac that waits for dropped viewers is told.
-    func disconnectViewer(reason: String, reconnect: Bool = false, leaving: Bool = false) {
+    func disconnectViewer(reason: String, reconnect: Bool = false, leaving: Bool = false, revoking: Bool = false) {
         if !reconnect { endReconnecting(reason: reason) }
         if leaving { resumeAfterWake = nil }
         // Privacy and sleep events call this with no session; leave any window
@@ -1699,7 +1753,9 @@ final class NativeSessionCoordinator {
         let lasted = uptime - viewerStarted
         recordEnd("viewer", reason); lastViewerEnd = reason
         releaseViewerInput()
-        if leaving && channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_WAITS) != 0 {
+        if revoking && channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_PAIRING_REVOCATION) != 0 {
+            channel.close(after: .control(.revokePairing))
+        } else if leaving && channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_WAITS) != 0 {
             channel.close(after: .control(.leaving))
         } else {
             channel.close()
@@ -1918,7 +1974,7 @@ final class NativeSessionCoordinator {
         catch { showError("Could not save diagnostics: \(error.localizedDescription)") }
     }
     private func showError(_ message: String) {
-        let alert = NSAlert(); alert.messageText = "Mooring connection"; alert.informativeText = message; alert.runModal()
+        let alert = NSAlert(); alert.messageText = "Mooring connection"; alert.informativeText = MooringPrivacy.redact(message); alert.runModal()
     }
     func stop() {
         capabilityGate.stop()

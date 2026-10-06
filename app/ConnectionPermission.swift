@@ -10,7 +10,7 @@ final class ConnectionPermissionController: NSWindowController, NSWindowDelegate
     private let allow = NSButton(title: "Enable & Connect…", target: nil, action: nil)
 
     init(macName: String) {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 330),
+        let window = MooringPrivacyWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 330),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Connect to \(macName)"
         MooringAppearance.prepare(window)

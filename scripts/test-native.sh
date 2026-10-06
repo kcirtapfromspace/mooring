@@ -5,7 +5,7 @@ cd "$project_root"
 mkdir -p target
 swiftc -swift-version 5 -warnings-as-errors -parse-as-library \
   -target arm64-apple-macosx14.0 -framework AppKit \
-  app/MooringBrand.swift app/MooringStatusMenu.swift scripts/test-status-menu.swift \
+  app/MooringBrand.swift app/MooringPrivacy.swift app/MooringStatusMenu.swift scripts/test-status-menu.swift \
   -o target/mooring-status-menu-tests
 target/mooring-status-menu-tests
 swiftc -swift-version 5 -warnings-as-errors -parse-as-library \

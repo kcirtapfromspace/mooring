@@ -1992,6 +1992,43 @@ pub unsafe extern "C" fn ml_pairing_code_for_host(
         code_out(&code, out)
     })
 }
+/// A bounded JSON inventory of this Mac's assigned IP addresses.
+/// # Safety
+/// `out` is writable for `capacity` bytes, at least 65536.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_local_network_info(out: *mut c_char, capacity: usize) -> i32 {
+    ffi(|| {
+        if out.is_null() || capacity < 65536 {
+            return Err(Error::Invalid);
+        }
+        // SAFETY: caller promises this writable range.
+        let target = unsafe { &mut *(out as *mut [c_char; 65536]) };
+        target.fill(0);
+        let json = serde_json::to_string(&crate::addresses::network_info())
+            .map_err(|_| Error::Internal)?;
+        write_text(target, &json)
+    })
+}
+/// Readable address scope for presentation.
+/// # Safety
+/// `address` is NUL terminated; `out` writable for `capacity` (at least ML_TEXT_CAPACITY).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_address_description(
+    address: *const c_char,
+    out: *mut c_char,
+    capacity: usize,
+) -> i32 {
+    ffi(|| {
+        if out.is_null() || capacity < ML_TEXT_CAPACITY {
+            return Err(Error::Invalid);
+        }
+        // SAFETY: caller promises this writable range.
+        let target = unsafe { &mut *(out as *mut [c_char; ML_TEXT_CAPACITY]) };
+        target.fill(0);
+        let address = normalize_address(&unsafe { text(address)? })?;
+        write_text(target, crate::addresses::description(&address))
+    })
+}
 /// This Mac's network addresses for its pairing codes, best first, separated
 /// by single spaces (see addresses.rs); empty if there are none.
 /// # Safety
@@ -2108,6 +2145,74 @@ pub unsafe extern "C" fn ml_pairing_credential_decode(
         // SAFETY: caller promises `length` readable bytes.
         let bytes = unsafe { std::slice::from_raw_parts(data, length) };
         code_out(&PairingCode::from_credential(bytes)?, out)
+    })
+}
+
+/// Encode a Keychain-only credential and this pairing's private device key.
+/// # Safety
+/// `code` readable; `private_key` readable for 32 bytes; `out` writable for
+/// `capacity` (at least 2048); `length` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_pairing_keyed_credential_encode(
+    code: *const MLPairingCode,
+    private_key: *const u8,
+    out: *mut u8,
+    capacity: usize,
+    length: *mut usize,
+) -> i32 {
+    ffi(|| {
+        let length = unsafe { output(length)? };
+        *length = 0;
+        if out.is_null() || capacity < 2048 {
+            return Err(Error::Invalid);
+        }
+        let private_key = unsafe { key(private_key)? };
+        let bytes = code_in(unsafe { input_ref(code)? })?.keyed_credential(&private_key)?;
+        if bytes.len() > capacity {
+            return Err(Error::Invalid);
+        }
+        // SAFETY: caller promises this writable range.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
+        *length = bytes.len();
+        Ok(())
+    })
+}
+/// Decode a keyed or earlier raw credential. has_key is 0 for an earlier item.
+/// # Safety
+/// `data` readable for `length`; `out`, `has_key` writable; `private_key`
+/// writable for 32 bytes. Failed decoding clears all outputs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_pairing_keyed_credential_decode(
+    data: *const u8,
+    length: usize,
+    out: *mut MLPairingCode,
+    private_key: *mut u8,
+    has_key: *mut u8,
+) -> i32 {
+    ffi(|| {
+        let out = unsafe { output(out)? };
+        *out = MLPairingCode::EMPTY;
+        let has_key = unsafe { output(has_key)? };
+        *has_key = 0;
+        if data.is_null() || private_key.is_null() {
+            return Err(Error::Invalid);
+        }
+        // SAFETY: caller promises this writable 32-byte range.
+        let key_out = unsafe { &mut *private_key.cast::<[u8; 32]>() };
+        key_out.fill(0);
+        if length > 2048 {
+            return Err(Error::Invalid);
+        }
+        // SAFETY: caller promises this readable range.
+        let (code, private_key) = PairingCode::from_keyed_credential(unsafe {
+            std::slice::from_raw_parts(data, length)
+        })?;
+        code_out(&code, out)?;
+        if let Some(key) = private_key {
+            key_out.copy_from_slice(key.as_ref());
+            *has_key = 1;
+        }
+        Ok(())
     })
 }
 

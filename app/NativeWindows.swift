@@ -19,7 +19,7 @@ final class NativeShareWindow: NSWindowController, NSWindowDelegate {
     let clipboard = NSButton(checkboxWithTitle: "Share clipboard with the connected Mac", target: nil, action: nil)
 
     init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 620),
+        let window = MooringPrivacyWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 620),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "Share this Mac"
         MooringAppearance.prepare(window)
@@ -77,7 +77,7 @@ final class NativePairWindow: NSWindowController, NSWindowDelegate, NSTextFieldD
     private var addressForm: NSStackView!
     private var busy = false
     init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 380),
+        let window = MooringPrivacyWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 380),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Pair a Mac"
         MooringAppearance.prepare(window)
@@ -130,6 +130,11 @@ final class NativePairWindow: NSWindowController, NSWindowDelegate, NSTextFieldD
         addressForm.isHidden = !expanded
         options.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
         window?.setContentSize(NSSize(width: 560, height: expanded ? 460 : 380))
+    }
+    func setPrivacy(_ hidden: Bool) {
+        addressForm.isHidden = hidden || options.state != .on
+        options.isHidden = hidden
+        if hidden { options.state = .off }
     }
     func controlTextDidChange(_ obj: Notification) {
         connect.isEnabled = !busy && !code.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -323,7 +328,7 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
     private let exitFullScreen = NSButton(title: "Exit Full Screen", target: nil, action: nil)
     init(name: String, peerID: String, showsDiagnosticBar: Bool = true) {
         self.peerID = peerID
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
+        let window = MooringPrivacyWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
         window.title = name + " — Mooring"
         MooringAppearance.prepare(window)

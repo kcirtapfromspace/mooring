@@ -46,6 +46,8 @@ pub(crate) const CAPABILITY_REMOTE_UPDATE: u64 = 1 << 7;
 /// while the display sleeps and wake it for a returning viewer instead.
 /// Viewers still tell an older host that announces it they are leaving.
 pub(crate) const CAPABILITY_WAITS: u64 = 1 << 8;
+/// Either side can revoke its own authenticated pairing during a session.
+pub(crate) const CAPABILITY_PAIRING_REVOCATION: u64 = 1 << 9;
 /// How long a sharing Mac whose display slept, or whose screen was covered,
 /// waits after waking it for an approved viewer before it can share. A cover
 /// that needs no password usually lifts quickly, but may need another remote
@@ -202,6 +204,7 @@ impl Role {
                     | ControlKind::Clock
                     | ControlKind::Version
                     | ControlKind::UpdateStatus
+                    | ControlKind::RevokePairing
             ),
             Self::Viewer => matches!(
                 kind,
@@ -212,6 +215,7 @@ impl Role {
                     | ControlKind::Version
                     | ControlKind::UpdateRequest
                     | ControlKind::Leaving
+                    | ControlKind::RevokePairing
             ),
         }
     }
@@ -339,6 +343,12 @@ impl ReceivePolicy {
             {
                 return Err(Error::Protocol);
             }
+            Incoming::Control(ControlMessage::RevokePairing)
+                if self.version < 5
+                    || self.local_capabilities & CAPABILITY_PAIRING_REVOCATION == 0 =>
+            {
+                return Err(Error::Protocol);
+            }
             // Clock replies only reach a viewer that announced it measures latency.
             Incoming::Control(ControlMessage::Clock { .. })
                 if self.version < 5 || self.local_capabilities & CAPABILITY_LATENCY == 0 =>
@@ -437,6 +447,27 @@ mod tests {
     use crate::input::{InputEvent, InputKind};
     use crate::telemetry::Tuning;
     use crate::video::{VideoHeader, VideoPacket};
+
+    #[test]
+    fn pairing_revocation_requires_negotiated_support_in_both_directions() {
+        let now = Instant::now();
+        for role in [Role::Host, Role::Viewer] {
+            assert!(role.may_send_control(ControlKind::RevokePairing));
+            for (version, capabilities) in [(4, CAPABILITY_PAIRING_REVOCATION), (5, 0)] {
+                let mut policy = ReceivePolicy::for_version(role, version, capabilities, now);
+                assert_eq!(
+                    policy.admit(&Incoming::Control(ControlMessage::RevokePairing), now),
+                    Err(Error::Protocol)
+                );
+            }
+            let mut policy =
+                ReceivePolicy::for_version(role, 5, CAPABILITY_PAIRING_REVOCATION, now);
+            assert_eq!(
+                policy.admit(&Incoming::Control(ControlMessage::RevokePairing), now),
+                Ok(Admission::Deliver)
+            );
+        }
+    }
 
     #[test]
     fn host_wake_retries_a_stalled_shield_then_finishes_when_ready() {

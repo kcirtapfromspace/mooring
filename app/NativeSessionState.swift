@@ -75,6 +75,7 @@ enum NativeControlMessage: Equatable {
     /// Protocol 5, viewer to a sharing Mac that waits for dropped viewers:
     /// this viewer is ending the session on purpose.
     case leaving
+    case revokePairing
 
     var raw: MLControlMessage {
         var raw = MLControlMessage()
@@ -100,6 +101,7 @@ enum NativeControlMessage: Equatable {
             raw.kind = UInt8(ML_CONTROL_UPDATE_STATUS); raw.geometry.pixel_height = state.rawValue
             if state == .ready, let ready { raw.ping_id = ready.release; raw.geometry.pixel_width = ready.build }
         case .leaving: raw.kind = UInt8(ML_CONTROL_LEAVING)
+        case .revokePairing: raw.kind = UInt8(ML_CONTROL_REVOKE_PAIRING)
         }
         return raw
     }
@@ -126,6 +128,7 @@ enum NativeControlMessage: Equatable {
             let ready = state == .ready ? NativeVersion(build: raw.geometry.pixel_width, release: raw.ping_id) : nil
             self = .updateStatus(state, ready: ready)
         case ML_CONTROL_LEAVING: self = .leaving
+        case ML_CONTROL_REVOKE_PAIRING: self = .revokePairing
         default: throw NativeSessionError(message: "The other Mac sent an unsupported session command.")
         }
     }
@@ -220,7 +223,7 @@ final class NativeFlowLimit: @unchecked Sendable {
 enum NativeCapabilities {
     static func local(hevc444: Bool, virtualDisplay: Bool, audio: Bool, updatesItself: Bool = false) -> UInt64 {
         var capabilities = UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_GESTURES) | UInt64(ML_CAPABILITY_LATENCY)
-            | UInt64(ML_CAPABILITY_VERSION)
+            | UInt64(ML_CAPABILITY_VERSION) | UInt64(ML_CAPABILITY_PAIRING_REVOCATION)
         if hevc444 { capabilities |= UInt64(ML_CAPABILITY_HEVC_444) }
         if virtualDisplay { capabilities |= UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) }
         if audio { capabilities |= UInt64(ML_CAPABILITY_AUDIO) }

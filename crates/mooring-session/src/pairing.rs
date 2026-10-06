@@ -23,6 +23,23 @@ pub(crate) const MAX_NAME_BYTES: usize = 160;
 const PREFIX: &str = "MLP1.";
 const ONE_TIME_PREFIX: &str = "MLP2.";
 
+/// A Keychain-only envelope. Its binary fields use standard padded base64;
+/// temporary encoded/decoded copies are cleared, and no Debug is implemented.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeyedCredential {
+    version: u32,
+    code: String,
+    #[serde(rename = "privateKey")]
+    private_key: String,
+}
+impl Drop for KeyedCredential {
+    fn drop(&mut self) {
+        self.code.zeroize();
+        self.private_key.zeroize();
+    }
+}
+
 /// Pairing envelopes remain private even when embedded in another copied item,
 /// expired, or incomplete. Keep this rule beside the encoder's supported kinds.
 pub(crate) fn contains_pairing_secret(bytes: &[u8]) -> bool {
@@ -395,6 +412,36 @@ impl PairingCode {
             .or_else(|_| Self::from_json(bytes, 3, CodeKind::Device))
     }
 
+    pub(crate) fn keyed_credential(&self, private_key: &[u8; 32]) -> Result<Zeroizing<Vec<u8>>> {
+        let wire = KeyedCredential {
+            version: 1,
+            code: base64_encode(&self.credential()?),
+            private_key: base64_encode(private_key),
+        };
+        serde_json::to_vec(&wire)
+            .map(Zeroizing::new)
+            .map_err(|_| Error::Internal)
+    }
+
+    /// Return None for the private key in an earlier raw credential, preserving
+    /// its existing device identity. An invalid/future envelope fails closed.
+    pub(crate) fn from_keyed_credential(
+        bytes: &[u8],
+    ) -> Result<(Self, Option<Zeroizing<[u8; 32]>>)> {
+        if bytes.len() > 2048 {
+            return Err(Error::Invalid);
+        }
+        if let Ok(wire) = serde_json::from_slice::<KeyedCredential>(bytes) {
+            if wire.version != 1 {
+                return Err(Error::Invalid);
+            }
+            let code = Zeroizing::new(base64_decode(&wire.code).ok_or(Error::Invalid)?);
+            let private_key = Zeroizing::new(key(&wire.private_key)?);
+            return Ok((Self::from_credential(&code)?, Some(private_key)));
+        }
+        Ok((Self::from_credential(bytes)?, None))
+    }
+
     /// The text a person copies: `MLP1.` for an old code, `MLP2.` for a
     /// one-time code. A device pairing is not a code.
     pub(crate) fn encode(&self) -> Result<Zeroizing<String>> {
@@ -432,6 +479,48 @@ impl PairingCode {
 pub(crate) mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn keyed_credentials_are_strict_bounded_and_keep_earlier_pairings_readable() {
+        let original = code().device();
+        let saved = original.keyed_credential(&[9; 32]).unwrap();
+        let (restored, key) = PairingCode::from_keyed_credential(&saved).unwrap();
+        assert_eq!(restored, original);
+        assert_eq!(key.unwrap().as_ref(), &[9; 32]);
+        assert!(
+            PairingCode::from_keyed_credential(&original.credential().unwrap())
+                .unwrap()
+                .1
+                .is_none()
+        );
+        let wire: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+        for (field, value) in [
+            ("version", serde_json::json!(2)),
+            ("privateKey", serde_json::json!(base64_encode(&[9; 31]))),
+            ("extra", serde_json::json!(true)),
+        ] {
+            let mut invalid = wire.clone();
+            invalid[field] = value;
+            assert!(
+                PairingCode::from_keyed_credential(&serde_json::to_vec(&invalid).unwrap()).is_err()
+            );
+        }
+        assert!(PairingCode::from_keyed_credential(&vec![0; 2049]).is_err());
+        let address = [
+            "x".repeat(63),
+            "x".repeat(63),
+            "x".repeat(63),
+            "x".repeat(61),
+        ]
+        .join(".");
+        let largest = PairingCode::new(&address, &"\"".repeat(160), [1; 32], [2; 32]).unwrap();
+        let encoded = largest.keyed_credential(&[3; 32]).unwrap();
+        assert!(encoded.len() < 2048);
+        assert_eq!(
+            PairingCode::from_keyed_credential(&encoded).unwrap().0,
+            largest
+        );
+    }
 
     #[test]
     fn every_secret_bearing_envelope_is_private_in_copied_content() {

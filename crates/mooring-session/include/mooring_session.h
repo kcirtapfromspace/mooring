@@ -98,7 +98,9 @@ enum {
     /* protocol 5, viewer to a host with ML_CAPABILITY_WAITS, all fields zero:
      * this viewer is ending the session on purpose. Sent just before closing;
      * without it, the host waits for the viewer to come back. */
-    ML_CONTROL_LEAVING = 12
+    ML_CONTROL_LEAVING = 12,
+    /* Either side removed this pairing; only its authenticated key is revoked. */
+    ML_CONTROL_REVOKE_PAIRING = 13
 };
 enum {
     ML_INPUT_KEY_DOWN = 1, ML_INPUT_KEY_UP = 2, ML_INPUT_POINTER_MOVE = 3,
@@ -126,6 +128,7 @@ enum {
 #define ML_ADDRESSES_MAX 8u /* a code or saved Mac lists at most this many addresses */
 #define ML_PAIRING_CODE_CAPACITY 2049u
 #define ML_CREDENTIAL_CAPACITY 1024u
+#define ML_KEYED_CREDENTIAL_CAPACITY 2048u
 #define ML_PEERS_MAX 32u
 #define ML_DEVICES_MAX 32u
 #define ML_PAIRING_LIFETIME_SECONDS 600u /* a one-time code works this long, once */
@@ -154,6 +157,7 @@ enum { ML_CODEC_H264 = 1, ML_CODEC_HEVC = 2 };
 #define ML_CAPABILITY_LATENCY 32ull /* clock replies and latency metrics; peers without it never receive them */
 #define ML_CAPABILITY_VERSION 64ull /* sends and reads the Mooring version and update status */
 #define ML_CAPABILITY_REMOTE_UPDATE 128ull /* a sharing Mac that updates itself when a viewer asks */
+#define ML_CAPABILITY_PAIRING_REVOCATION 512ull /* authenticated pairing removal in either direction */
 #define ML_CAPABILITY_WAITS 256ull /* previews 22-28: a sharing Mac that waits 12 h for a viewer whose session dropped */
 /* A sharing Mac whose display slept, or whose screen was covered, waits this
  * long while retrying remote activity for an approved viewer. Capture still
@@ -637,6 +641,10 @@ int32_t ml_pairing_code_for_host(const char *address, const char *computer_name,
  * VPN, at most seven, separated by single spaces. capacity must be at least
  * ML_ALTERNATES_CAPACITY. */
 int32_t ml_local_addresses(char *out, size_t capacity);
+/* Display-only inventory, including IPv6/scoped addresses and inactive
+ * interfaces. JSON array; capacity at least 65536. Never used as connect input. */
+int32_t ml_local_network_info(char *out, size_t capacity);
+int32_t ml_address_description(const char *address, char *out, size_t capacity);
 /* The saved pairing once this Mac is approved: same sharing Mac, no secret. */
 int32_t ml_pairing_device(const MLPairingCode *code, MLPairingCode *out);
 /* Connects with a pasted code or saved pairing, proving this Mac's device key
@@ -671,6 +679,10 @@ int32_t ml_pairing_code_encode(const MLPairingCode *code, char *out, size_t capa
 int32_t ml_pairing_code_parse(const char *text, MLPairingCode *out);
 int32_t ml_pairing_credential_encode(const MLPairingCode *code, uint8_t *out, size_t capacity, size_t *length);
 int32_t ml_pairing_credential_decode(const uint8_t *data, size_t length, MLPairingCode *out);
+/* Keychain-only per-peer key envelope; encode capacity at least 2048. Decode
+ * accepts earlier raw credentials with has_key=0 and zero key output. */
+int32_t ml_pairing_keyed_credential_encode(const MLPairingCode *code, const uint8_t *private_key, uint8_t *out, size_t capacity, size_t *length);
+int32_t ml_pairing_keyed_credential_decode(const uint8_t *data, size_t length, MLPairingCode *out, uint8_t *private_key, uint8_t *has_key);
 
 /* Saved peer metadata (never secrets). NULL directory selects MOORING_HOME or
  * ~/Library/Application Support/Mooring. Most recent first; at most 32. */

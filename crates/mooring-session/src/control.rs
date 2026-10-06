@@ -67,6 +67,8 @@ pub(crate) enum ControlKind {
     /// Protocol 5, viewer to a host that waits for dropped viewers: this
     /// viewer is ending the session on purpose, so the host needn't wait.
     Leaving = 12,
+    /// Either side removed this authenticated pairing; all fields zero.
+    RevokePairing = 13,
 }
 
 /// A Mooring release like 0.3.0-preview.19, packed as major, minor, patch
@@ -177,6 +179,7 @@ pub(crate) enum ControlMessage {
         release: Release,
     },
     Leaving,
+    RevokePairing,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -272,6 +275,7 @@ impl ControlMessage {
             }
             10 if !enabled && geometry.is_zero() && ping_id == 0 => Self::UpdateRequest,
             12 if !enabled && geometry.is_zero() && ping_id == 0 => Self::Leaving,
+            13 if !enabled && geometry.is_zero() && ping_id == 0 => Self::RevokePairing,
             11 if !enabled
                 && [geometry.x, geometry.y, geometry.width, geometry.height] == [0.0; 4] =>
             {
@@ -313,6 +317,7 @@ impl ControlMessage {
             Self::UpdateRequest => ControlKind::UpdateRequest,
             Self::UpdateStatus { .. } => ControlKind::UpdateStatus,
             Self::Leaving => ControlKind::Leaving,
+            Self::RevokePairing => ControlKind::RevokePairing,
         }
     }
 
@@ -348,7 +353,9 @@ impl ControlMessage {
                     ..DisplayGeometry::default()
                 },
             ),
-            Self::UpdateRequest | Self::Leaving => (0, 0, DisplayGeometry::default()),
+            Self::UpdateRequest | Self::Leaving | Self::RevokePairing => {
+                (0, 0, DisplayGeometry::default())
+            }
             Self::UpdateStatus {
                 state,
                 build,
@@ -469,6 +476,7 @@ mod tests {
                 release: Release(0),
             },
             ControlMessage::Leaving,
+            ControlMessage::RevokePairing,
         ];
         for message in messages {
             assert_eq!(ControlMessage::decode(&message.encode()).unwrap(), message);
@@ -684,8 +692,11 @@ mod tests {
             (12, 1, 0, zero), // leaving carries nothing
             (12, 0, 1, zero),
             (12, 0, 0, display),
+            (13, 1, 0, zero), // revocation carries nothing
+            (13, 0, 1, zero),
+            (13, 0, 0, display),
             (0, 0, 0, zero), // unknown kinds
-            (13, 0, 0, zero),
+            (14, 0, 0, zero),
         ] {
             assert!(ControlMessage::from_parts(kind, enabled, id, value).is_err());
         }

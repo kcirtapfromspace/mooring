@@ -23,13 +23,36 @@ seven, each valid by the host rule. The secret lives only in the listener's memo
 and a newer code replaces an unused one. After approval the viewer saves a device pairing: the
 same fields at `version` 3 with no secret. Codes from before per-device keys are
 `MLP1.` at `version` 1 with the sharing Mac's long-lived secret. Keychain credentials
-hold the same JSON, so pairings saved by earlier builds remain readable.
+hold that JSON for earlier pairings. The native Keychain boundary also accepts a
+versioned envelope containing the Rust-encoded credential and a per-peer device
+private key; fresh pairings use independent keys for each sharing Mac. Existing
+pairings keep using their earlier device key until explicitly paired again.
 
 The sharing Mac's approved devices (`native-devices.json`) hold each key's ID,
 public key, name, and when it paired and last connected, at most 32, with the peer
 list's file conventions. The same file says whether the long-lived secret is still
 accepted: only on a sharing Mac whose identity existed before per-device keys, and
-until a week after the first Mac moves over, or until stopped. Reset clears it.
+until a week after the first Mac moves over, or until stopped. Removed key IDs are
+remembered while that legacy code is accepted, preventing a removed key from
+migrating again with it. A fresh one-time code can authorize the key again. The
+history holds at most 128 IDs; at capacity, legacy approval stops instead of
+forgetting revoked keys, and already approved devices remain authorized. Reset
+clears approvals and revocation history.
+
+Protocol 5 capability `ML_CAPABILITY_PAIRING_REVOCATION` enables the all-zero
+`ML_CONTROL_REVOKE_PAIRING` control in either direction. On the sharing side Rust
+removes only the key authenticated by that session, persists that removal before
+delivering the notice, and closes on a storage failure. The native shell stops
+capture/input or viewer reconnection immediately. Notices are sent before bounded
+channel close and only to a peer that announced support. Offline or older-peer
+removal still erases the local credential and requires a new one-time code, but
+cannot clean up an unreachable/older host's approval list.
+
+`ml_local_network_info` supplies a separate bounded display inventory of assigned
+IPv4/IPv6 addresses, scope labels and active state by interface; it includes
+loopback, link-local, bridges, tunnels and inactive interfaces. It never expands
+the seven alternate addresses in pairing codes or feeds scoped IPv6 addresses
+into the connection rule.
 Addresses use the project's single host rule (`mooring_platform::validate_host`) and
 are normalized. Names are 1–160 UTF-8 bytes without control or format characters;
 the sharing Mac's own computer name is normalized rather than rejected. A peer ID is

@@ -260,6 +260,11 @@ struct NativePeerStore {
 /// Secrets never enter preferences, diagnostic files, CLI arguments or logs.
 struct NativeKeychain {
     private let service = (Bundle.main.bundleIdentifier ?? "dev.maclink.launcher") + ".native-pairing.v1"
+    // Injectable Security boundary: tests use an isolated in-memory store.
+    var copyItem: (CFDictionary, UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus = SecItemCopyMatching
+    var updateItem: (CFDictionary, CFDictionary) -> OSStatus = SecItemUpdate
+    var addItem: (CFDictionary, UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus = SecItemAdd
+    var deleteItem: (CFDictionary) -> OSStatus = SecItemDelete
 
     func hostIdentity() throws -> NativeHostIdentity? {
         guard let data = try read("host") else { return nil }
@@ -281,14 +286,50 @@ struct NativeKeychain {
         try save("device", data: key.privateKey)
         return key
     }
-    func peerCode(_ peerID: String) throws -> NativePairingCode? {
-        try read("peer-" + peerID).map(NativePairingCode.fromCredential)
+    private func pairing(_ peerID: String) throws -> (code: NativePairingCode, key: NativeDeviceKey?)? {
+        guard let data = try read("peer-" + peerID), !data.isEmpty else { return nil }
+        var raw = MLPairingCode(), hasKey: UInt8 = 0
+        var key = [UInt8](repeating: 0, count: 32)
+        defer { for index in key.indices { key[index] = 0 } }
+        let status = data.withUnsafeBytes { bytes in
+            ml_pairing_keyed_credential_decode(bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count, &raw, &key, &hasKey)
+        }
+        let code = NativePairingCode(raw: raw)
+        guard status == ML_SESSION_OK, code.peerID == peerID else {
+            throw NativeSessionError(message: "The saved pairing is invalid. Pair the Macs again.")
+        }
+        return (code, hasKey == 1 ? NativeDeviceKey(privateKey: Data(key)) : nil)
     }
-    func savePeerCode(_ code: NativePairingCode) throws { try save("peer-" + code.peerID, data: code.credential()) }
+    func peerCode(_ peerID: String) throws -> NativePairingCode? { try pairing(peerID)?.code }
+    /// Earlier pairings retain their device key until explicitly paired again.
+    func peerDeviceKey(_ peerID: String) throws -> NativeDeviceKey {
+        if let key = try pairing(peerID)?.key { return key }
+        return try deviceKey()
+    }
+    func savePeerCode(_ code: NativePairingCode, deviceKey: NativeDeviceKey? = nil) throws {
+        guard let deviceKey else { try save("peer-" + code.peerID, data: code.credential()); return }
+        guard deviceKey.privateKey.count == 32 else { throw NativeSessionError(message: "Invalid pairing key.") }
+        var raw = code.raw, length = 0
+        var bytes = [UInt8](repeating: 0, count: Int(ML_KEYED_CREDENTIAL_CAPACITY))
+        defer { for index in bytes.indices { bytes[index] = 0 } }
+        let status = deviceKey.privateKey.withUnsafeBytes { key in
+            ml_pairing_keyed_credential_encode(&raw, key.bindMemory(to: UInt8.self).baseAddress!, &bytes, bytes.count, &length)
+        }
+        try NativeTransport.check(status)
+        try save("peer-" + code.peerID, data: Data(bytes.prefix(length)))
+    }
     func deletePeerCode(_ peerID: String) throws {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                    kSecAttrService as String: service, kSecAttrAccount as String: "peer-" + peerID]
-        let status = SecItemDelete(query as CFDictionary)
+        let status = deleteItem(query as CFDictionary)
+        // Some existing login-Keychain items allow updating their password but
+        // not editing their owner ACL. Erase the complete credential/key without
+        // changing its attributes; the empty item is treated as absent.
+        if status == errSecInvalidOwnerEdit {
+            let erased = updateItem(query as CFDictionary, [kSecValueData as String: Data()] as CFDictionary)
+            guard erased == errSecSuccess || erased == errSecItemNotFound else { throw failure(erased) }
+            return
+        }
         guard status == errSecSuccess || status == errSecItemNotFound else { throw failure(status) }
     }
 
@@ -297,7 +338,7 @@ struct NativeKeychain {
                                    kSecAttrService as String: service, kSecAttrAccount as String: account,
                                    kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
         var value: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &value)
+        let status = copyItem(query as CFDictionary, &value)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = value as? Data else { throw failure(status) }
         return data
@@ -305,19 +346,52 @@ struct NativeKeychain {
     private func save(_ account: String, data: Data) throws {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                    kSecAttrService as String: service, kSecAttrAccount as String: account]
-        let updates: [String: Any] = [kSecValueData as String: data,
-                                     kSecAttrLabel as String: "Mooring paired connection",
-                                     kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
-        var status = SecItemUpdate(query as CFDictionary, updates as CFDictionary)
+        // Do not rewrite access/ownership attributes on an existing item.
+        let updates: [String: Any] = [kSecValueData as String: data]
+        var status = updateItem(query as CFDictionary, updates as CFDictionary)
         if status == errSecItemNotFound {
             var insert = query
             updates.forEach { insert[$0.key] = $0.value }
+            insert[kSecAttrLabel as String] = "Mooring paired connection"
+            insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             insert[kSecAttrSynchronizable as String] = false
-            status = SecItemAdd(insert as CFDictionary, nil)
+            status = addItem(insert as CFDictionary, nil)
         }
         guard status == errSecSuccess else { throw failure(status) }
     }
     private func failure(_ status: OSStatus) -> NativeSessionError {
-        NativeSessionError(message: "Keychain could not access the pairing credential (\(status)). Unlock this Mac and try again.")
+        if status == errSecInteractionNotAllowed || status == errSecAuthFailed {
+            return NativeSessionError(message: "Keychain could not access the pairing credential (\(status)). Unlock this Mac and try again.")
+        }
+        if status == errSecInvalidOwnerEdit {
+            return NativeSessionError(message: "Keychain refused to change this pairing’s ownership (\(status)). The pairing was kept. Try again from the installed, signed Mooring app.")
+        }
+        return NativeSessionError(message: "Keychain could not access the pairing credential (\(status)). "
+                                  + (SecCopyErrorMessageString(status, nil) as String? ?? "Try again."))
+    }
+}
+
+/// Rust enumerates and classifies addresses; Swift renders the inventory.
+struct NativeNetworkInfo: Decodable {
+    let interface: String
+    let address: String
+    let description: String
+    let active: Bool
+    static func local() -> [Self] {
+        var buffer = [CChar](repeating: 0, count: 65536)
+        var addresses: [Self] = []
+        if ml_local_network_info(&buffer, buffer.count) == ML_SESSION_OK {
+            addresses = (try? JSONDecoder().decode([Self].self, from: Data(nativeString(buffer).utf8))) ?? []
+        }
+        if let name = SCDynamicStoreCopyLocalHostName(nil) as String?,
+           let hostname = NativePairingCode.normalizedAddress(name + ".local") {
+            addresses.insert(Self(interface: "Bonjour", address: hostname, description: "Local hostname", active: true), at: 0)
+        }
+        return addresses
+    }
+    static func describe(_ address: String) -> String {
+        var buffer = [CChar](repeating: 0, count: Int(ML_TEXT_CAPACITY))
+        guard ml_address_description(address, &buffer, buffer.count) == ML_SESSION_OK else { return "Address" }
+        return nativeString(buffer)
     }
 }

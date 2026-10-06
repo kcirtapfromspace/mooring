@@ -287,6 +287,7 @@ final class AutomationCoordinator: MooringAutomationService {
         launches = 0
         learningNetworkGeneration = networkGeneration
         if !AppleSession.isTrusted && !settings.permissionPromptShown {
+            MooringPrivacy.register(name: connection.name, id: connection.id, addresses: [connection.host, connection.endpoint])
             let controller = ConnectionPermissionController(macName: connection.name)
             permissionWindow = controller
             controller.onComplete = { [weak self] allowed in
@@ -458,6 +459,8 @@ final class AutomationCoordinator: MooringAutomationService {
         learningNetworkGeneration = nil
         publish(title, detail)
     }
+    func refreshPrivacy() { settingsWindow?.updateConnections(connections) }
+
     func showSettings(connections: [SavedMac], parentWindow: NSWindow?) {
         self.connections = connections
         if let controller = settingsWindow, controller.window?.isVisible == true {

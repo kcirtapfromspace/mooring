@@ -8,7 +8,8 @@
 //! and Internet Sharing's bridges are left out.
 
 use crate::pairing::MAX_ADDRESSES;
-use std::net::{IpAddr, Ipv4Addr};
+use serde::Serialize;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// One address of one interface, as `getifaddrs` reports it.
 pub(crate) struct InterfaceAddress {
@@ -59,7 +60,7 @@ pub(crate) fn ordered(interfaces: &[InterfaceAddress]) -> Vec<String> {
 }
 
 /// This Mac's addresses now, best first. Empty if they can't be read.
-pub(crate) fn local_addresses() -> Vec<String> {
+fn interfaces() -> Vec<InterfaceAddress> {
     let mut interfaces = Vec::new();
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: getifaddrs fills `list` on success; it is freed below.
@@ -75,14 +76,27 @@ pub(crate) fn local_addresses() -> Vec<String> {
             continue;
         }
         // SAFETY: ifa_addr is non-null and at least a sockaddr.
-        if i32::from(unsafe { (*entry.ifa_addr).sa_family }) != libc::AF_INET {
-            continue;
-        }
-        // SAFETY: an AF_INET address is a sockaddr_in.
-        let raw = unsafe {
-            (*entry.ifa_addr.cast::<libc::sockaddr_in>())
-                .sin_addr
-                .s_addr
+        let family = i32::from(unsafe { (*entry.ifa_addr).sa_family });
+        let address = match family {
+            libc::AF_INET => {
+                // SAFETY: an AF_INET address is a sockaddr_in.
+                let raw = unsafe {
+                    (*entry.ifa_addr.cast::<libc::sockaddr_in>())
+                        .sin_addr
+                        .s_addr
+                };
+                IpAddr::V4(Ipv4Addr::from(u32::from_be(raw)))
+            }
+            libc::AF_INET6 => {
+                // SAFETY: an AF_INET6 address is a sockaddr_in6.
+                let raw = unsafe {
+                    (*entry.ifa_addr.cast::<libc::sockaddr_in6>())
+                        .sin6_addr
+                        .s6_addr
+                };
+                IpAddr::V6(Ipv6Addr::from(raw))
+            }
+            _ => continue,
         };
         // SAFETY: ifa_name is a NUL-terminated interface name.
         let name = unsafe { std::ffi::CStr::from_ptr(entry.ifa_name) }
@@ -91,7 +105,7 @@ pub(crate) fn local_addresses() -> Vec<String> {
         let flags = entry.ifa_flags;
         interfaces.push(InterfaceAddress {
             name,
-            address: IpAddr::V4(Ipv4Addr::from(u32::from_be(raw))),
+            address,
             up: flags & libc::IFF_UP as u32 != 0,
             running: flags & libc::IFF_RUNNING as u32 != 0,
             loopback: flags & libc::IFF_LOOPBACK as u32 != 0,
@@ -99,7 +113,65 @@ pub(crate) fn local_addresses() -> Vec<String> {
     }
     // SAFETY: the list getifaddrs returned, freed once.
     unsafe { libc::freeifaddrs(list) };
-    ordered(&interfaces)
+    interfaces
+}
+
+pub(crate) fn local_addresses() -> Vec<String> {
+    ordered(&interfaces())
+}
+
+/// Labels describe address scope, not measured reachability or a VPN product.
+pub(crate) fn description(address: &str) -> &'static str {
+    match address.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) if ip.is_loopback() => "IPv4 · this Mac only",
+        Ok(IpAddr::V4(ip)) if ip.is_link_local() => "IPv4 · link-local",
+        Ok(IpAddr::V4(ip)) if ip.is_private() => "IPv4 · private network",
+        Ok(IpAddr::V4(ip)) if ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]) => {
+            "IPv4 · shared address space"
+        }
+        Ok(IpAddr::V4(_)) => "IPv4",
+        Ok(IpAddr::V6(ip)) if ip.is_loopback() => "IPv6 · this Mac only",
+        Ok(IpAddr::V6(ip)) if ip.segments()[0] & 0xffc0 == 0xfe80 => "IPv6 · link-local",
+        Ok(IpAddr::V6(ip)) if ip.segments()[0] & 0xfe00 == 0xfc00 => "IPv6 · private network",
+        Ok(IpAddr::V6(_)) => "IPv6",
+        Err(_) if address.ends_with(".local") => "Local hostname",
+        Err(_) => "Hostname",
+    }
+}
+
+#[derive(Serialize)]
+pub(crate) struct NetworkAddress {
+    pub interface: String,
+    pub address: String,
+    pub description: String,
+    pub active: bool,
+}
+
+/// Presentation inventory, separate from the bounded IPv4 pairing candidates.
+/// Include IPv6, link-local, loopback, bridges and inactive interfaces too.
+pub(crate) fn network_info() -> Vec<NetworkAddress> {
+    let mut entries = interfaces();
+    entries.sort_by(|a, b| a.name.cmp(&b.name).then(a.address.cmp(&b.address)));
+    entries.dedup_by(|a, b| a.name == b.name && a.address == b.address);
+    entries
+        .into_iter()
+        .take(128)
+        .map(|entry| {
+            let description = description(&entry.address.to_string()).to_owned();
+            let address = match entry.address {
+                IpAddr::V6(ip) if ip.segments()[0] & 0xffc0 == 0xfe80 => {
+                    format!("{ip}%{}", entry.name)
+                }
+                ip => ip.to_string(),
+            };
+            NetworkAddress {
+                interface: entry.name,
+                address,
+                description,
+                active: entry.up && entry.running,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -113,6 +185,35 @@ mod tests {
             up: true,
             running: true,
             loopback: name.starts_with("lo"),
+        }
+    }
+
+    #[test]
+    fn display_inventory_labels_scope_without_changing_connect_candidates() {
+        for (address, expected) in [
+            ("192.168.1.9", "IPv4 · private network"),
+            ("100.64.1.9", "IPv4 · shared address space"),
+            ("169.254.1.9", "IPv4 · link-local"),
+            ("fe80::1", "IPv6 · link-local"),
+            ("fd00::1", "IPv6 · private network"),
+            ("::1", "IPv6 · this Mac only"),
+            ("demo.local", "Local hostname"),
+        ] {
+            assert_eq!(description(address), expected);
+        }
+        let inventory = network_info();
+        assert!(inventory.len() <= 128);
+        for entry in inventory {
+            assert!(!entry.interface.is_empty());
+            assert!(
+                entry
+                    .address
+                    .split('%')
+                    .next()
+                    .unwrap()
+                    .parse::<IpAddr>()
+                    .is_ok()
+            );
         }
     }
 

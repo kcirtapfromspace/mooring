@@ -1,6 +1,6 @@
 # Testing the preview on another Mac
 
-Download `Mooring-v0.3.0-preview.37-macos-arm64.zip` and `SHA256SUMS.txt` from the [public release](https://github.com/kcirtapfromspace/mooring/releases/tag/v0.3.0-preview.37). Mooring supports Apple silicon only and requires macOS 14 or later. Apple's High Performance mode additionally requires compatible Macs at both ends. The experimental native session requires this preview on both Macs. The download contains `Mooring.app`. Automatic updates preserve the existing installation location.
+Download `Mooring-v0.3.0-preview.38-macos-arm64.zip` and `SHA256SUMS.txt` from the [public release](https://github.com/kcirtapfromspace/mooring/releases/tag/v0.3.0-preview.38). Mooring supports Apple silicon only and requires macOS 14 or later. Apple's High Performance mode additionally requires compatible Macs at both ends. The experimental native session requires this preview on both Macs. The download contains `Mooring.app`. Automatic updates preserve the existing installation location.
 
 1. In the download directory, verify the ZIP with `shasum -a 256 -c SHA256SUMS.txt`.
 2. Quit older Mooring copies. Extract the ZIP and replace the previous app in Applications with `Mooring.app`. Saved Macs and existing configured preferences are preserved.
@@ -43,7 +43,7 @@ Download `Mooring-v0.3.0-preview.37-macos-arm64.zip` and `SHA256SUMS.txt` from t
 15. Updates: the menu bar shows **Check for Updates…**. When the next release is published, leave both Macs idle, with no session connected; within about four hours each should relaunch on the new version by itself. Choosing **Check for Updates…** checks immediately. Report whether an update ever interrupted a session.
 16. **Save Diagnostics…** in the Share window and **Diagnostics…** in the viewer save measurements only. Attach them, or a few telemetry lines, to your report.
 
-The distribution is Developer ID signed, notarized and stapled. macOS may still show its normal first-launch downloaded-app confirmation. If **Apple could not verify Mooring.app** appears, confirm that you opened the extracted 0.3.0 preview 37 app rather than an older copy; do not change Gatekeeper settings. Local development builds are ad hoc by default.
+The distribution is Developer ID signed, notarized and stapled. macOS may still show its normal first-launch downloaded-app confirmation. If **Apple could not verify Mooring.app** appears, confirm that you opened the extracted 0.3.0 preview 38 app rather than an older copy; do not change Gatekeeper settings. Local development builds are ad hoc by default.
 
 ## What to report
 
@@ -64,11 +64,33 @@ All compilation, tests, linting, signing, archive creation and Gatekeeper valida
 ./scripts/ci-local.sh
 MOORING_CODESIGN_IDENTITY='Developer ID Application: YOUR NAME (TEAM_ID)' \
   MOORING_NOTARY_PROFILE=Mooring \
-  ./scripts/notarize-release.sh 0.3.0-preview.37
+  ./scripts/notarize-release.sh 0.3.0-preview.38
 ```
 
-The local suite includes 232 Rust tests (10 CLI, 41 core, 18 platform, 163 session), 73 Swift session-parser checks, the defaults/home-state regressions, loopback CLI integration, and the native Swift checks: input boundary, gesture events read back through AppKit, Command key-up dispatch and local diagnostic shortcuts (110 checks), Opus sound encode, decode, playout buffer and send bound, privacy classification, hardware H.264 encode/decode with recovery and the two-frame in-flight bound, session boundary with pairing over loopback, the pointer image and diagnostic sample freshness, and an encrypted 1080p loopback stream. The public release includes the app archive, signed update feed and checksums.
+The local suite includes 238 Rust tests (10 CLI, 41 core, 19 platform, 168 session), 73 Swift session-parser checks, the defaults/home-state regressions, loopback CLI integration, and the native Swift checks: input boundary, gesture events read back through AppKit, Command key-up dispatch and local diagnostic shortcuts (110 checks), Opus sound encode, decode, playout buffer and send bound, privacy classification, hardware H.264 encode/decode with recovery and the two-frame in-flight bound, session boundary with pairing over loopback, the pointer image and diagnostic sample freshness, and an encrypted 1080p loopback stream. The public release includes the app archive, signed update feed and checksums.
 
 Local tests do not verify live two-Mac negotiation, a real native session between two Macs, display behavior or performance. Complete the checks above on the second Apple silicon Mac.
 
 When changing the updater or its feed, also run `./scripts/test-update-local.sh`. Its isolated old installation must follow a legacy feed redirect, verify and install an update, relaunch carrying the canonical feed URL, and refuse a tampered archive and an altered feed. This loopback test is separate from checking public GitHub downloads and updating an installed copy on another Mac.
+
+Demo privacy and pairing revocation changes are covered by `./scripts/ci-local.sh`.
+The status-menu tests use isolated defaults and synthetic names/addresses to
+verify anonymous routing, tooltips, reserved fictional endpoints and immediate
+masking/restoration of open labels. Native session tests use an in-memory Security
+boundary to inject the `-25244` deletion error and failed erasure without touching
+the real Keychain.
+Loopback tests verify viewer-initiated revocation, refusal after listener restart,
+fresh-code re-pairing, the reverse-direction notice, and preservation of another
+approved key. Rust tests cover legacy-code bypass prevention and bounded
+revocation history. Network inventory checks do not measure reachability.
+
+Separately test the installed signed app on two Macs: remove
+from both Settings → Sharing and Settings → Viewing while connected; verify input
+cleanup, immediate session ending, refusal after app restart and successful
+pairing with a fresh code. Also remove an offline Mac, verify the local row stays
+removed across relaunch, and pair it again without affecting another connection.
+Exercise the existing Keychain ownership failure on the affected Mac; the mocked
+failure test does not independently verify its ACL or signed-app Keychain access.
+Record a short demo with privacy enabled, including General/Viewing settings,
+menu-bar quick connections, tooltips and an already open viewer title. The privacy
+toggle does not redact the remote desktop or Apple's Screen Sharing windows.

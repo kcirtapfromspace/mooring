@@ -16,9 +16,10 @@ use crate::input::InputEvent;
 use crate::pairing::{CodeKind, MAX_ADDRESSES, PairingCode, local_name, validate_name};
 use crate::policy::{
     AUDIO, Admission, CAPABILITY_AUDIO, CAPABILITY_CURSOR, CAPABILITY_GESTURES,
-    CAPABILITY_HEVC_444, CAPABILITY_LATENCY, CAPABILITY_REMOTE_UPDATE, CAPABILITY_VERSION,
-    CAPABILITY_VIRTUAL_DISPLAY, CAPABILITY_WAITS, CLIPBOARD, CONTROL, CURSOR, INPUT, PROTOCOL_MAX,
-    PROTOCOL_MIN, ReceivePolicy, Role, TELEMETRY, VIDEO,
+    CAPABILITY_HEVC_444, CAPABILITY_LATENCY, CAPABILITY_PAIRING_REVOCATION,
+    CAPABILITY_REMOTE_UPDATE, CAPABILITY_VERSION, CAPABILITY_VIRTUAL_DISPLAY, CAPABILITY_WAITS,
+    CLIPBOARD, CONTROL, CURSOR, INPUT, PROTOCOL_MAX, PROTOCOL_MIN, ReceivePolicy, Role, TELEMETRY,
+    VIDEO,
 };
 use crate::telemetry::{MAX_TELEMETRY, TelemetryMessage};
 use crate::video::Codec;
@@ -534,6 +535,7 @@ pub(crate) struct Session {
     pub(crate) peer_capabilities: AtomicU64,
     /// Host: the approved device on the other end; None for the old code.
     pub(crate) peer_device: Option<String>,
+    devices: Option<DeviceStore>,
     send: Mutex<Counter>,
     pub(crate) receive: Mutex<Inbound>,
     pub(crate) closed: AtomicBool,
@@ -626,6 +628,7 @@ impl Session {
             local_capabilities,
             peer_capabilities: AtomicU64::new(0),
             peer_device: None,
+            devices: None,
             send: Mutex::new(Counter::default()),
             receive: Mutex::new(Inbound {
                 counter: Counter::default(),
@@ -653,8 +656,9 @@ impl Session {
     }
 
     /// Protocol 5 sessions start with each side's Hello.
-    fn with_peer_device(mut self, device: Option<String>) -> Self {
+    fn with_peer_device(mut self, device: Option<String>, devices: Option<DeviceStore>) -> Self {
         self.peer_device = device;
+        self.devices = devices;
         self
     }
     fn established(self, end: Instant) -> Result<Arc<Self>> {
@@ -711,6 +715,13 @@ impl Session {
             }
             Outgoing::Control(ControlMessage::UpdateRequest)
                 if self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_REMOTE_UPDATE
+                    == 0 =>
+            {
+                Err(Error::Invalid)
+            }
+            Outgoing::Control(ControlMessage::RevokePairing)
+                if self.peer_capabilities.load(Ordering::Acquire)
+                    & CAPABILITY_PAIRING_REVOCATION
                     == 0 =>
             {
                 Err(Error::Invalid)
@@ -858,6 +869,20 @@ impl Session {
                     if let Incoming::Control(ControlMessage::Hello(capabilities)) = message {
                         self.peer_capabilities
                             .store(capabilities, Ordering::Release);
+                    }
+                    if matches!(message, Incoming::Control(ControlMessage::RevokePairing))
+                        && self.role == Role::Host
+                    {
+                        // The peer cannot name another device: revoke only the
+                        // key it proved in this session's authenticated handshake.
+                        let result = match (&self.devices, &self.peer_device) {
+                            (Some(store), Some(id)) => store.remove(id).map(|_| ()),
+                            _ => Err(Error::Protocol),
+                        };
+                        if let Err(error) = result {
+                            self.close();
+                            return Err(error);
+                        }
                     }
                     return Ok(message);
                 }
@@ -1206,7 +1231,7 @@ impl Listener {
                 return Err(Error::Closed);
             }
             Session::new(socket, crypto, Role::Host, version)
-                .with_peer_device(device)
+                .with_peer_device(device, self.devices.clone())
                 .established(end)
         })();
         lock(&self.pending)?.take();

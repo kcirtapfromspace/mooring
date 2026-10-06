@@ -8,6 +8,7 @@
 // Pointer checks draw a synthetic image; they never read the system pointer.
 // Built and run by scripts/test-native.sh, which links the arm64 Rust static library.
 import AppKit
+import Security
 import CoreGraphics
 import IOKit.pwr_mgt
 
@@ -149,6 +150,100 @@ enum NativeSessionTests {
         try devices.reset()
         try require(try devices.load().devices.isEmpty, "Reset approves no one")
     }
+    /// Authenticate, revoke only that viewer, restart the listener, require a
+    /// new code, and leave another approved key untouched. Loopback only.
+    static func testAsymmetricRevocation() throws {
+        ml_capabilities_set(NativeCapabilities.local(hevc444: false, virtualDisplay: false, audio: false))
+        defer { ml_capabilities_set(0) }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("mooring-revoke-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let devices = NativeDeviceStore(directory: folder.path)
+        try devices.prepare(acceptOldCode: false)
+        let identity = try NativeHostIdentity.create()
+        var listener = try NativeTransport.listen(identity: identity, devices: devices, bindAddress: "127.0.0.1", port: 0)
+        defer { listener.close() }
+        func pair(_ key: NativeDeviceKey) throws -> (NativePairingCode, NativeTransport, NativeTransport) {
+            let code = try NativePairingCode.forHost(address: "127.0.0.1", computerName: "Demo", identity: identity,
+                                                    oneTimeSecret: listener.newPairingSecret())
+            let (result, host) = connectOnce(listener, code, key)
+            let (viewer, _, _) = try result.get()
+            guard let host else { throw Failure("No host") }
+            guard case .control(.hello) = try next(viewer), case .control(.hello) = try next(host) else { throw Failure("No Hello") }
+            return (try code.device(), viewer, host)
+        }
+        let otherKey = try NativeDeviceKey.create(), revokedKey = try NativeDeviceKey.create()
+        let (otherCode, otherViewer, otherHost) = try pair(otherKey)
+        let otherID = otherHost.peerDevice!
+        otherViewer.close(); otherHost.close()
+        let (revokedCode, viewer, host) = try pair(revokedKey)
+        try viewer.send(.control(.revokePairing))
+        guard case .control(.revokePairing) = try next(host) else { throw Failure("No revocation") }
+        try require(try devices.load().devices.map(\.id) == [otherID], "Viewer revokes only its own authenticated key")
+        viewer.close(); host.close(); listener.close()
+        listener = try NativeTransport.listen(identity: identity, devices: devices, bindAddress: "127.0.0.1", port: 0)
+        let (removed, removedHost) = connectOnce(listener, revokedCode, revokedKey)
+        try require(refused(removed) && removedHost == nil, "Revocation persists across listener restart")
+        let (kept, keptHost) = connectOnce(listener, otherCode, otherKey)
+        let (keptViewer, _, _) = try kept.get(); keptViewer.close(); keptHost?.close()
+        let (_, repairedViewer, repairedHost) = try pair(try NativeDeviceKey.create())
+        try repairedHost.send(.control(.revokePairing))
+        guard case .control(.revokePairing) = try next(repairedViewer) else { throw Failure("No host revocation notice") }
+        repairedViewer.close(); repairedHost.close()
+    }
+
+    /// Exercise the owner-ACL failure without reading/writing any real Keychain.
+    static func testKeychainErasure() throws {
+        var values: [String: Data] = [:]
+        var deleteStatus = errSecInvalidOwnerEdit
+        var updateStatus = errSecSuccess
+        var keychain = NativeKeychain()
+        keychain.copyItem = { query, out in
+            let query = query as! [String: Any]
+            guard let account = query[kSecAttrAccount as String] as? String, let value = values[account] else { return errSecItemNotFound }
+            out?.pointee = value as CFData
+            return errSecSuccess
+        }
+        keychain.updateItem = { query, updates in
+            let query = query as! [String: Any], updates = updates as! [String: Any]
+            precondition(updates.count == 1 && updates[kSecValueData as String] != nil, "Existing items never edit owner/access attributes")
+            if updateStatus != errSecSuccess { return updateStatus }
+            let account = query[kSecAttrAccount as String] as! String
+            guard values[account] != nil else { return errSecItemNotFound }
+            values[account] = updates[kSecValueData as String] as? Data
+            return errSecSuccess
+        }
+        keychain.addItem = { query, _ in
+            let query = query as! [String: Any]
+            values[query[kSecAttrAccount as String] as! String] = query[kSecValueData as String] as? Data
+            return errSecSuccess
+        }
+        keychain.deleteItem = { query in
+            if deleteStatus == errSecSuccess { values.removeValue(forKey: (query as! [String: Any])[kSecAttrAccount as String] as! String) }
+            return deleteStatus
+        }
+        let identity = try NativeHostIdentity.create()
+        let code = try NativePairingCode.forHost(address: "demo.local", computerName: "Demo", identity: identity, oneTimeSecret: Data(repeating: 7, count: 32)).device()
+        let key = try NativeDeviceKey.create()
+        try keychain.savePeerCode(code, deviceKey: key)
+        try require(try keychain.peerDeviceKey(code.peerID).privateKey == key.privateKey, "A per-peer key survives Keychain encoding")
+        try keychain.deletePeerCode(code.peerID)
+        try require(values["peer-" + code.peerID]?.isEmpty == true && (try keychain.peerCode(code.peerID)) == nil,
+                    "An ownership delete failure erases both credential and private key")
+        try keychain.savePeerCode(code, deviceKey: key)
+        updateStatus = errSecInvalidOwnerEdit
+        try rejects("Failed erasure must report failure") { try keychain.deletePeerCode(code.peerID) }
+        try require(try keychain.peerCode(code.peerID)?.peerID == code.peerID, "An unerasable credential is kept for retry")
+        updateStatus = errSecSuccess; deleteStatus = errSecSuccess
+        try keychain.deletePeerCode(code.peerID)
+        deleteStatus = errSecItemNotFound
+        try keychain.deletePeerCode(code.peerID)
+        // Earlier credentials still use the existing device key, preserving pairings.
+        let legacyKey = try keychain.deviceKey()
+        try keychain.savePeerCode(code)
+        try require(try keychain.peerDeviceKey(code.peerID).privateKey == legacyKey.privateKey, "Earlier pairings retain their key")
+    }
+
     /// The sharing Mac's pointer as sent and as the viewer rebuilds it: a
     /// 2-point square drawn 3 points right of and 5 points below the top-left
     /// corner must stay there at 2x, including for a size in fractional points.
@@ -178,7 +273,7 @@ enum NativeSessionTests {
     static func testLatency() throws {
         // Every build announces what it always supports; self-tests add the rest.
         let always = UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_GESTURES) | UInt64(ML_CAPABILITY_LATENCY)
-            | UInt64(ML_CAPABILITY_VERSION)
+            | UInt64(ML_CAPABILITY_VERSION) | UInt64(ML_CAPABILITY_PAIRING_REVOCATION)
         try require(NativeCapabilities.local(hevc444: false, virtualDisplay: false, audio: false) == always,
                     "Pointer shapes, gestures, latency and versions are always announced; the 12-hour wait no longer is")
         let everything = always | UInt64(ML_CAPABILITY_HEVC_444) | UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) | UInt64(ML_CAPABILITY_AUDIO)
@@ -350,19 +445,21 @@ enum NativeSessionTests {
                                               .version(NativeVersion(build: 24, release: 3 << 32 | 19)), .updateRequest,
                                               .updateStatus(.checking, ready: nil),
                                               .updateStatus(.ready, ready: NativeVersion(build: 25, release: 3 << 32 | 20)),
-                                              .leaving] {
+                                              .leaving, .revokePairing] {
             try require(try NativeControlMessage(validated: message.raw) == message, "Every control message round-trips the C ABI")
         }
         try testLatency()
         try testCapabilityGate()
         try testWakeRecovery()
         try testPointer()
-        var unknown = MLControlMessage(); unknown.kind = 13
+        var unknown = MLControlMessage(); unknown.kind = 14
         try rejects("Unknown control kinds are rejected") { _ = try NativeControlMessage(validated: unknown) }
 
         try testTelemetry()
         try testClipboard()
         try testDevicePairing()
+        try testAsymmetricRevocation()
+        try testKeychainErasure()
 
         let token = NativeRunToken()
         try require(token.isActive, "Run token begins active")

@@ -121,7 +121,9 @@ final class CLIClient {
 
 func label(_ text: String, size: CGFloat = 13, weight: NSFont.Weight = .regular,
                    color: NSColor = .labelColor) -> NSTextField {
-    let view = NSTextField(labelWithString: text)
+    let view = MooringPrivacyLabel(labelWithString: "")
+    view.stringValue = text
+    view.observePrivacy()
     view.font = .systemFont(ofSize: size, weight: weight)
     view.textColor = color
     view.lineBreakMode = .byWordWrapping
@@ -204,8 +206,8 @@ private final class MacCell: NSTableCellView {
 }
 
 private final class AddMacController: NSWindowController, NSTextFieldDelegate {
-    let nameField = NSTextField(string: "")
-    let hostField = NSTextField(string: "")
+    let nameField: NSTextField = MooringPrivacy.isEnabled ? NSSecureTextField(string: "") : NSTextField(string: "")
+    let hostField: NSTextField = MooringPrivacy.isEnabled ? NSSecureTextField(string: "") : NSTextField(string: "")
     let portField = NSTextField(string: "5900")
     let errorLabel = label("", size: 12, color: .systemRed)
     let saveButton = NSButton(title: "Connect", target: nil, action: nil)
@@ -335,6 +337,7 @@ protocol MooringAutomationService: AnyObject {
     func showSettings(connections: [SavedMac], parentWindow: NSWindow?)
     func connect(_ connection: SavedMac, completion: @escaping (Result<Data, CLIError>) -> Void)
     func stop()
+    func refreshPrivacy()
 }
 
 private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation, NSMenuDelegate {
@@ -360,6 +363,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     private var addController: AddMacController?
     private let countLabel = label("0", size: 11, color: .secondaryLabelColor)
     private let titleLabel = label("Your Macs,\nwithin reach.", size: 34, weight: .semibold)
+    private let computerInfo = stack([], spacing: 6)
+    private let computerInfoScroll = NSScrollView()
     private let addressLabel = label("Connect there. Work here.", size: 14, color: .secondaryLabelColor)
     private let connectionKind = label("Within reach", size: 11, weight: .semibold, color: MooringBrand.accent)
     private let connectionIcon = NSImageView()
@@ -467,11 +472,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         let heading = NSMenuItem(title: "Mooring", action: nil, keyEquivalent: "")
         heading.isEnabled = false
         statusMenu.addItem(heading)
-        let status = NSMenuItem(title: native.status ?? automationState.title, action: nil, keyEquivalent: "")
+        let status = NSMenuItem(title: MooringPrivacy.redact(native.status ?? automationState.title), action: nil, keyEquivalent: "")
         status.isEnabled = false
-        status.toolTip = automationState.detail
+        status.toolTip = MooringPrivacy.redact(automationState.detail)
         statusMenu.addItem(status)
-        let statusDescription = "Mooring — \(native.status ?? automationState.title)"
+        let statusDescription = MooringPrivacy.redact("Mooring — \(native.status ?? automationState.title)")
         statusItem.button?.toolTip = statusDescription
         statusItem.button?.setAccessibilityLabel(statusDescription)
         if statusShowsScreenSharing != native.isSharingScreen {
@@ -479,7 +484,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             statusItem.button?.image = MooringBrand.menuBarImage(isSharingScreen: native.isSharingScreen)
         }
         if let lastMenuAction {
-            let recent = NSMenuItem(title: lastMenuAction, action: nil, keyEquivalent: "")
+            let recent = NSMenuItem(title: MooringPrivacy.redact(lastMenuAction), action: nil, keyEquivalent: "")
             recent.isEnabled = false
             statusMenu.addItem(recent)
         }
@@ -507,11 +512,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             connectMenu.addItem(empty)
         } else {
             for mac in connections {
-                let title = mac.name.count > 50 ? String(mac.name.prefix(49)) + "…" : mac.name
+                let name = MooringPrivacy.name(mac.name, id: mac.id)
+                let title = name.count > 50 ? String(name.prefix(49)) + "…" : name
                 let item = NSMenuItem(title: title, action: #selector(connectFromMenu(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = mac.id
-                item.toolTip = "\(mac.name) — \(mac.endpoint)"
+                item.toolTip = MooringPrivacy.redact("\(mac.name) — \(mac.endpoint)")
                 item.isEnabled = available
                 connectMenu.addItem(item)
             }
@@ -794,7 +800,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         addressLabel.lineBreakMode = .byTruncatingMiddle
         statusTitle.maximumNumberOfLines = 1
         statusTitle.lineBreakMode = .byTruncatingTail
-        let intro = stack([icon, connectionKind, titleLabel, addressLabel], spacing: 10)
+        computerInfoScroll.translatesAutoresizingMaskIntoConstraints = false
+        computerInfoScroll.drawsBackground = false
+        computerInfoScroll.hasVerticalScroller = true
+        computerInfoScroll.autohidesScrollers = true
+        computerInfoScroll.documentView = computerInfo
+        let intro = stack([icon, connectionKind, titleLabel, addressLabel, computerInfoScroll], spacing: 10)
+        intro.detachesHiddenViews = true
+        NSLayoutConstraint.activate([
+            computerInfoScroll.widthAnchor.constraint(equalTo: intro.widthAnchor),
+            computerInfoScroll.heightAnchor.constraint(equalToConstant: 100),
+            computerInfo.leadingAnchor.constraint(equalTo: computerInfoScroll.contentView.leadingAnchor),
+            computerInfo.topAnchor.constraint(equalTo: computerInfoScroll.contentView.topAnchor),
+            computerInfo.widthAnchor.constraint(equalTo: computerInfoScroll.widthAnchor)
+        ])
         let statusBox = MooringSurface()
         statusBox.translatesAutoresizingMaskIntoConstraints = false
         statusSymbol.translatesAutoresizingMaskIntoConstraints = false
@@ -905,10 +924,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let cell = MacCell(), item = rows[row]
-        cell.nameLabel.stringValue = item.name
-        cell.hostLabel.stringValue = item.detail
+        cell.nameLabel.stringValue = MooringPrivacy.name(item.name, id: item.id)
+        cell.hostLabel.stringValue = MooringPrivacy.isEnabled ? MooringPrivacy.demoHostname(id: item.id) : item.detail
         cell.symbol.image = NSImage(systemSymbolName: item.symbol, accessibilityDescription: nil)
-        cell.setAccessibilityLabel("\(item.name), \(item.detail)")
+        cell.setAccessibilityLabel("\(cell.nameLabel.stringValue), \(cell.hostLabel.stringValue)")
         return cell
     }
 
@@ -917,6 +936,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     private func rebuildRows(select id: String? = nil) {
         let selection = id ?? selectedRow?.id
         rows = native.peers.map(ConnectionRow.mooring) + connections.map(ConnectionRow.screenSharing)
+        for row in rows {
+            let addresses: [String]
+            switch row { case .mooring(let peer): addresses = peer.addresses; case .screenSharing(let mac): addresses = [mac.host, mac.endpoint] }
+            MooringPrivacy.register(name: row.name, id: row.id, addresses: addresses)
+        }
         countLabel.stringValue = String(rows.count)
         emptyList.isHidden = !rows.isEmpty
         table.reloadData()
@@ -936,19 +960,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             connectionKind.stringValue = "Paired"
             connectionIcon.image = NSImage(systemSymbolName: "display.2", accessibilityDescription: nil)
             connectionIcon.contentTintColor = MooringBrand.accent
-            titleLabel.stringValue = peer.name
+            titleLabel.stringValue = MooringPrivacy.name(peer.name, id: peer.id)
             titleLabel.toolTip = peer.name
-            addressLabel.stringValue = "Paired · " + peer.address
-            addressLabel.toolTip = peer.address
+            addressLabel.stringValue = MooringPrivacy.isEnabled ? MooringPrivacy.demoHostname(id: peer.id) : "Paired · " + peer.address
+            addressLabel.toolTip = MooringPrivacy.isEnabled ? "There’s no route like home." : peer.addresses.joined(separator: "\n")
             setStatus("Ready", "On \(peer.name), open Mooring → Share this Mac → Start sharing.")
         } else if let mac = selectedMac {
             connectionKind.stringValue = "Screen Sharing"
             connectionIcon.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: nil)
             connectionIcon.contentTintColor = MooringBrand.accent
-            titleLabel.stringValue = mac.name
+            titleLabel.stringValue = MooringPrivacy.name(mac.name, id: mac.id)
             titleLabel.toolTip = mac.name
-            addressLabel.stringValue = mac.endpoint
-            addressLabel.toolTip = mac.endpoint
+            addressLabel.stringValue = MooringPrivacy.isEnabled ? MooringPrivacy.demoHostname(id: mac.id) : mac.endpoint
+            addressLabel.toolTip = MooringPrivacy.isEnabled ? "There’s no route like home." : mac.endpoint
             setStatus("Ready", "Sign in with this Mac’s account after connecting.")
         } else {
             connectionKind.stringValue = "Within reach"
@@ -960,13 +984,32 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             addressLabel.toolTip = nil
             setStatus("Pair once. Return anytime.", "On your other Mac, open Mooring → Share this Mac. Start sharing and copy its code.\n\nFor Apple Screen Sharing, use an address.")
         }
+        computerInfo.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        computerInfoScroll.isHidden = selectedRow == nil
+        if MooringPrivacy.isEnabled, let row = selectedRow {
+            for text in MooringPrivacy.demoNetworkInfo(id: row.id) {
+                let info = label(text, size: 12, color: .secondaryLabelColor)
+                computerInfo.addArrangedSubview(info)
+                info.widthAnchor.constraint(equalTo: computerInfo.widthAnchor).isActive = true
+            }
+        } else {
+            if let peer = selectedPeer {
+                for (index, address) in peer.addresses.enumerated() {
+                    let info = label("\(index == 0 ? "Last connected" : "Alternate") · \(NativeNetworkInfo.describe(address))\n\(address)", size: 12, color: .secondaryLabelColor)
+                    computerInfo.addArrangedSubview(info)
+                    info.widthAnchor.constraint(equalTo: computerInfo.widthAnchor).isActive = true
+                }
+            } else if let mac = selectedMac {
+                computerInfo.addArrangedSubview(label("\(NativeNetworkInfo.describe(mac.host)) · \(mac.host)\nScreen Sharing · TCP port \(mac.port)", size: 12, color: .secondaryLabelColor))
+            }
+        }
         updateControls()
     }
 
     private func setStatus(_ title: String, _ detail: String, error: Bool = false, success: Bool = false) {
         statusTitle.stringValue = title
         statusTitle.toolTip = title
-        statusDetail.string = detail
+        statusDetail.string = MooringPrivacy.redact(detail)
         statusDetail.scrollRangeToVisible(NSRange(location: 0, length: 0))
         statusSymbol.image = NSImage(systemSymbolName: error ? "exclamationmark.circle" : success ? "checkmark.circle" : "info.circle", accessibilityDescription: nil)
         statusSymbol.contentTintColor = error ? .systemRed : success ? .systemGreen : .secondaryLabelColor
@@ -999,7 +1042,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         connectButton.isEnabled = available
         connectButton.action = selectedRow == nil ? #selector(connectNative) : #selector(connect)
         connectButton.title = busy ? "Connecting…" : selectedRow == nil ? "Pair a Mac…" : (selectedPeer.map { $0.id == native.connectedPeerID } ?? false) ? "Return" : "Connect"
-        connectButton.setAccessibilityLabel(selectedRow == nil ? "Pair a Mac using a Mooring code" : "Connect to \(selectedRow?.name ?? "Mac")")
+        connectButton.setAccessibilityLabel(selectedRow == nil ? "Pair a Mac using a Mooring code" : MooringPrivacy.redact("Connect to \(selectedRow?.name ?? "Mac")"))
         checkButton.isHidden = selectedPeer != nil
         checkButton.title = selectedRow == nil ? "Use an address…" : "Check"
         checkButton.action = selectedRow == nil ? #selector(addMac) : #selector(checkConnection)
@@ -1126,7 +1169,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         if let peer = selectedPeer { forgetPairing(peer); return }
         guard let mac = selectedMac else { return }
         let alert = NSAlert()
-        alert.messageText = "Remove \(mac.name)?"
+        alert.messageText = "Remove \(MooringPrivacy.name(mac.name, id: mac.id))?"
         alert.informativeText = "Remove this saved address? You can add it again."
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
@@ -1149,8 +1192,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
 
     private func forgetPairing(_ peer: NativePeer) {
         let alert = NSAlert()
-        alert.messageText = "Forget \(peer.name)?"
-        alert.informativeText = "This removes the pairing and its secret from this Mac. To connect again, copy a new pairing code from \(peer.name)."
+        alert.messageText = "Forget \(MooringPrivacy.name(peer.name, id: peer.id))?"
+        alert.informativeText = "This removes the pairing and its secret from this Mac. To connect again, copy a new pairing code from \(MooringPrivacy.name(peer.name, id: peer.id))."
         alert.addButton(withTitle: "Forget")
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { [weak self] response in
@@ -1279,6 +1322,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         state.playsSound = native.playsSound
         state.lowersDisplayLatency = native.lowersDisplayLatency
         state.showsDiagnosticBar = native.showsDiagnosticBar
+        state.hidesComputerInformation = MooringPrivacy.isEnabled
+        state.localNetwork = NativeNetworkInfo.local()
         let login = SMAppService.mainApp.status
         state.launchesAtLogin = login == .enabled || login == .requiresApproval
         state.loginNeedsApproval = login == .requiresApproval
@@ -1299,6 +1344,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         case .playsSound: native.playsSound = on
         case .lowersDisplayLatency: native.lowersDisplayLatency = on
         case .showsDiagnosticBar: native.showsDiagnosticBar = on
+        case .hidesComputerInformation:
+            MooringPrivacy.isEnabled = on
+            native.refreshPrivacy()
+            rebuildRows()
+            statusDetail.string = MooringPrivacy.redact(statusDetail.string)
+            if let addController { addController.close(); self.addController = nil }
+            automation.refreshPrivacy()
         case .launchesAtLogin:
             do {
                 let status = SMAppService.mainApp.status
@@ -1310,7 +1362,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     private func showSettingsError(_ message: String) {
-        let alert = NSAlert(); alert.messageText = "Mooring Settings"; alert.informativeText = message
+        let alert = NSAlert(); alert.messageText = "Mooring Settings"; alert.informativeText = MooringPrivacy.redact(message)
         if let window = settingsWindow?.window, window.isVisible { alert.beginSheetModal(for: window) } else { alert.runModal() }
     }
 

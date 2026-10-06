@@ -21,6 +21,7 @@ pub(crate) const MAX_DEVICES: usize = 32;
 pub(crate) const MAX_MIGRATED: usize = 8;
 const FILE_NAME: &str = "native-devices.json";
 const LOCK_NAME: &str = "native-devices.lock";
+const MAX_REVOKED: usize = 128;
 const MAX_FILE_BYTES: u64 = 64 * 1024;
 /// After the first Mac moves from the old pairing code to its own key, the old
 /// code keeps working this long, so every Mac paired the old way can follow.
@@ -95,6 +96,8 @@ impl Legacy {
 pub(crate) struct DeviceState {
     pub devices: Vec<Device>,
     pub legacy: Legacy,
+    /// Removed keys cannot reapprove themselves using the old shared code.
+    pub revoked: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -103,6 +106,8 @@ struct Document {
     version: u32,
     devices: Vec<Device>,
     legacy: Legacy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    revoked: Vec<String>,
 }
 
 /// What Settings may do to the old pairing code.
@@ -112,6 +117,7 @@ pub(crate) enum LegacyAction {
     AnotherWeek,
 }
 
+#[derive(Clone)]
 pub(crate) struct DeviceStore {
     directory: PathBuf,
 }
@@ -133,7 +139,10 @@ impl DeviceStore {
             return Ok(None);
         };
         let document: Document = serde_json::from_slice(&bytes).map_err(|_| Error::Storage)?;
-        if document.version != 1 || document.devices.len() > MAX_DEVICES {
+        if document.version != 1
+            || document.devices.len() > MAX_DEVICES
+            || document.revoked.len() > MAX_REVOKED
+        {
             return Err(Error::Storage);
         }
         let mut ids = HashSet::new();
@@ -149,9 +158,20 @@ impl DeviceStore {
                 }
             })
             .collect::<Result<_>>()?;
+        for id in &document.revoked {
+            if id.len() != 64
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || !ids.insert(id.clone())
+            {
+                return Err(Error::Storage);
+            }
+        }
         Ok(Some(DeviceState {
             devices,
             legacy: document.legacy,
+            revoked: document.revoked,
         }))
     }
 
@@ -166,6 +186,7 @@ impl DeviceStore {
             version: 1,
             devices: state.devices.clone(),
             legacy: state.legacy,
+            revoked: state.revoked.clone(),
         };
         let mut bytes = serde_json::to_vec_pretty(&document).map_err(|_| Error::Internal)?;
         bytes.push(b'\n');
@@ -195,6 +216,7 @@ impl DeviceStore {
                 accepted: accept_old_code,
                 ..Legacy::default()
             },
+            revoked: vec![],
         })
     }
 
@@ -221,7 +243,7 @@ impl DeviceStore {
         validate_name(name)?;
         let id = device_id(public_key);
         self.update(|state| {
-            if via == Via::Migrated && !state.legacy.is_open(now) {
+            if via == Via::Migrated && (!state.legacy.is_open(now) || state.revoked.contains(&id)) {
                 return Err(Error::Auth);
             }
             state.devices.retain(|device| device.id != id);
@@ -235,6 +257,8 @@ impl DeviceStore {
             {
                 return Err(Error::Busy);
             }
+            // A fresh one-time code is explicit authorization to pair again.
+            state.revoked.retain(|revoked| revoked != &id);
             state.devices.push(Device {
                 id: id.clone(),
                 name: name.to_owned(),
@@ -277,7 +301,18 @@ impl DeviceStore {
         self.update(|state| {
             let before = state.devices.len();
             state.devices.retain(|device| device.id != id);
-            Ok(state.devices.len() != before)
+            let removed = state.devices.len() != before;
+            if removed && state.legacy.accepted && !state.revoked.iter().any(|entry| entry == id) {
+                if state.revoked.len() == MAX_REVOKED {
+                    // Keep memory/storage bounded without forgetting revocations.
+                    // Already approved Macs still prove their own keys as before.
+                    state.legacy.accepted = false;
+                    state.revoked.clear();
+                } else {
+                    state.revoked.push(id.to_owned());
+                }
+            }
+            Ok(removed)
         })
     }
 
@@ -329,6 +364,54 @@ mod tests {
     }
 
     const NOW: u64 = 1_790_000_000;
+
+    #[test]
+    fn revocation_survives_restart_and_cannot_be_bypassed_by_the_old_code() {
+        let directory = Directory::new();
+        let store = directory.store();
+        store.init(true).unwrap();
+        let removed = store
+            .approve(&[1; 32], "Removed", Via::Migrated, NOW)
+            .unwrap();
+        let other = store
+            .approve(&[2; 32], "Other", Via::Migrated, NOW)
+            .unwrap();
+        assert!(store.remove(&removed).unwrap());
+        let reopened = directory.store();
+        assert_eq!(
+            reopened.approve(&[1; 32], "Removed", Via::Migrated, NOW + 1),
+            Err(Error::Auth)
+        );
+        assert_eq!(reopened.load().unwrap().devices[0].id, other);
+        assert!(reopened.load().unwrap().legacy.is_open(NOW + 1));
+        assert_eq!(
+            reopened
+                .approve(&[1; 32], "Repaired", Via::Code, NOW + 2)
+                .unwrap(),
+            removed
+        );
+        assert!(reopened.load().unwrap().revoked.is_empty());
+    }
+
+    #[test]
+    fn revocation_history_is_bounded_without_restoring_removed_keys() {
+        let directory = Directory::new();
+        let store = directory.store();
+        store.init(true).unwrap();
+        let other = store.approve(&[255; 32], "Keep", Via::Code, NOW).unwrap();
+        for key in 0..=MAX_REVOKED as u8 {
+            let id = store.approve(&[key; 32], "Remove", Via::Code, NOW).unwrap();
+            store.remove(&id).unwrap();
+        }
+        let state = store.load().unwrap();
+        assert!(!state.legacy.accepted);
+        assert!(state.revoked.is_empty());
+        assert_eq!(state.devices[0].id, other);
+        assert_eq!(
+            store.approve(&[1; 32], "Removed", Via::Migrated, NOW),
+            Err(Error::Auth)
+        );
+    }
 
     #[test]
     fn devices_are_approved_refreshed_and_removed_by_key() {

@@ -13,14 +13,15 @@ enum MooringStatusMenu {
         }
 
         func item(for peer: NativePeer) -> NSMenuItem {
-            let title = peer.name.count > 50 ? String(peer.name.prefix(49)) + "…" : peer.name
+            let name = MooringPrivacy.name(peer.name, id: peer.id)
+            let title = name.count > 50 ? String(name.prefix(49)) + "…" : name
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = target
             item.representedObject = peer.id
             item.isEnabled = enabled
             item.state = peer.id == connectedPeerID ? .on : .off
             item.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: nil)
-            item.toolTip = peer.id == connectedPeerID ? "Return to \(peer.name)" : "Connect to \(peer.name)"
+            item.toolTip = peer.id == connectedPeerID ? "Return to \(name)" : "Connect to \(name)"
             return item
         }
 

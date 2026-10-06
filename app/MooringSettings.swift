@@ -16,6 +16,8 @@ struct MooringSettingsState {
     var playsSound = true
     var lowersDisplayLatency = false
     var showsDiagnosticBar = true
+    var hidesComputerInformation = false
+    var localNetwork: [NativeNetworkInfo] = []
     var launchesAtLogin = false
     var loginNeedsApproval = false
     /// Macs this Mac connects to, and the one connected now.
@@ -28,7 +30,7 @@ struct MooringSettingsState {
 }
 
 enum MooringSetting {
-    case sharesAutomatically, sharesClipboard, matchesScreen, playsSound, lowersDisplayLatency, showsDiagnosticBar, launchesAtLogin
+    case sharesAutomatically, sharesClipboard, matchesScreen, playsSound, lowersDisplayLatency, showsDiagnosticBar, hidesComputerInformation, launchesAtLogin
 }
 
 /// One window for everything a person may want to change, in three parts:
@@ -57,6 +59,8 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
     private let playsSound = NSButton(checkboxWithTitle: "Play remote sound", target: nil, action: nil)
     private let lowersDisplayLatency = NSButton(checkboxWithTitle: "Lower display latency (may tear)", target: nil, action: nil)
     private let showsDiagnosticBar = NSButton(checkboxWithTitle: "Show diagnostics", target: nil, action: nil)
+    private let hidesComputerInformation = NSButton(checkboxWithTitle: "Hide computer information for demos", target: nil, action: nil)
+    private let localNetworkList = stack([], spacing: 5)
     private let peerList = stack([], spacing: 8)
     private let deviceList = stack([], spacing: 8)
     private let legacyNote = label("", size: 12, color: .secondaryLabelColor)
@@ -90,7 +94,7 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
         let toggles: [(NSButton, MooringSetting)] = [
             (sharesAutomatically, .sharesAutomatically), (sharesClipboard, .sharesClipboard), (matchesScreen, .matchesScreen),
             (playsSound, .playsSound), (lowersDisplayLatency, .lowersDisplayLatency),
-            (showsDiagnosticBar, .showsDiagnosticBar), (launchesAtLogin, .launchesAtLogin)
+            (showsDiagnosticBar, .showsDiagnosticBar), (hidesComputerInformation, .hidesComputerInformation), (launchesAtLogin, .launchesAtLogin)
         ]
         for (button, setting) in toggles {
             button.target = self; button.action = #selector(toggled(_:))
@@ -146,6 +150,9 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
             peerList
         ])
         let general = section("Mooring", nil, [
+            option(hidesComputerInformation, "There’s no route like home. Use fictional Mac names and reserved example addresses in Mooring windows and menus. Remote desktops and Apple Screen Sharing have their own content."),
+            label("This Mac’s network addresses", size: 12, weight: .medium),
+            localNetworkList,
             stack([launchesAtLogin, loginNote], spacing: 3),
             version,
             stack([updateNote, updateButton], spacing: 6),
@@ -194,6 +201,17 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
         playsSound.state = state.playsSound ? .on : .off
         lowersDisplayLatency.state = state.lowersDisplayLatency ? .on : .off
         showsDiagnosticBar.state = state.showsDiagnosticBar ? .on : .off
+        hidesComputerInformation.state = state.hidesComputerInformation ? .on : .off
+        localNetworkList.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        if state.hidesComputerInformation {
+            for info in MooringPrivacy.demoNetworkInfo(id: "this-mac") { localNetworkList.addArrangedSubview(hint(info)) }
+        }
+        else {
+            if state.localNetwork.isEmpty { localNetworkList.addArrangedSubview(hint("No assigned IP addresses could be read.")) }
+            for entry in state.localNetwork {
+                localNetworkList.addArrangedSubview(hint("\(entry.interface) · \(entry.description)\(entry.active ? "" : " · inactive")\n\(entry.address)"))
+            }
+        }
         launchesAtLogin.state = state.launchesAtLogin ? .on : .off
         loginNote.isHidden = !state.loginNeedsApproval
         version.stringValue = "Version \(state.version)"
@@ -234,7 +252,8 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
         }
         for device in devices {
             let connected = device.id == state.connectedDeviceID
-            let name = label(String(device.name.prefix(60)) + (connected ? " · connected now" : ""), size: 13)
+            MooringPrivacy.register(name: device.name, id: device.id)
+            let name = label(String(MooringPrivacy.name(device.name, id: device.id).prefix(60)) + (connected ? " · connected now" : ""), size: 13)
             var detail = "Paired \(Self.days.string(from: device.paired))"
             if device.migrated { detail += " from the old code" }
             if !connected { detail += " · last connected \(Self.ago(device.lastSeen))" }
@@ -276,16 +295,18 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
             return
         }
         for peer in state.peers {
-            let name = label(String(peer.name.prefix(60)), size: 13)
-            let more = peer.alternates.isEmpty ? "" : " · \(peer.alternates.count) more"
-            let address = label(peer.address + more, size: 11, color: .secondaryLabelColor)
-            address.toolTip = peer.addresses.joined(separator: "\n")
+            let name = label(String(MooringPrivacy.name(peer.name, id: peer.id).prefix(60)), size: 13)
+            MooringPrivacy.register(name: peer.name, id: peer.id, addresses: peer.addresses)
+            let text = state.hidesComputerInformation ? MooringPrivacy.demoNetworkInfo(id: peer.id).joined(separator: "\n") : peer.addresses.enumerated().map { index, address in
+                "\(index == 0 ? "Last connected" : "Alternate") · \(NativeNetworkInfo.describe(address))\n\(address)"
+            }.joined(separator: "\n")
+            let address = label(text, size: 11, color: .secondaryLabelColor)
+            address.toolTip = state.hidesComputerInformation ? "There’s no route like home." : peer.addresses.joined(separator: "\n")
             let remove = NSButton(title: "Remove…", target: self, action: #selector(removePeer(_:)))
             remove.bezelStyle = .rounded; remove.controlSize = .small
             remove.identifier = NSUserInterfaceItemIdentifier(peer.id)
             let connected = peer.id == state.connectedPeerID
-            remove.isEnabled = !connected
-            remove.toolTip = connected ? "Disconnect from this Mac first." : "Forget this pairing on this Mac."
+            remove.toolTip = connected ? "End this session and revoke its pairing." : "Forget this pairing on this Mac. A new code will be required."
             let row = stack([stack([name, address], spacing: 2), NSView(), remove], orientation: .horizontal, spacing: 10)
             peerList.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: peerList.widthAnchor).isActive = true
@@ -296,7 +317,7 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
         let settings: [String: MooringSetting] = [
             "sharesAutomatically": .sharesAutomatically, "sharesClipboard": .sharesClipboard, "matchesScreen": .matchesScreen,
             "playsSound": .playsSound, "lowersDisplayLatency": .lowersDisplayLatency,
-            "showsDiagnosticBar": .showsDiagnosticBar, "launchesAtLogin": .launchesAtLogin
+            "showsDiagnosticBar": .showsDiagnosticBar, "hidesComputerInformation": .hidesComputerInformation, "launchesAtLogin": .launchesAtLogin
         ]
         guard let key = sender.identifier?.rawValue, let setting = settings[key] else { return }
         onChange?(setting, sender.state == .on)
@@ -304,7 +325,7 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
     @objc private func removePeer(_ sender: NSButton) {
         guard let window, let peer = state.peers.first(where: { $0.id == sender.identifier?.rawValue }) else { return }
         let alert = NSAlert()
-        alert.messageText = "Remove \(peer.name)?"
+        alert.messageText = "Remove \(MooringPrivacy.name(peer.name, id: peer.id))?"
         alert.informativeText = "This Mac forgets the pairing. To connect again, you'll need a new pairing code from that Mac."
         alert.addButton(withTitle: "Remove"); alert.addButton(withTitle: "Cancel")
         alert.buttons.first?.hasDestructiveAction = true
@@ -316,7 +337,7 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
         guard let window, let device = state.devices?.first(where: { $0.id == sender.identifier?.rawValue }) else { return }
         let connected = device.id == state.connectedDeviceID
         let alert = NSAlert()
-        alert.messageText = "Remove \(device.name)?"
+        alert.messageText = "Remove \(MooringPrivacy.name(device.name, id: device.id))?"
         alert.informativeText = (connected ? "It disconnects now. " : "")
             + "It can't connect to this Mac again until you pair it with a new code."
         alert.addButton(withTitle: "Remove"); alert.addButton(withTitle: "Cancel")

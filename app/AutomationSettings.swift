@@ -241,10 +241,11 @@ final class AutomationSettingsController: NSWindowController, NSWindowDelegate {
             targetPopup.addItem(withTitle: "Add a Mac in Open Connections first")
         } else {
             for mac in connections {
-                let name = mac.name.count > 40 ? String(mac.name.prefix(39)) + "…" : mac.name
+                let displayName = MooringPrivacy.name(mac.name, id: mac.id)
+                let name = displayName.count > 40 ? String(displayName.prefix(39)) + "…" : displayName
                 let item = NSMenuItem(title: name, action: nil, keyEquivalent: "")
                 item.representedObject = mac.id
-                item.toolTip = "\(mac.name) — \(mac.endpoint)"
+                item.toolTip = MooringPrivacy.redact("\(mac.name) — \(mac.endpoint)")
                 targetPopup.menu?.addItem(item)
             }
             if let item = targetPopup.itemArray.first(where: { $0.representedObject as? String == selection }) {
