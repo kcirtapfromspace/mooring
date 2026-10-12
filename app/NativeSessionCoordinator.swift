@@ -1088,8 +1088,9 @@ final class NativeSessionCoordinator {
     }
     func extendOldCode() throws { try deviceStore.extendOldCode(); refreshShare() }
 
+    /// Pairing works while another Mac is on screen: that session stays up
+    /// until the new Mac connects, and a failed pairing leaves it as it was.
     func showConnect() {
-        if let viewerWindow, isConnected { viewerWindow.showWindow(nil); NSApp.activate(ignoringOtherApps: true); return }
         if pairWindow == nil {
             let controller = NativePairWindow(); pairWindow = controller
             controller.onConnect = { [weak self] rawCode, override in
@@ -1105,7 +1106,16 @@ final class NativeSessionCoordinator {
         }
         pairWindow?.setBusy(false); pairWindow?.error.stringValue = ""
         pairWindow?.setPrivacy(MooringPrivacy.isEnabled)
+        pairWindow?.setViewing(connectedPeerID.map { id in
+            MooringPrivacy.name(peers.first { $0.id == id }?.name ?? "The Mac on screen", id: id)
+        })
         pairWindow?.showWindow(nil); pairWindow?.window?.center(); NSApp.activate(ignoringOtherApps: true)
+    }
+    /// Brings the session already showing `peerID` forward; false when none is.
+    private func returnToViewer(_ peerID: String) -> Bool {
+        guard isConnected, let viewerWindow, viewerWindow.peerID == peerID else { return false }
+        viewerWindow.showWindow(nil); NSApp.activate(ignoringOtherApps: true)
+        return true
     }
     /// Remove a pairing from this Mac: its saved metadata and its Keychain secret.
     func forget(peerID: String) throws {
@@ -1123,9 +1133,10 @@ final class NativeSessionCoordinator {
         peers = (try? peerStore.load()) ?? peers.filter { $0.id != peerID }
     }
     /// A user's connect or Reconnect click; it starts a fresh reconnect budget.
+    /// Another Mac on screen stays connected until this one connects.
     func connect(peerID: String) {
         resumeAfterWake = nil
-        if isConnected { viewerWindow?.showWindow(nil); NSApp.activate(ignoringOtherApps: true); return }
+        if returnToViewer(peerID) { return }
         stopReconnecting()
         startConnect(peerID: peerID)
     }
@@ -1147,11 +1158,19 @@ final class NativeSessionCoordinator {
     /// Mooring forward or take keyboard focus from another app.
     /// `addresses` are tried together, the first preferred.
     private func connect(code: NativePairingCode, addresses: [String], pairing: Bool = false, automatic: Bool = false) {
-        guard !isConnected, !capabilityGate.isStopped else { return }
+        guard !(automatic && isConnected), !capabilityGate.isStopped else { return }
+        // Its code while it's on screen: that Mac is busy showing this one, so
+        // pairing again can't reach it. Bring its session forward instead.
+        if returnToViewer(code.peerID) {
+            if pairing { pairWindow?.code.stringValue = ""; pairWindow?.close() }
+            return
+        }
         if let current = connecting {
-            // A new pairing takes over from automatic reconnecting; anything else waits.
-            guard pairing, !current.pairing else { return }
-            endReconnecting(reason: lastViewerEnd.isEmpty ? "Reconnecting stopped for a new pairing." : lastViewerEnd)
+            // A new pairing, or a user's connect to another Mac, takes over
+            // from reconnecting; anything else waits.
+            guard !current.pairing, pairing || (!automatic && current.peerID != code.peerID) else { return }
+            endReconnecting(reason: lastViewerEnd.isEmpty
+                            ? (pairing ? "Reconnecting stopped for a new pairing." : "Reconnecting stopped for another Mac.") : lastViewerEnd)
         }
         var candidates: [String] = []
         for entry in addresses {
@@ -1334,6 +1353,8 @@ final class NativeSessionCoordinator {
     /// `pairing`: the clipboard may still hold the code just pasted, so what is
     /// already copied is not shared for this first session.
     private func beginViewer(_ transport: NativeTransport, peer: NativePeer, activate: Bool, pairing: Bool = false) {
+        // One Mac on screen at a time: the one showing leaves now that this one connected.
+        if viewerChannel != nil { disconnectViewer(reason: "Switched to another Mac.", leaving: true) }
         MooringPrivacy.register(name: peer.name, id: peer.id, addresses: peer.addresses)
         let channel = NativeSessionChannel(transport), decoder = NativeVideoDecoder()
         viewerChannel = channel; self.decoder = decoder; lastViewerMeasurements = channel.measurements

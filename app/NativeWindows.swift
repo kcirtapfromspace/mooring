@@ -73,6 +73,8 @@ final class NativePairWindow: NSWindowController, NSWindowDelegate, NSTextFieldD
     let address = NSTextField(string: "")
     let error = label("", size: 12, color: .systemRed)
     let connect = NSButton(title: "Pair & connect", target: nil, action: nil)
+    private static let instructions = "On your other Mac: Mooring → Share this Mac → Start sharing. Copy its code here."
+    private let note = label(NativePairWindow.instructions, color: .secondaryLabelColor)
     private let options = NSButton(title: "Address override", target: nil, action: nil)
     private var addressForm: NSStackView!
     private var busy = false
@@ -85,7 +87,6 @@ final class NativePairWindow: NSWindowController, NSWindowDelegate, NSTextFieldD
         super.init(window: window)
         window.delegate = self
         let heading = MooringAppearance.header("Pair a Mac", subtitle: "Pair once. Connect anytime.")
-        let note = label("On your other Mac: Mooring → Share this Mac → Start sharing. Copy its code here.", color: .secondaryLabelColor)
         code.placeholderString = "Paste pairing code"; code.setAccessibilityLabel("Pairing code")
         address.placeholderString = "Optional address"; address.setAccessibilityLabel("Mac address override")
         code.controlSize = .large; address.controlSize = .large
@@ -130,6 +131,10 @@ final class NativePairWindow: NSWindowController, NSWindowDelegate, NSTextFieldD
         addressForm.isHidden = !expanded
         options.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
         window?.setContentSize(NSSize(width: 560, height: expanded ? 460 : 380))
+    }
+    /// `name`: the Mac on screen now, which disconnects once the new one connects.
+    func setViewing(_ name: String?) {
+        note.stringValue = name.map { Self.instructions + " \($0) disconnects once the new Mac connects." } ?? Self.instructions
     }
     func setPrivacy(_ hidden: Bool) {
         addressForm.isHidden = hidden || options.state != .on
