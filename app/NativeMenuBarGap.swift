@@ -66,6 +66,9 @@ final class NativeMenuBarGap {
     /// or leave more than half an icon's room beyond the placement's for ten;
     /// at most every 30 seconds.
     private static let extraSpare: CGFloat = 24
+    /// More room to spare than this usually means icons that share one
+    /// stored position, a block nothing can be placed inside.
+    private static let wideSpare: CGFloat = 64
     private static let replaceWhenShort = 5
     private static let replaceWhenSpare = 10
     private static let replaceSpacing: TimeInterval = 30
@@ -128,6 +131,9 @@ final class NativeMenuBarGap {
                 let position = placement?.position.map { "position \(Int($0.rounded()))" } ?? "leftmost"
                 let points = Int(spare.rounded())
                 NativeLog.session.notice("menu bar gap placed beside the viewer's camera, \(points) point\(points == 1 ? "" : "s", privacy: .public) to spare on its right (\(position, privacy: .public) after \(self.placement?.trials ?? 0) trials)")
+                if spare > Self.wideSpare {
+                    NativeLog.session.notice("the menu bar icons left of the gap may share one stored position, which keeps them together; ⌘-drag each of them once on this Mac so the gap can fit the viewer's camera")
+                }
             }
             let short = spare < -Self.tolerance, roomy = spare > (placedSpare ?? spare) + Self.extraSpare
             driftSeconds = short || roomy ? driftSeconds + 1 : 0

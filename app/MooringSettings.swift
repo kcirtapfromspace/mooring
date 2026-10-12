@@ -103,6 +103,8 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
             button.identifier = NSUserInterfaceItemIdentifier("\(setting)")
             button.setAccessibilityLabel(button.title)
         }
+        extendsBesideCamera.toolTip = "If the other Mac’s icons leave a wide space beside the notch, ⌘-drag each of them once on that Mac, in the order you like, so each keeps its own place."
+
         for button in [allowKeyboardAndMouse, updateButton, stopOldCode, extendOldCode] { button.bezelStyle = .rounded; button.target = self }
         for button in [stopOldCode, extendOldCode] { button.controlSize = .small }
         stopOldCode.action = #selector(stopOld)
