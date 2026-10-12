@@ -11,8 +11,11 @@ import AppKit
 /// by its "NSStatusItem Preferred Position" default, in the order of the
 /// items' stored positions rather than at an exact distance, so placement
 /// is a short search: create a trial item at a position, see where it lands,
-/// remove it, and halve the range, at most six times (about three seconds).
-/// One item at a time: each one moves its neighbors. App menus
+/// remove it, and halve the range, down to a point (at most ten trials,
+/// about four seconds, each read once the item stops sliding into place). Some slots are reachable only through a window of
+/// 10 to 20 points of position, so a coarser search can skip the nearest one
+/// and leave icons' worth of room to spare. One trial at a time: each one
+/// moves its neighbors. App menus
 /// still take precedence; when they reach the gap, macOS hides status items.
 /// Checked once a second while a viewer that reads it is connected. Main thread.
 final class NativeMenuBarGap {
@@ -31,14 +34,23 @@ final class NativeMenuBarGap {
     /// The placed item sits right of the gap, rather than left of icons
     /// that already reach past it.
     private var clearsGap = false
-    /// Seconds in a row the item's right edge has been inside the gap.
-    private var shortSeconds = 0
+    /// Room to spare between the gap's right edge and the item's, as placed;
+    /// nil until measured.
+    private var placedSpare: CGFloat?
+    /// Seconds in a row the spare room has drifted from the placement.
+    private var driftSeconds = 0
     private static let name = "MooringCameraGap"
-    private static let maxSteps = 6
-    /// Status items to the item's right can grow, as a network meter does,
-    /// and push icons back under the gap. Place again only when that lasts
-    /// five seconds, at most every 30 seconds.
-    private static let replaceAfter = 5
+    private static let maxSteps = 10
+    /// A slot this little short of the gap's right edge still clears the
+    /// housing: the viewer's gap has a margin each side.
+    private static let tolerance: CGFloat = 4
+    /// Status items to the item's right grow and shrink, as a network meter
+    /// does. Place again when they push icons into the gap for five seconds,
+    /// or leave more than half an icon's room beyond the placement's for ten;
+    /// at most every 30 seconds.
+    private static let extraSpare: CGFloat = 24
+    private static let replaceWhenShort = 5
+    private static let replaceWhenSpare = 10
     private static let replaceSpacing: TimeInterval = 30
 
     func start() {
@@ -92,10 +104,17 @@ final class NativeMenuBarGap {
             if mayPlace { removeItems(); place() }
             return
         }
-        let right = frame.maxX - screen.frame.minX
-        shortSeconds = clearsGap && right < CGFloat(gap.x + gap.width) - 4 ? shortSeconds + 1 : 0
-        if shortSeconds >= Self.replaceAfter && mayPlace { removeItems(); place(); return }
-        fit(item, right: right, gap: gap)
+        let right = frame.maxX - screen.frame.minX, spare = right - CGFloat(gap.x + gap.width)
+        if clearsGap {
+            if placedSpare == nil {
+                placedSpare = spare
+                NativeLog.session.notice("menu bar gap placed beside the viewer's camera, \(Int(spare.rounded())) points to spare on its right")
+            }
+            let short = spare < -Self.tolerance, roomy = spare > (placedSpare ?? spare) + Self.extraSpare
+            driftSeconds = short || roomy ? driftSeconds + 1 : 0
+            if driftSeconds >= (short ? Self.replaceWhenShort : Self.replaceWhenSpare) && mayPlace { removeItems(); place(); return }
+        }
+        fit(item, right: right, padding: frame.width - item.length, gap: gap)
     }
 
     /// Searches for the slot whose right edge is nearest the gap's right edge
@@ -109,36 +128,49 @@ final class NativeMenuBarGap {
     }
     private func probe(generation: Int) {
         guard generation == searchGeneration, let current = search, let gap, let screen = sharedScreen else { return }
-        if current.steps >= Self.maxSteps || current.high - current.low < 8 {
+        if current.steps >= Self.maxSteps || current.high - current.low < 1 {
             finish(current.best, gap: gap, screen: screen); return
         }
         let position = (current.low + current.high) / 2
         let candidate = makeItem(position: position)
         trial = candidate
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self, generation == self.searchGeneration, var current = self.search else { return }
-            let right = candidate.button?.window.map { $0.frame.maxX - screen.frame.minX } ?? 0
+        settled(candidate, generation: generation) { [weak self] right in
+            guard let self, var current = self.search else { return }
             NSStatusBar.system.removeStatusItem(candidate); self.trial = nil
             current.steps += 1
             // Right of the gap: remember it, and try further left.
-            if right >= CGFloat(gap.x + gap.width) { current.best = position; current.low = position }
+            if right >= CGFloat(gap.x + gap.width) - Self.tolerance { current.best = position; current.low = position }
             else { current.high = position }
             self.search = current
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.probe(generation: generation) }
         }
     }
+    /// The item's right edge once it stops moving: macOS slides a new status
+    /// item into place, and an early reading is an item's width short. Read
+    /// every 0.15 seconds until two agree, at most six times.
+    private func settled(_ item: NSStatusItem, generation: Int, previous: CGFloat? = nil, reads: Int = 0,
+                         then: @escaping (CGFloat) -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self, generation == self.searchGeneration, let screen = self.sharedScreen else { return }
+            let right = item.button?.window.map { $0.frame.maxX - screen.frame.minX } ?? 0
+            if right == previous || reads >= 5 { then(right) }
+            else { self.settled(item, generation: generation, previous: right, reads: reads + 1, then: then) }
+        }
+    }
     private func finish(_ best: CGFloat?, gap: (x: Int, width: Int), screen: NSScreen) {
         search = nil; placedAt = ProcessInfo.processInfo.systemUptime
-        clearsGap = best != nil; shortSeconds = 0
+        clearsGap = best != nil; placedSpare = nil; driftSeconds = 0
         // When even the rightmost slot is left of the gap's right edge, the
         // icons under the housing can't move; the leftmost slot still keeps
         // icons added later out of it. The length is fitted once a second.
         item = makeItem(position: best ?? screen.frame.width)
-        NativeLog.session.notice("\(best == nil ? "status items already reach past the viewer's camera; menu bar gap starts left of them" : "menu bar gap placed beside the viewer's camera", privacy: .public)")
+        if best == nil { NativeLog.session.notice("status items already reach past the viewer's camera; menu bar gap starts left of them") }
     }
-    /// The length that reaches from the item's right edge to the gap's left edge.
-    private func fit(_ item: NSStatusItem, right: CGFloat, gap: (x: Int, width: Int)) {
-        let length = max(1, (right - CGFloat(gap.x)).rounded(.up))
+    /// The length that reaches from the item's right edge to the gap's left
+    /// edge. Its window is wider than its length by the menu bar's spacing
+    /// (16 points on macOS 27), measured each time.
+    private func fit(_ item: NSStatusItem, right: CGFloat, padding: CGFloat, gap: (x: Int, width: Int)) {
+        let length = max(1, (right - CGFloat(gap.x) - min(24, max(0, padding))).rounded(.up))
         if abs(item.length - length) >= 1 { item.length = length }
     }
     private func makeItem(position: CGFloat) -> NSStatusItem {
