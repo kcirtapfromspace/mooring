@@ -601,6 +601,17 @@ Reported from a new 14-inch MacBook Pro (M5 Max, macOS 27.0.1, 1800×1169 points
   - The search halves the range of values up to six times, about three seconds of icons moving, and keeps the largest value whose item lands at or right of the gap's right edge. It then creates the spacer there and lengthens it to the gap's left edge.
   - Asked for a gap at 1400–1460 among this Mac's status icons, the spacer spanned 1384–1477.
   - It is placed again if icons to its right grow into the gap for five seconds, at most every 30 seconds. When no slot reaches past the gap, it stays leftmost and isn't placed again.
+- **Preview 40 between the two Macs.** Icons left the notch, but the gap reached about 80 points past it on the right.
+  - Some slots can be reached only through a 10–20-point window of position values. After six halvings the range is still about 12 points wide, so the search could skip the nearest slot.
+  - The item's window is 16 points wider than its length, which pushed its left edge 16 points past the gap's left edge.
+- **Calibration, for preview 41.**
+  - The search now halves down to a point (at most ten trials). Each trial is read once two readings 0.15 seconds apart agree.
+  - The length subtracts the measured window padding.
+  - The remote logs the room to spare on the right ("N points to spare").
+  - It is placed again when icons push into the gap for five seconds, or leave more than 24 points beyond the placement's spare room for ten seconds; at most every 30 seconds.
+  - Asked for 1400–1460 on this Mac, the spacer spanned exactly 1400–1477: 17 points to spare, where the nearest slots were 1477 and 1443.
+  - A trial item hidden from accessibility, or disabled, lands one 17-point slot left of a plain one. Trials and the spacer share one setup, so they agree.
+  - Captured on screen, a visible marker sat where its window frame said.
 - **Not yet verified.**
   - The end-to-end session needs this build on both Macs.
   - The sharing Mac's layout with long app menus, and status items that already reach the notch, are untested.
