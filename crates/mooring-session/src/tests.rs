@@ -1614,6 +1614,7 @@ const TEST_CAPABILITIES: u64 = ML_CAPABILITY_HEVC_444
     | ML_CAPABILITY_VERSION
     | ML_CAPABILITY_REMOTE_UPDATE
     | ML_CAPABILITY_WAITS
+    | ML_CAPABILITY_MENU_BAR_GAP
     | 1 << 40; // plus a bit no build knows
 fn hello(id: u64) -> u64 {
     let mut buffer = vec![0; 4096];
@@ -1845,6 +1846,76 @@ fn viewers_ask_capable_hosts_for_a_display_their_size() {
         Error::Invalid as i32
     );
     assert!(!is_closed(old_viewer.0));
+}
+
+fn menu_bar(kind: u8, x: f64, width: f64, height: f64) -> MLControlMessage {
+    MLControlMessage {
+        kind,
+        geometry: MLDisplayGeometry {
+            x,
+            width,
+            height,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn viewers_ask_capable_hosts_to_clear_a_menu_bar_gap_and_hosts_report_its_height() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let (viewer, host) = pair_version(5);
+    assert_eq!(
+        (hello(host.0), hello(viewer.0)),
+        (TEST_CAPABILITIES, TEST_CAPABILITIES)
+    );
+    let gap = menu_bar(14, 790.0, 220.0, 0.0);
+    let height = menu_bar(15, 0.0, 0.0, 24.0);
+    assert_eq!(send_control(viewer.0, &gap), 0);
+    assert_eq!(
+        send_control(host.0, &gap),
+        Error::Invalid as i32,
+        "hosts never ask"
+    );
+    assert_eq!(
+        send_control(viewer.0, &height),
+        Error::Invalid as i32,
+        "viewers never report a menu bar"
+    );
+    assert_eq!(
+        send_control(viewer.0, &menu_bar(14, 790.5, 220.0, 0.0)),
+        Error::Invalid as i32,
+        "gaps are whole points"
+    );
+    assert!(!is_closed(viewer.0) && !is_closed(host.0));
+    let mut buffer = vec![0; 4096];
+    let (status, message) = typed(host.0, &mut buffer, 2000);
+    assert_eq!(
+        (
+            status,
+            message.kind,
+            message.control.kind,
+            message.control.geometry.x,
+            message.control.geometry.width
+        ),
+        (0, CONTROL, 14, 790.0, 220.0)
+    );
+    assert_eq!(send_control(host.0, &height), 0);
+    let (status, message) = typed(viewer.0, &mut buffer, 2000);
+    assert_eq!(
+        (
+            status,
+            message.kind,
+            message.control.kind,
+            message.control.geometry.height
+        ),
+        (0, CONTROL, 15, 24.0)
+    );
+    // Protocol 4 has no capabilities, so neither is sent.
+    let (old_viewer, old_host) = pair_version(4);
+    assert_eq!(send_control(old_viewer.0, &gap), Error::Invalid as i32);
+    assert_eq!(send_control(old_host.0, &height), Error::Invalid as i32);
+    assert!(!is_closed(old_viewer.0) && !is_closed(old_host.0));
 }
 
 #[test]

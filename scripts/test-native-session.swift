@@ -177,6 +177,14 @@ enum NativeSessionTests {
         let otherID = otherHost.peerDevice!
         otherViewer.close(); otherHost.close()
         let (revokedCode, viewer, host) = try pair(revokedKey)
+        // Menu bar gaps go viewer to host and heights host to viewer, each
+        // only the way Rust allows.
+        try viewer.send(.control(.menuBarGap(x: 790, width: 220)))
+        guard case .control(.menuBarGap(790, 220)) = try next(host) else { throw Failure("No menu bar gap") }
+        try host.send(.control(.menuBar(height: 24)))
+        guard case .control(.menuBar(24)) = try next(viewer) else { throw Failure("No menu bar height") }
+        try rejects("A host never asks for a menu bar gap") { try host.send(.control(.menuBarGap(x: 0, width: 0))) }
+        try rejects("A viewer never reports a menu bar") { try viewer.send(.control(.menuBar(height: 24))) }
         try viewer.send(.control(.revokePairing))
         guard case .control(.revokePairing) = try next(host) else { throw Failure("No revocation") }
         try require(try devices.load().devices.map(\.id) == [otherID], "Viewer revokes only its own authenticated key")
@@ -273,9 +281,9 @@ enum NativeSessionTests {
     static func testLatency() throws {
         // Every build announces what it always supports; self-tests add the rest.
         let always = UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_GESTURES) | UInt64(ML_CAPABILITY_LATENCY)
-            | UInt64(ML_CAPABILITY_VERSION) | UInt64(ML_CAPABILITY_PAIRING_REVOCATION)
+            | UInt64(ML_CAPABILITY_VERSION) | UInt64(ML_CAPABILITY_PAIRING_REVOCATION) | UInt64(ML_CAPABILITY_MENU_BAR_GAP)
         try require(NativeCapabilities.local(hevc444: false, virtualDisplay: false, audio: false) == always,
-                    "Pointer shapes, gestures, latency and versions are always announced; the 12-hour wait no longer is")
+                    "Pointer shapes, gestures, latency, versions and menu bar gaps are always announced; the 12-hour wait no longer is")
         let everything = always | UInt64(ML_CAPABILITY_HEVC_444) | UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) | UInt64(ML_CAPABILITY_AUDIO)
             | UInt64(ML_CAPABILITY_REMOTE_UPDATE)
         try require(NativeCapabilities.local(hevc444: true, virtualDisplay: true, audio: true, updatesItself: true) == everything,
@@ -445,14 +453,15 @@ enum NativeSessionTests {
                                               .version(NativeVersion(build: 24, release: 3 << 32 | 19)), .updateRequest,
                                               .updateStatus(.checking, ready: nil),
                                               .updateStatus(.ready, ready: NativeVersion(build: 25, release: 3 << 32 | 20)),
-                                              .leaving, .revokePairing] {
+                                              .leaving, .revokePairing, .menuBarGap(x: 790, width: 220), .menuBarGap(x: 0, width: 0),
+                                              .menuBar(height: 24), .menuBar(height: 0)] {
             try require(try NativeControlMessage(validated: message.raw) == message, "Every control message round-trips the C ABI")
         }
         try testLatency()
         try testCapabilityGate()
         try testWakeRecovery()
         try testPointer()
-        var unknown = MLControlMessage(); unknown.kind = 14
+        var unknown = MLControlMessage(); unknown.kind = 16
         try rejects("Unknown control kinds are rejected") { _ = try NativeControlMessage(validated: unknown) }
 
         try testTelemetry()

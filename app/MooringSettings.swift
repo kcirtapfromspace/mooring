@@ -13,6 +13,7 @@ struct MooringSettingsState {
     var connectedDeviceID: String?
     var legacy = NativeLegacyState()
     var matchesScreen = true
+    var extendsBesideCamera = true
     var playsSound = true
     var lowersDisplayLatency = false
     var showsDiagnosticBar = true
@@ -30,7 +31,7 @@ struct MooringSettingsState {
 }
 
 enum MooringSetting {
-    case sharesAutomatically, sharesClipboard, matchesScreen, playsSound, lowersDisplayLatency, showsDiagnosticBar, hidesComputerInformation, launchesAtLogin
+    case sharesAutomatically, sharesClipboard, matchesScreen, extendsBesideCamera, playsSound, lowersDisplayLatency, showsDiagnosticBar, hidesComputerInformation, launchesAtLogin
 }
 
 /// One window for everything a person may want to change, in three parts:
@@ -56,6 +57,7 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
     private let keyboardAndMouse = label("", size: 12, color: .secondaryLabelColor)
     private let allowKeyboardAndMouse = NSButton(title: "Allow control…", target: nil, action: nil)
     private let matchesScreen = NSButton(checkboxWithTitle: "Match this screen", target: nil, action: nil)
+    private let extendsBesideCamera = NSButton(checkboxWithTitle: "Use the space beside the camera", target: nil, action: nil)
     private let playsSound = NSButton(checkboxWithTitle: "Play remote sound", target: nil, action: nil)
     private let lowersDisplayLatency = NSButton(checkboxWithTitle: "Lower display latency (may tear)", target: nil, action: nil)
     private let showsDiagnosticBar = NSButton(checkboxWithTitle: "Show diagnostics", target: nil, action: nil)
@@ -93,7 +95,7 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
     private func configure() {
         let toggles: [(NSButton, MooringSetting)] = [
             (sharesAutomatically, .sharesAutomatically), (sharesClipboard, .sharesClipboard), (matchesScreen, .matchesScreen),
-            (playsSound, .playsSound), (lowersDisplayLatency, .lowersDisplayLatency),
+            (extendsBesideCamera, .extendsBesideCamera), (playsSound, .playsSound), (lowersDisplayLatency, .lowersDisplayLatency),
             (showsDiagnosticBar, .showsDiagnosticBar), (hidesComputerInformation, .hidesComputerInformation), (launchesAtLogin, .launchesAtLogin)
         ]
         for (button, setting) in toggles {
@@ -143,6 +145,7 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
         ])
         let viewing = section("Viewing another Mac", nil, [
             option(matchesScreen, "A remote screen at this Mac’s size, pixel for pixel."),
+            option(extendsBesideCamera, "In full screen, the other Mac’s menu bar moves up beside this Mac’s camera, and its menus leave room for it."),
             option(playsSound, "Sound also keeps playing on the sharing Mac."),
             option(lowersDisplayLatency, "Display frames sooner. Motion may show tear lines."),
             option(showsDiagnosticBar, "⌃⌘D toggles the footer. ⌃⌘I opens live stats."),
@@ -198,6 +201,8 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
             : "View only. Allow Accessibility for control."
         allowKeyboardAndMouse.isHidden = state.keyboardAndMouseAllowed
         matchesScreen.state = state.matchesScreen ? .on : .off
+        extendsBesideCamera.state = state.extendsBesideCamera ? .on : .off
+        extendsBesideCamera.isEnabled = state.matchesScreen
         playsSound.state = state.playsSound ? .on : .off
         lowersDisplayLatency.state = state.lowersDisplayLatency ? .on : .off
         showsDiagnosticBar.state = state.showsDiagnosticBar ? .on : .off
@@ -316,6 +321,7 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
     @objc private func toggled(_ sender: NSButton) {
         let settings: [String: MooringSetting] = [
             "sharesAutomatically": .sharesAutomatically, "sharesClipboard": .sharesClipboard, "matchesScreen": .matchesScreen,
+            "extendsBesideCamera": .extendsBesideCamera,
             "playsSound": .playsSound, "lowersDisplayLatency": .lowersDisplayLatency,
             "showsDiagnosticBar": .showsDiagnosticBar, "hidesComputerInformation": .hidesComputerInformation, "launchesAtLogin": .launchesAtLogin
         ]

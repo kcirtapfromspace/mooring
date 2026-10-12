@@ -90,14 +90,37 @@ enum NativeInputTests {
                 "AppKit bottom-left coordinates map to remote top-left")
         require(NativeInputGeometry.normalized(point: CGPoint(x: 20, y: 30), contentRect: content, flipped: true) == .zero,
                 "Flipped views use a top-left origin directly")
-        require(NativeInputGeometry.normalized(point: CGPoint(x: 420, y: 255), contentRect: content, flipped: false) == CGPoint(x: 0.5, y: 0.5),
-                "Letterboxed image center maps to normalized center")
+        let middle = NativeInputGeometry.normalized(point: CGPoint(x: 419.5, y: 255.5), contentRect: content, flipped: false)!
+        require(close(middle.x, 0.5) && close(middle.y, 0.5), "Letterboxed image center maps to normalized center")
+        require(NativeInputGeometry.normalized(point: CGPoint(x: 819, y: 31), contentRect: content, flipped: false) == CGPoint(x: 1, y: 1),
+                "The last point the pointer reaches maps to the remote display's far edges")
+        require(NativeInputGeometry.normalized(point: CGPoint(x: 819.75, y: 479.5), contentRect: content, flipped: true) == CGPoint(x: 1, y: 1),
+                "Within the last point the pointer stays on the far edge")
+        let sameSize = CGRect(x: 0, y: 0, width: 1800, height: 1096), remote = CGRect(x: 0, y: 0, width: 1800, height: 1096)
+        for local in [CGPoint(x: 0, y: 0), CGPoint(x: 1799, y: 1095), CGPoint(x: 900, y: 548), CGPoint(x: 1234, y: 77)] {
+            let normal = NativeInputGeometry.normalized(point: local, contentRect: sameSize, flipped: true)!
+            let mapped = try NativeInputGeometry.point(x: normal.x, y: normal.y, displayBounds: remote)
+            require(close(mapped.x, local.x) && close(mapped.y, local.y), "A same-size remote display maps every point to itself")
+        }
         require(NativeInputGeometry.normalized(point: CGPoint(x: 5, y: 255), contentRect: content, flipped: false) == nil,
                 "Letterbox clicks are ignored")
         require(NativeInputGeometry.normalized(point: CGPoint(x: -100, y: 900), contentRect: content, flipped: false, clamp: true) == .zero,
                 "Drag release outside the image clamps to the image edge")
         require(NativeInputGeometry.normalized(point: CGPoint(x: CGFloat.nan, y: 0), contentRect: content, flipped: true, clamp: true) == nil,
                 "Even clamped coordinates must be finite")
+
+        // A 14-inch MacBook Pro at 1800×1169 points: the housing spans 790-1010.
+        let housing = CGRect(x: 790, y: 1131, width: 220, height: 38)
+        let full = CGRect(x: 0, y: 0, width: 1800, height: 1120)
+        require(NativeInputGeometry.hiddenSpan(of: housing, in: full, remoteWidth: 1800)! == (782, 236),
+                "A same-size remote display keeps the housing and an 8-point margin each side clear")
+        require(NativeInputGeometry.hiddenSpan(of: housing, in: full, remoteWidth: 1736)! == (754, 228),
+                "A display scaled to fit the 4K limit gets the span in its own points")
+        require(NativeInputGeometry.hiddenSpan(of: housing, in: CGRect(x: 1200, y: 0, width: 400, height: 300), remoteWidth: 1600) == nil,
+                "A housing beside the picture hides none of it")
+        require(NativeInputGeometry.hiddenSpan(of: CGRect(x: -50, y: 0, width: 60, height: 38), in: full, remoteWidth: 1800)! == (0, 18),
+                "A span stays within the display")
+        require(NativeInputGeometry.hiddenSpan(of: housing, in: full, remoteWidth: .nan) == nil, "Invalid remote widths are refused")
 
         let modifiers = NativeInputEncoder()
         require(modifiers.modifierEvent(keyCode: 56, modifiers: .shift, deviceFlags: 0x02)?.kind == .keyDown,
@@ -191,7 +214,41 @@ enum NativeInputTests {
                 "⌘-Tab, Spotlight, ⌘-Esc and ⌘-Q go to the remote Mac")
         require(NativeSystemKeyCapture().isRunning == false, "A new capture installs no tap until started")
         let dispatch = testCommandKeyUps()
-        print("Native input tests passed: \(checks) checks; validation, wire round-trips, geometry, left/right modifiers, the Rust input boundary, and \(dispatch). No permissions requested or system events posted.")
+        let edges = testPointerEdges()
+        print("Native input tests passed: \(checks) checks; validation, wire round-trips, geometry, left/right modifiers, the Rust input boundary, \(edges) and \(dispatch). No permissions requested or system events posted.")
+    }
+
+    /// Pointer moves past the picture, encoded against an off-screen window's
+    /// view. Nothing is posted or dispatched.
+    static func testPointerEdges() -> String {
+        guard CGSessionCopyCurrentDictionary() != nil else { return "pointer edges skipped (no window server session)" }
+        final class Flipped: NSView { override var isFlipped: Bool { true } }
+        let window = NSWindow(contentRect: NSRect(x: -20_000, y: -20_000, width: 1000, height: 600),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let view = Flipped(frame: window.contentView!.bounds)
+        window.contentView!.addSubview(view)
+        // A 4:3 picture letterboxed in a 1000×600 view: bars 100 points wide.
+        let picture = CGRect(x: 100, y: 0, width: 800, height: 600)
+        func move(_ x: CGFloat, _ y: CGFloat) -> NSEvent {
+            // Window coordinates have a bottom-left origin.
+            NSEvent.mouseEvent(with: .mouseMoved, location: NSPoint(x: x, y: 600 - y), modifierFlags: [], timestamp: 0,
+                               windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)!
+        }
+        let encoder = NativeInputEncoder()
+        let inBar = encoder.encode(move(980, 300), in: view, contentRect: picture)
+        require(inBar?.kind == .pointerMove && inBar?.x == 1 && close(inBar!.y!, 300 / 599.0),
+                "Crossing a letterbox bar holds the remote pointer at that edge")
+        require(encoder.encode(move(1200, 300), in: view, contentRect: picture) == nil,
+                "In a window, moves outside the view are not sent")
+        encoder.holdsPointerAtEdges = true
+        let past = encoder.encode(move(1200, -40), in: view, contentRect: picture)
+        require(past?.x == 1 && past?.y == 0, "In full screen, leaving the picture holds the pointer at the corner it left by")
+        let click = NSEvent.mouseEvent(with: .leftMouseDown, location: NSPoint(x: 980, y: 300), modifierFlags: [], timestamp: 0,
+                                       windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        require(encoder.encode(click, in: view, contentRect: picture) == nil, "Clicks in the bars stay ignored in full screen")
+        return "pointer edges"
     }
 
     /// In-process AppKit dispatch through an off-screen window that is never

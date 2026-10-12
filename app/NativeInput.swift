@@ -128,13 +128,29 @@ enum NativeInputGeometry {
                        y: displayBounds.minY + y * max(0, displayBounds.height - 1))
     }
 
+    /// The image's first and last point map to 0 and 1, as `point` maps them
+    /// back on the sharing Mac. This Mac's pointer stops within a point of a
+    /// screen edge, so the remote pointer still reaches the remote edge, where
+    /// an automatically hidden Dock or menu bar and hot corners respond.
     static func normalized(point: CGPoint, contentRect: CGRect, flipped: Bool, clamp: Bool = false) -> CGPoint? {
         guard isValid(contentRect), point.x.isFinite, point.y.isFinite else { return nil }
-        let x = (point.x - contentRect.minX) / contentRect.width
-        let y = flipped ? (point.y - contentRect.minY) / contentRect.height
-            : (contentRect.maxY - point.y) / contentRect.height
-        guard clamp || ((0...1).contains(x) && (0...1).contains(y)) else { return nil }
+        let left = point.x - contentRect.minX
+        let top = flipped ? point.y - contentRect.minY : contentRect.maxY - point.y
+        guard clamp || ((0...contentRect.width).contains(left) && (0...contentRect.height).contains(top)) else { return nil }
+        let x = left / max(1, contentRect.width - 1), y = top / max(1, contentRect.height - 1)
         return CGPoint(x: min(1, max(0, x)), y: min(1, max(0, y)))
+    }
+
+    /// The span of a sharing display `remoteWidth` points wide that a camera
+    /// housing hides when the picture is shown at `shown`, widened by
+    /// `margin` of this Mac's points each side, in whole remote points; nil
+    /// when the housing misses the picture. Both rectangles share coordinates.
+    static func hiddenSpan(of housing: CGRect, in shown: CGRect, remoteWidth: Double, margin: CGFloat = 8) -> (x: Int, width: Int)? {
+        guard isValid(shown), isValid(housing), remoteWidth.isFinite, remoteWidth >= 1 else { return nil }
+        let points = remoteWidth / shown.width, limit = min(remoteWidth, 7680).rounded(.down)
+        let left = min(limit, max(0, ((housing.minX - margin - shown.minX) * points).rounded(.down)))
+        let right = min(limit, max(0, ((housing.maxX + margin - shown.minX) * points).rounded(.up)))
+        return right - left >= 1 ? (Int(left), Int(right - left)) : nil
     }
 }
 
@@ -143,6 +159,9 @@ enum NativeInputGeometry {
 final class NativeInputEncoder {
     private var heldKeys = Set<UInt16>()
     private var heldButtons = Set<UInt8>()
+    /// Full screen: a move past the picture holds the remote pointer at that
+    /// edge, as a screen edge would, however fast the pointer got there.
+    var holdsPointerAtEdges = false
 
     static func isModifierKey(_ code: UInt16) -> Bool { modifierFamily(code) != nil }
     private static func modifierFamily(_ code: UInt16) -> NativeInputModifiers? {
@@ -213,12 +232,15 @@ final class NativeInputEncoder {
             let isButton = kind == .pointerDown || kind == .pointerUp
             guard !isButton || (0...2).contains(event.buttonNumber) else { return nil }
             let button = isButton ? UInt8(event.buttonNumber) : nil
-            // Continue drags and their release outside a letterboxed image. New
-            // clicks and scrolls in the black bars are intentionally ignored.
-            let clamp = (kind == .pointerMove && !heldButtons.isEmpty)
+            // Continue drags and their release outside a letterboxed image, and
+            // keep a pointer that crosses the black bars, or leaves the picture
+            // in full screen, at the edge it crossed. New clicks and scrolls in
+            // the bars are intentionally ignored.
+            let local = view.convert(event.locationInWindow, from: nil)
+            let clamp = (kind == .pointerMove && (!heldButtons.isEmpty || holdsPointerAtEdges || view.bounds.contains(local)))
                 || (kind == .pointerUp && button.map { heldButtons.contains($0) } == true)
-            guard let position = NativeInputGeometry.normalized(point: view.convert(event.locationInWindow, from: nil),
-                                                                 contentRect: contentRect, flipped: view.isFlipped, clamp: clamp) else { return nil }
+            guard let position = NativeInputGeometry.normalized(point: local, contentRect: contentRect,
+                                                                 flipped: view.isFlipped, clamp: clamp) else { return nil }
             let scale = event.type == .scrollWheel && !event.hasPreciseScrollingDeltas ? 10.0 : 1.0
             let dx = kind == .scroll ? min(1200, max(-1200, event.scrollingDeltaX * scale)) : nil
             let dy = kind == .scroll ? min(1200, max(-1200, event.scrollingDeltaY * scale)) : nil

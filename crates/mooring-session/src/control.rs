@@ -3,7 +3,8 @@
 //! ping_id:u64, x:f64, y:f64, width:f64, height:f64, pixel_width:u32,
 //! pixel_height:u32. Fields a kind does not use must be zero. A clock reply
 //! carries the host's time in microseconds as pixel_width (high 32 bits) and
-//! pixel_height (low 32 bits).
+//! pixel_height (low 32 bits). A menu bar gap carries whole points in x and
+//! width; a menu bar report carries whole points in height.
 
 use crate::video::valid_dimensions;
 use crate::{Error, Result};
@@ -11,6 +12,10 @@ use crate::{Error, Result};
 pub(crate) const CONTROL_BYTES: usize = 52;
 const COORDINATE_LIMIT: f64 = 100_000.0;
 const SIZE_LIMIT: f64 = 32_768.0;
+/// A menu bar gap lies within the widest display a viewer may request.
+const MENU_BAR_GAP_LIMIT: u32 = 7680;
+/// The tallest menu bar strip a host reports, in points.
+const MENU_BAR_HEIGHT_LIMIT: u32 = 100;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct DisplayGeometry {
@@ -69,6 +74,12 @@ pub(crate) enum ControlKind {
     Leaving = 12,
     /// Either side removed this authenticated pairing; all fields zero.
     RevokePairing = 13,
+    /// Protocol 5, viewer to a host that keeps part of its menu bar clear:
+    /// the part hidden behind the viewer's camera housing.
+    MenuBarGap = 14,
+    /// Protocol 5, host to a viewer that asked for a gap: the height of the
+    /// shared display's menu bar strip.
+    MenuBar = 15,
 }
 
 /// A Mooring release like 0.3.0-preview.19, packed as major, minor, patch
@@ -180,6 +191,18 @@ pub(crate) enum ControlMessage {
     },
     Leaving,
     RevokePairing,
+    /// Keep `width` points of the menu bar clear from `x` points right of the
+    /// shared display's left edge, in geometry.x and geometry.width. Both
+    /// zero removes the gap.
+    MenuBarGap {
+        x: u32,
+        width: u32,
+    },
+    /// The shared display's menu bar strip, `height` points in
+    /// geometry.height; 0 when it shows none, as when it hides automatically.
+    MenuBar {
+        height: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -224,6 +247,11 @@ impl DisplayRequest {
             pixel_height: self.height * self.scale,
         }
     }
+}
+
+/// A whole number of points from 0 to `limit`, or None.
+fn whole_points(value: f64, limit: u32) -> Option<u32> {
+    (value.fract() == 0.0 && (0.0..=f64::from(limit)).contains(&value)).then_some(value as u32)
 }
 
 impl ControlMessage {
@@ -276,6 +304,30 @@ impl ControlMessage {
             10 if !enabled && geometry.is_zero() && ping_id == 0 => Self::UpdateRequest,
             12 if !enabled && geometry.is_zero() && ping_id == 0 => Self::Leaving,
             13 if !enabled && geometry.is_zero() && ping_id == 0 => Self::RevokePairing,
+            14 if !enabled
+                && ping_id == 0
+                && [geometry.y, geometry.height] == [0.0; 2]
+                && [geometry.pixel_width, geometry.pixel_height] == [0; 2] =>
+            {
+                let x = whole_points(geometry.x, MENU_BAR_GAP_LIMIT).ok_or(Error::Invalid)?;
+                let width =
+                    whole_points(geometry.width, MENU_BAR_GAP_LIMIT).ok_or(Error::Invalid)?;
+                // All zero removes the gap; otherwise it has a width and fits.
+                if (x, width) != (0, 0) && (width == 0 || x + width > MENU_BAR_GAP_LIMIT) {
+                    return Err(Error::Invalid);
+                }
+                Self::MenuBarGap { x, width }
+            }
+            15 if !enabled
+                && ping_id == 0
+                && [geometry.x, geometry.y, geometry.width] == [0.0; 3]
+                && [geometry.pixel_width, geometry.pixel_height] == [0; 2] =>
+            {
+                Self::MenuBar {
+                    height: whole_points(geometry.height, MENU_BAR_HEIGHT_LIMIT)
+                        .ok_or(Error::Invalid)?,
+                }
+            }
             11 if !enabled
                 && [geometry.x, geometry.y, geometry.width, geometry.height] == [0.0; 4] =>
             {
@@ -318,6 +370,8 @@ impl ControlMessage {
             Self::UpdateStatus { .. } => ControlKind::UpdateStatus,
             Self::Leaving => ControlKind::Leaving,
             Self::RevokePairing => ControlKind::RevokePairing,
+            Self::MenuBarGap { .. } => ControlKind::MenuBarGap,
+            Self::MenuBar { .. } => ControlKind::MenuBar,
         }
     }
 
@@ -366,6 +420,23 @@ impl ControlMessage {
                 DisplayGeometry {
                     pixel_width: build,
                     pixel_height: state as u32,
+                    ..DisplayGeometry::default()
+                },
+            ),
+            Self::MenuBarGap { x, width } => (
+                0,
+                0,
+                DisplayGeometry {
+                    x: x.into(),
+                    width: width.into(),
+                    ..DisplayGeometry::default()
+                },
+            ),
+            Self::MenuBar { height } => (
+                0,
+                0,
+                DisplayGeometry {
+                    height: height.into(),
                     ..DisplayGeometry::default()
                 },
             ),
@@ -477,6 +548,13 @@ mod tests {
             },
             ControlMessage::Leaving,
             ControlMessage::RevokePairing,
+            ControlMessage::MenuBarGap { x: 0, width: 0 },
+            ControlMessage::MenuBarGap { x: 790, width: 220 },
+            ControlMessage::MenuBarGap { x: 0, width: 7680 },
+            ControlMessage::MenuBarGap { x: 7679, width: 1 },
+            ControlMessage::MenuBar { height: 0 },
+            ControlMessage::MenuBar { height: 24 },
+            ControlMessage::MenuBar { height: 100 },
         ];
         for message in messages {
             assert_eq!(ControlMessage::decode(&message.encode()).unwrap(), message);
@@ -486,6 +564,99 @@ mod tests {
                 message
             );
         }
+    }
+
+    #[test]
+    fn menu_bar_gaps_and_heights_are_whole_points_in_their_own_fields() {
+        let gap = ControlMessage::MenuBarGap { x: 790, width: 220 };
+        let (enabled, id, display) = gap.parts();
+        assert_eq!(
+            (enabled, id, display.x, display.width),
+            (0, 0, 790.0, 220.0)
+        );
+        assert_eq!(
+            [display.y, display.height],
+            [0.0; 2],
+            "a gap uses only x and width"
+        );
+        let bar = ControlMessage::MenuBar { height: 24 };
+        let (_, _, reported) = bar.parts();
+        assert_eq!(
+            (reported.x, reported.width, reported.height),
+            (0.0, 0.0, 24.0)
+        );
+        for change in [
+            |g: &mut DisplayGeometry| g.x = 790.5,
+            |g: &mut DisplayGeometry| g.x = -1.0,
+            |g: &mut DisplayGeometry| g.x = f64::NAN,
+            |g: &mut DisplayGeometry| g.x = f64::INFINITY,
+            |g: &mut DisplayGeometry| g.width = 0.25,
+            |g: &mut DisplayGeometry| g.width = 0.0,
+            |g: &mut DisplayGeometry| g.width = -220.0,
+            |g: &mut DisplayGeometry| g.width = 7681.0,
+            |g: &mut DisplayGeometry| g.x = 7500.0,
+            |g: &mut DisplayGeometry| g.y = 1.0,
+            |g: &mut DisplayGeometry| g.height = 38.0,
+            |g: &mut DisplayGeometry| g.pixel_width = 1,
+            |g: &mut DisplayGeometry| g.pixel_height = 1,
+        ] {
+            let mut bad = display;
+            change(&mut bad);
+            assert_eq!(
+                ControlMessage::from_parts(14, 0, 0, bad),
+                Err(Error::Invalid),
+                "{bad:?}"
+            );
+        }
+        // Only the all-zero gap has no width: a lone x is not a removal.
+        let lone = DisplayGeometry {
+            x: 10.0,
+            ..DisplayGeometry::default()
+        };
+        assert_eq!(
+            ControlMessage::from_parts(14, 0, 0, lone),
+            Err(Error::Invalid)
+        );
+        assert_eq!(
+            ControlMessage::from_parts(14, 1, 0, display),
+            Err(Error::Invalid)
+        );
+        assert_eq!(
+            ControlMessage::from_parts(14, 0, 1, display),
+            Err(Error::Invalid)
+        );
+        for change in [
+            |g: &mut DisplayGeometry| g.height = 24.5,
+            |g: &mut DisplayGeometry| g.height = -24.0,
+            |g: &mut DisplayGeometry| g.height = f64::NAN,
+            |g: &mut DisplayGeometry| g.height = 101.0,
+            |g: &mut DisplayGeometry| g.x = 1.0,
+            |g: &mut DisplayGeometry| g.y = 1.0,
+            |g: &mut DisplayGeometry| g.width = 1.0,
+            |g: &mut DisplayGeometry| g.pixel_width = 1,
+            |g: &mut DisplayGeometry| g.pixel_height = 1,
+        ] {
+            let mut bad = reported;
+            change(&mut bad);
+            assert_eq!(
+                ControlMessage::from_parts(15, 0, 0, bad),
+                Err(Error::Invalid),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            ControlMessage::from_parts(15, 1, 0, reported),
+            Err(Error::Invalid)
+        );
+        assert_eq!(
+            ControlMessage::from_parts(15, 0, 1, reported),
+            Err(Error::Invalid)
+        );
+        assert_eq!(
+            ControlMessage::from_parts(16, 0, 0, DisplayGeometry::default()),
+            Err(Error::Invalid),
+            "no later kind is known"
+        );
     }
 
     #[test]
@@ -695,8 +866,10 @@ mod tests {
             (13, 1, 0, zero), // revocation carries nothing
             (13, 0, 1, zero),
             (13, 0, 0, display),
-            (0, 0, 0, zero), // unknown kinds
-            (14, 0, 0, zero),
+            (14, 0, 0, display), // a gap carries only x and width
+            (15, 0, 0, display), // a menu bar report carries only height
+            (0, 0, 0, zero),     // unknown kinds
+            (16, 0, 0, zero),
         ] {
             assert!(ControlMessage::from_parts(kind, enabled, id, value).is_err());
         }

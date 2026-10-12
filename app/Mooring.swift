@@ -1319,6 +1319,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         state.legacy = approved?.legacy ?? NativeLegacyState()
         state.connectedDeviceID = native.connectedDeviceID
         state.matchesScreen = native.matchesScreen
+        state.extendsBesideCamera = native.extendsBesideCamera
         state.playsSound = native.playsSound
         state.lowersDisplayLatency = native.lowersDisplayLatency
         state.showsDiagnosticBar = native.showsDiagnosticBar
@@ -1341,6 +1342,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         case .sharesAutomatically: native.setSharingAutomatically(on)
         case .sharesClipboard: native.sharesClipboard = on
         case .matchesScreen: native.matchesScreen = on
+        case .extendsBesideCamera: native.extendsBesideCamera = on
         case .playsSound: native.playsSound = on
         case .lowersDisplayLatency: native.lowersDisplayLatency = on
         case .showsDiagnosticBar: native.showsDiagnosticBar = on

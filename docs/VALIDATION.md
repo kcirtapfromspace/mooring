@@ -570,6 +570,32 @@ This revises preview 29's single-activity wake policy above.
 - **Validation result.** `./scripts/ci-local.sh` passed on the local Mac with 232 Rust tests, 247 native session checks, native media/streaming checks, and the arm64 macOS 14 app build. Validation used a separate source copy and did not replace or launch the installed app.
 - **Release gate.** Repeat TESTING.md step 11 with two Macs, including overnight lid sleep and an actual password lock. Local tests and an arm64 build do not independently verify macOS's wake response, immediate ScreenCaptureKit recovery, or the user's exact lid cycle.
 
+## Camera notch row and pointer edges (unreleased, 2026-10-11)
+
+Reported from a new 14-inch MacBook Pro (M5 Max, macOS 27.0.1, 1800×1169 points) viewing a Mac without a notch. Both run preview 38.
+
+- **⌘-Tab.** This Mac's Accessibility entry for Mooring existed but was off, so the event tap could not start. With the footer hidden, nothing said so. The viewer now logs whether shortcuts are captured, and shows a notice once per window when control starts without them.
+- **Pointer edges.** The viewer divided by the picture's width, while the sharing Mac maps 1 to its last point (`width - 1`). The last position the pointer reaches here landed about a point short of the remote's right and bottom edges, so a Dock hidden on the right never appeared. Now the first and last point map to 0 and 1, and a same-size display maps each point to itself. In full screen, a move past the picture holds the remote pointer at that edge. In a window, a move across the black bars does the same. Clicks in the bars are still ignored.
+- **Full screen and the notch.** Live telemetry showed the sharing Mac capturing 3544×2160 (1772×1080 points). Matching worked; the picture stopped below the notch row.
+- **Native full screen.**
+  - It keeps windows below the housing (1800×1130). AppKit undid both `setFrame` to the full screen and a larger `willUseFullScreenContentSize` within a second.
+  - A borderless window in the row is pushed below it unless `constrainFrameRect` is overridden.
+  - A window at the default level stays hidden there; one at `.statusBar` shows. That works as a child window when the level is raised after `addChildWindow`.
+  - It receives the pointer and clicks, and the viewer stays key.
+- **Drawing in the row.**
+  - A presented Metal drawable never appeared there, though Core Animation reported it presented; plain layers did. So the row draws each frame as a layer image of its own slice, at most 30 a second. The main picture stays on Metal.
+  - The image layer reports flipped contents but shows images upright.
+  - A screen capture of a synthetic frame was pixel-exact: 15 points of black, then the 24-point remote menu bar ending at the row's bottom, then the rest of the picture directly below.
+- **Protocol.** `ML_CAPABILITY_MENU_BAR_GAP` (1024) adds two protocol 5 controls:
+  - Kind 14 (viewer to host) is the span to keep clear, in whole points.
+  - Kind 15 (host to viewer) is the menu bar height.
+  - Rust checks fields, direction and capability on send and receive; the Swift loopback carries both ways and refuses each in the wrong direction.
+- **The sharing Mac.** One empty status item reaches from where the other status items begin to the gap's left edge. On this Mac it reported a 39-point menu bar. Asked for a gap at 1130, it spanned 1114–1190: the item's padding adds about 16 points on the left. It was gone once the gap was removed.
+- **Not yet verified.**
+  - The end-to-end session needs this build on both Macs.
+  - The sharing Mac's layout with long app menus, and status items that already reach the notch, are untested.
+  - With the 4K limit, the remote menu bar can draw about a point taller than the lift.
+
 ## Media feasibility
 
 The capability probe and synthetic encode probe are separate developer tools. Their JSON findings and limitations are documented alongside them. They capture no desktop and transmit no frames. A normal hardware-required HEVC Main444 session produced an actual 4:4:4 synthetic bitstream on this Mac. This is a feasibility result, not proof of real-time 4K performance or a working remote-desktop engine.

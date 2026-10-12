@@ -1701,6 +1701,7 @@ pub const ML_LEGACY_GRACE_SECONDS: u64 = crate::devices::LEGACY_GRACE_SECONDS;
 pub const ML_CAPABILITY_VERSION: u64 = crate::policy::CAPABILITY_VERSION;
 pub const ML_CAPABILITY_REMOTE_UPDATE: u64 = crate::policy::CAPABILITY_REMOTE_UPDATE;
 pub const ML_CAPABILITY_WAITS: u64 = crate::policy::CAPABILITY_WAITS;
+pub const ML_CAPABILITY_MENU_BAR_GAP: u64 = crate::policy::CAPABILITY_MENU_BAR_GAP;
 pub const ML_KEYFRAMES_ON_DEMAND: u8 = crate::telemetry::KEYFRAMES_ON_DEMAND;
 pub const ML_HOST_WAKE_WAIT_MS: u64 = crate::policy::HOST_WAKE_WAIT.as_millis() as u64;
 

@@ -177,6 +177,16 @@ request releases it. Rust refuses to send a request to a host that didn't
 announce the capability, and a host that didn't announce it treats one as a
 protocol violation.
 
+`ML_CAPABILITY_MENU_BAR_GAP` means "this viewer lays the host's menu bar out
+beside its camera housing" or "this host keeps a requested part of its menu bar
+clear". Viewers send `ML_CONTROL_MENU_BAR_GAP` with the gap's left edge and
+width in whole points (`geometry.x`/`width`, ending by 7680); all zero removes
+it. Hosts answer with `ML_CONTROL_MENU_BAR`, the shared display's menu bar
+height in whole points (`geometry.height`, 0 to 100, 0 when it shows none).
+Rust refuses either message to a peer that didn't announce the capability, and
+treats one arriving without the local capability, or in the wrong direction,
+as a protocol violation.
+
 `ML_CAPABILITY_CURSOR` means "this viewer draws the host's pointer shape".
 Hosts send `ML_SESSION_CURSOR` messages to such viewers, at most 20 per second:
 size and hotspot in points (at most 256), then a PNG (64 KiB at most).
