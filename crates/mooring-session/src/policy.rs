@@ -48,6 +48,10 @@ pub(crate) const CAPABILITY_REMOTE_UPDATE: u64 = 1 << 7;
 pub(crate) const CAPABILITY_WAITS: u64 = 1 << 8;
 /// Either side can revoke its own authenticated pairing during a session.
 pub(crate) const CAPABILITY_PAIRING_REVOCATION: u64 = 1 << 9;
+/// A viewer that lays the sharing Mac's menu bar out beside its camera
+/// housing; a host that keeps a requested part of its menu bar clear and
+/// reports the menu bar's height.
+pub(crate) const CAPABILITY_MENU_BAR_GAP: u64 = 1 << 10;
 /// How long a sharing Mac whose display slept, or whose screen was covered,
 /// waits after waking it for an approved viewer before it can share. A cover
 /// that needs no password usually lifts quickly, but may need another remote
@@ -205,6 +209,7 @@ impl Role {
                     | ControlKind::Version
                     | ControlKind::UpdateStatus
                     | ControlKind::RevokePairing
+                    | ControlKind::MenuBar
             ),
             Self::Viewer => matches!(
                 kind,
@@ -216,6 +221,7 @@ impl Role {
                     | ControlKind::UpdateRequest
                     | ControlKind::Leaving
                     | ControlKind::RevokePairing
+                    | ControlKind::MenuBarGap
             ),
         }
     }
@@ -360,6 +366,13 @@ impl ReceivePolicy {
                 if self.version < 5
                     || self.local_capabilities & CAPABILITY_VIRTUAL_DISPLAY == 0 =>
             {
+                return Err(Error::Protocol);
+            }
+            // Menu bar gaps and heights only pass between Macs that announced
+            // them: gaps to such a host, heights to such a viewer.
+            Incoming::Control(
+                ControlMessage::MenuBarGap { .. } | ControlMessage::MenuBar { .. },
+            ) if self.version < 5 || self.local_capabilities & CAPABILITY_MENU_BAR_GAP == 0 => {
                 return Err(Error::Protocol);
             }
             // HEVC only reaches a side that declared it decodes HEVC 4:4:4.
@@ -739,6 +752,36 @@ mod tests {
         let mut viewer =
             ReceivePolicy::for_version(Role::Viewer, 5, CAPABILITY_VIRTUAL_DISPLAY, now);
         assert_eq!(viewer.admit(&request(), now), Err(Error::Protocol));
+    }
+
+    #[test]
+    fn menu_bar_gaps_and_heights_need_negotiated_support_in_their_direction() {
+        let now = Instant::now();
+        let gap = || control(ControlMessage::MenuBarGap { x: 790, width: 220 });
+        let height = || control(ControlMessage::MenuBar { height: 24 });
+        assert!(Role::Viewer.may_send_control(ControlKind::MenuBarGap));
+        assert!(!Role::Host.may_send_control(ControlKind::MenuBarGap));
+        assert!(Role::Host.may_send_control(ControlKind::MenuBar));
+        assert!(!Role::Viewer.may_send_control(ControlKind::MenuBar));
+        for (role, message) in [
+            (Role::Host, gap as fn() -> Incoming),
+            (Role::Viewer, height as fn() -> Incoming),
+        ] {
+            for (version, capabilities, expected) in [
+                (4, CAPABILITY_MENU_BAR_GAP, Err(Error::Protocol)),
+                (5, 0, Err(Error::Protocol)),
+                (5, CAPABILITY_VIRTUAL_DISPLAY, Err(Error::Protocol)),
+                (5, CAPABILITY_MENU_BAR_GAP, Ok(Admission::Deliver)),
+            ] {
+                let mut policy = ReceivePolicy::for_version(role, version, capabilities, now);
+                assert_eq!(policy.admit(&message(), now), expected, "{role:?}");
+            }
+        }
+        // Each travels one way only.
+        let mut viewer = ReceivePolicy::for_version(Role::Viewer, 5, CAPABILITY_MENU_BAR_GAP, now);
+        assert_eq!(viewer.admit(&gap(), now), Err(Error::Protocol));
+        let mut host = ReceivePolicy::for_version(Role::Host, 5, CAPABILITY_MENU_BAR_GAP, now);
+        assert_eq!(host.admit(&height(), now), Err(Error::Protocol));
     }
 
     #[test]

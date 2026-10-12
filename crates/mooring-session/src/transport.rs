@@ -16,10 +16,10 @@ use crate::input::InputEvent;
 use crate::pairing::{CodeKind, MAX_ADDRESSES, PairingCode, local_name, validate_name};
 use crate::policy::{
     AUDIO, Admission, CAPABILITY_AUDIO, CAPABILITY_CURSOR, CAPABILITY_GESTURES,
-    CAPABILITY_HEVC_444, CAPABILITY_LATENCY, CAPABILITY_PAIRING_REVOCATION,
-    CAPABILITY_REMOTE_UPDATE, CAPABILITY_VERSION, CAPABILITY_VIRTUAL_DISPLAY, CAPABILITY_WAITS,
-    CLIPBOARD, CONTROL, CURSOR, INPUT, PROTOCOL_MAX, PROTOCOL_MIN, ReceivePolicy, Role, TELEMETRY,
-    VIDEO,
+    CAPABILITY_HEVC_444, CAPABILITY_LATENCY, CAPABILITY_MENU_BAR_GAP,
+    CAPABILITY_PAIRING_REVOCATION, CAPABILITY_REMOTE_UPDATE, CAPABILITY_VERSION,
+    CAPABILITY_VIRTUAL_DISPLAY, CAPABILITY_WAITS, CLIPBOARD, CONTROL, CURSOR, INPUT, PROTOCOL_MAX,
+    PROTOCOL_MIN, ReceivePolicy, Role, TELEMETRY, VIDEO,
 };
 use crate::telemetry::{MAX_TELEMETRY, TelemetryMessage};
 use crate::video::Codec;
@@ -694,6 +694,12 @@ impl Session {
                 if self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_VIRTUAL_DISPLAY
                     == 0 =>
             {
+                Err(Error::Invalid)
+            }
+            // Menu bar gaps and heights only to a peer that announced them.
+            Outgoing::Control(
+                ControlMessage::MenuBarGap { .. } | ControlMessage::MenuBar { .. },
+            ) if self.peer_capabilities.load(Ordering::Acquire) & CAPABILITY_MENU_BAR_GAP == 0 => {
                 Err(Error::Invalid)
             }
             Outgoing::Video(frame) => self.send_bytes(VIDEO, &frame.encode()?, end),

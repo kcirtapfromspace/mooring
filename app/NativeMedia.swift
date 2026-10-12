@@ -1018,6 +1018,33 @@ class NativeVideoView: MTKView, MTKViewDelegate {
     var geometry: NativeDisplayGeometry? {
         didSet {
             if geometry?.isValid == true { frameLock.lock(); acceptsFrames = true; frameLock.unlock() }
+            currentMirror?.geometry = geometry
+        }
+    }
+    /// The area the picture is fitted to, in this view's coordinates; nil is
+    /// the bounds. It may extend past them, as when the picture continues
+    /// into the row beside a camera housing. Main thread.
+    var canvas: NSRect? {
+        didSet {
+            guard canvas != oldValue else { return }
+            renderDirty = true
+            if imageLayer != nil { renderLayerImage() }
+        }
+    }
+    /// Plain-layer drawing, for where Metal frames aren't composited: in the
+    /// row beside a camera housing, a 14-inch MacBook Pro on macOS 27 showed
+    /// the window and a plain layer but never a presented drawable. Each frame
+    /// becomes an image of only this view's part of the picture, at most 30 a
+    /// second and always the newest. Set once, before frames arrive. Main thread.
+    var drawsLayerImages = false {
+        didSet {
+            guard drawsLayerImages, imageLayer == nil else { return }
+            wantsLayer = true; isPaused = true
+            guard let layer else { return }
+            let image = CALayer()
+            image.contentsGravity = .resize; image.frame = bounds
+            layer.addSublayer(image); imageLayer = image
+            frameLock.lock(); updatesLayerImages = true; frameLock.unlock()
         }
     }
     var onPresented: (() -> Void)?
@@ -1032,7 +1059,12 @@ class NativeVideoView: MTKView, MTKViewDelegate {
     private var acceptsFrames = true
     private var clearPending = false
     private var replaced = 0
+    private var mirror: NativeVideoView?
+    private var updatesLayerImages = false
+    private var layerImageScheduled = false
     // Main thread.
+    private var imageLayer: CALayer?
+    private var lastLayerImage: TimeInterval = 0
     private var currentImage: CVPixelBuffer?
     private var context: CIContext?
     private var commands: MTLCommandQueue?
@@ -1062,13 +1094,79 @@ class NativeVideoView: MTKView, MTKViewDelegate {
     /// sooner, but a fast-changing picture can show a tear line. Main thread.
     var waitsForDisplayRefresh: Bool {
         get { (layer as? CAMetalLayer)?.displaySyncEnabled ?? true }
-        set { (layer as? CAMetalLayer)?.displaySyncEnabled = newValue }
+        set { (layer as? CAMetalLayer)?.displaySyncEnabled = newValue; currentMirror?.waitsForDisplayRefresh = newValue }
     }
+    /// Another view that shows the same frames from now on, starting with the
+    /// one on screen, or nil to stop. Main thread.
+    func mirror(to view: NativeVideoView?) {
+        frameLock.lock(); let previous = mirror; mirror = view; frameLock.unlock()
+        guard let view, view !== previous else { return }
+        view.geometry = geometry; view.waitsForDisplayRefresh = waitsForDisplayRefresh
+        if let currentImage { view.display(currentImage) }
+    }
+    private var currentMirror: NativeVideoView? { frameLock.lock(); defer { frameLock.unlock() }; return mirror }
     func display(_ image: CVPixelBuffer) {
-        frameLock.lock(); defer { frameLock.unlock() }
-        guard acceptsFrames else { return }
-        queued.append(image)
-        if queued.count > Self.maxQueued { queued.removeFirst(); replaced += 1 }
+        frameLock.lock()
+        let mirror = self.mirror
+        if acceptsFrames {
+            queued.append(image)
+            if queued.count > Self.maxQueued { queued.removeFirst(); replaced += 1 }
+        }
+        let schedule = updatesLayerImages && !layerImageScheduled
+        if schedule { layerImageScheduled = true }
+        frameLock.unlock()
+        if schedule { DispatchQueue.main.async { [weak self] in self?.updateLayerImage() } }
+        mirror?.display(image)
+    }
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        if imageLayer != nil { renderLayerImage() }
+    }
+    /// Main thread: the newest frame, no sooner than a 30th of a second after the last.
+    private func updateLayerImage() {
+        let wait = lastLayerImage + 1.0 / 30 - ProcessInfo.processInfo.systemUptime
+        if wait > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in self?.updateLayerImage() }
+            return
+        }
+        applyPendingClear()
+        frameLock.lock(); layerImageScheduled = false; let next = queued.last; queued.removeAll(); frameLock.unlock()
+        if let next { currentImage = next }
+        lastLayerImage = ProcessInfo.processInfo.systemUptime
+        renderLayerImage()
+    }
+    private func renderLayerImage() {
+        guard let imageLayer else { return }
+        let scale = window?.backingScaleFactor ?? 2
+        let pixels = CGSize(width: (bounds.width * scale).rounded(), height: (bounds.height * scale).rounded())
+        CATransaction.begin(); CATransaction.setDisableActions(true); defer { CATransaction.commit() }
+        imageLayer.frame = bounds
+        guard let context, let currentImage, pixels.width >= 1, pixels.height >= 1 else {
+            imageLayer.contents = nil; displayedVideoRect = .zero; return
+        }
+        // An image as contents shows upright even in this flipped view,
+        // though the layer reports flipped contents (checked on screen, macOS 27).
+        let (output, shown) = placed(currentImage, pixels: pixels)
+        imageLayer.contents = context.createCGImage(output, from: CGRect(origin: .zero, size: pixels), format: .BGRA8, colorSpace: colorSpace)
+        imageLayer.contentsScale = scale
+        displayedVideoRect = shown
+    }
+    /// The frame fitted to the canvas, centered, in view points (top-left
+    /// origin), and the image placed over black for a drawing `pixels` in
+    /// size with a bottom-left origin.
+    private func placed(_ buffer: CVPixelBuffer, pixels: CGSize) -> (CIImage, NSRect) {
+        let image = CIImage(cvPixelBuffer: buffer)
+        let area = canvas ?? bounds
+        let fit = min(area.width / image.extent.width, area.height / image.extent.height)
+        let shown = NSRect(x: area.midX - image.extent.width * fit / 2, y: area.midY - image.extent.height * fit / 2,
+                           width: image.extent.width * fit, height: image.extent.height * fit)
+        let pixelsX = pixels.width / bounds.width, pixelsY = pixels.height / bounds.height
+        let black = CIImage(color: .black).cropped(to: CGRect(origin: .zero, size: pixels))
+        let output = image.transformed(by: CGAffineTransform(scaleX: shown.width * pixelsX / image.extent.width,
+                                                             y: shown.height * pixelsY / image.extent.height))
+            .transformed(by: CGAffineTransform(translationX: (shown.minX - bounds.minX) * pixelsX, y: (bounds.maxY - shown.maxY) * pixelsY))
+            .composited(over: black)
+        return (output, shown)
     }
     /// Drawing work since the previous call.
     func takeDrawStats() -> NativeDrawStats {
@@ -1092,20 +1190,13 @@ class NativeVideoView: MTKView, MTKViewDelegate {
             return
         }
         let began = ProcessInfo.processInfo.systemUptime
-        let canvas = CGRect(origin: .zero, size: drawableSize)
-        let black = CIImage(color: .black).cropped(to: canvas)
-        var output = black
-        if let currentImage {
-            let image = CIImage(cvPixelBuffer: currentImage)
-            let scale = min(drawableSize.width / image.extent.width, drawableSize.height / image.extent.height)
-            let width = image.extent.width * scale, height = image.extent.height * scale
-            let x = (drawableSize.width - width) / 2, y = (drawableSize.height - height) / 2
-            output = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-                .transformed(by: CGAffineTransform(translationX: x, y: y)).composited(over: black)
-            displayedVideoRect = NSRect(x: x / drawableSize.width * bounds.width, y: y / drawableSize.height * bounds.height,
-                                       width: width / drawableSize.width * bounds.width, height: height / drawableSize.height * bounds.height)
+        let drawing = CGRect(origin: .zero, size: drawableSize)
+        var output = CIImage(color: .black).cropped(to: drawing)
+        if let currentImage, bounds.width > 0, bounds.height > 0 {
+            let placement = placed(currentImage, pixels: drawableSize)
+            output = placement.0; displayedVideoRect = placement.1
         } else { displayedVideoRect = .zero }
-        context.render(output, to: drawable.texture, commandBuffer: command, bounds: canvas, colorSpace: colorSpace)
+        context.render(output, to: drawable.texture, commandBuffer: command, bounds: drawing, colorSpace: colorSpace)
         if let next, currentImage != nil {
             let epoch = presentationEpoch, timing = NativeFrameTiming.read(next)
             drawable.addPresentedHandler { [weak self] drawable in
@@ -1143,8 +1234,17 @@ class NativeVideoView: MTKView, MTKViewDelegate {
     /// Closes frame admission until the next valid geometry assignment. This
     /// fences late decode callbacks after disconnect; the picture turns black.
     func clearFrame() {
-        frameLock.lock(); queued.removeAll(); acceptsFrames = false; clearPending = true; frameLock.unlock()
-        if Thread.isMainThread { applyPendingClear() }
+        frameLock.lock(); queued.removeAll(); acceptsFrames = false; clearPending = true; let mirror = self.mirror; frameLock.unlock()
+        if Thread.isMainThread {
+            applyPendingClear()
+            if imageLayer != nil { renderLayerImage() }
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.imageLayer != nil else { return }
+                self.applyPendingClear(); self.renderLayerImage()
+            }
+        }
+        mirror?.clearFrame()
     }
     /// Main thread.
     private func applyPendingClear() {

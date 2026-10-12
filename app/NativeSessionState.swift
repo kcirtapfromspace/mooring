@@ -76,6 +76,13 @@ enum NativeControlMessage: Equatable {
     /// this viewer is ending the session on purpose.
     case leaving
     case revokePairing
+    /// Protocol 5, viewer to a host that keeps part of its menu bar clear: the
+    /// points hidden by this Mac's camera housing, from the shared display's
+    /// left edge. Both zero removes the gap.
+    case menuBarGap(x: Int, width: Int)
+    /// Protocol 5, host to such a viewer: the shared display's menu bar strip
+    /// in points; 0 when it shows none, as when it hides automatically.
+    case menuBar(height: Int)
 
     var raw: MLControlMessage {
         var raw = MLControlMessage()
@@ -102,6 +109,9 @@ enum NativeControlMessage: Equatable {
             if state == .ready, let ready { raw.ping_id = ready.release; raw.geometry.pixel_width = ready.build }
         case .leaving: raw.kind = UInt8(ML_CONTROL_LEAVING)
         case .revokePairing: raw.kind = UInt8(ML_CONTROL_REVOKE_PAIRING)
+        case .menuBarGap(let x, let width):
+            raw.kind = UInt8(ML_CONTROL_MENU_BAR_GAP); raw.geometry.x = Double(x); raw.geometry.width = Double(width)
+        case .menuBar(let height): raw.kind = UInt8(ML_CONTROL_MENU_BAR); raw.geometry.height = Double(height)
         }
         return raw
     }
@@ -129,6 +139,8 @@ enum NativeControlMessage: Equatable {
             self = .updateStatus(state, ready: ready)
         case ML_CONTROL_LEAVING: self = .leaving
         case ML_CONTROL_REVOKE_PAIRING: self = .revokePairing
+        case ML_CONTROL_MENU_BAR_GAP: self = .menuBarGap(x: Int(raw.geometry.x), width: Int(raw.geometry.width))
+        case ML_CONTROL_MENU_BAR: self = .menuBar(height: Int(raw.geometry.height))
         default: throw NativeSessionError(message: "The other Mac sent an unsupported session command.")
         }
     }
@@ -215,15 +227,15 @@ final class NativeFlowLimit: @unchecked Sendable {
     }
 }
 
-/// What this Mac announces in protocol 5. Pointer shapes, gestures, latency
-/// and versions need nothing beyond this build; the rest depend on launch
+/// What this Mac announces in protocol 5. Pointer shapes, gestures, latency,
+/// versions and menu bar gaps need nothing beyond this build; the rest depend on launch
 /// self-tests, and remote updates on a release build with an update feed.
 /// ML_CAPABILITY_WAITS is no longer announced: this Mac wakes for a returning
 /// viewer instead of keeping its display on for one.
 enum NativeCapabilities {
     static func local(hevc444: Bool, virtualDisplay: Bool, audio: Bool, updatesItself: Bool = false) -> UInt64 {
         var capabilities = UInt64(ML_CAPABILITY_CURSOR) | UInt64(ML_CAPABILITY_GESTURES) | UInt64(ML_CAPABILITY_LATENCY)
-            | UInt64(ML_CAPABILITY_VERSION) | UInt64(ML_CAPABILITY_PAIRING_REVOCATION)
+            | UInt64(ML_CAPABILITY_VERSION) | UInt64(ML_CAPABILITY_PAIRING_REVOCATION) | UInt64(ML_CAPABILITY_MENU_BAR_GAP)
         if hevc444 { capabilities |= UInt64(ML_CAPABILITY_HEVC_444) }
         if virtualDisplay { capabilities |= UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) }
         if audio { capabilities |= UInt64(ML_CAPABILITY_AUDIO) }

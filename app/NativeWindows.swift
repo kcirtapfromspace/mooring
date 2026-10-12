@@ -153,9 +153,18 @@ final class NativeRemoteView: NativeVideoView {
     var onInput: ((NSEvent) -> Void)?
     var onReleaseInput: (() -> Void)?
     /// Hides this Mac's pointer over the video when the remote pointer is in it.
-    var hidesLocalCursor = false { didSet { if hidesLocalCursor != oldValue { window?.invalidateCursorRects(for: self) } } }
+    var hidesLocalCursor = false {
+        didSet { if hidesLocalCursor != oldValue { window?.invalidateCursorRects(for: self) }; follower?.hidesLocalCursor = hidesLocalCursor }
+    }
     /// While controlling, the sharing Mac's own pointer shape, such as an I-beam over text.
-    var remoteCursor: NSCursor? { didSet { window?.invalidateCursorRects(for: self) } }
+    var remoteCursor: NSCursor? { didSet { window?.invalidateCursorRects(for: self); follower?.remoteCursor = remoteCursor } }
+    /// Takes the same pointer settings: the view in the row beside a camera housing.
+    var follower: NativeRemoteView? {
+        didSet { follower?.hidesLocalCursor = hidesLocalCursor; follower?.remoteCursor = remoteCursor }
+    }
+    /// For a view in a window that never becomes key: pointer moves arrive
+    /// while Mooring is active, and the view sets the pointer shape itself.
+    var tracksOutsideKeyWindow = false
     /// Command chords go to the remote Mac only while it accepts control; in a
     /// view-only session ⌘W and the menu shortcuts act on this Mac.
     var forwardsCommandKeys = false
@@ -177,7 +186,8 @@ final class NativeRemoteView: NativeVideoView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let tracking { removeTrackingArea(tracking) }
-        let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self)
+        let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, tracksOutsideKeyWindow ? .activeInActiveApp : .activeInKeyWindow, .inVisibleRect],
+                                  owner: self)
         addTrackingArea(area); tracking = area
     }
     override func keyDown(with event: NSEvent) {
@@ -189,7 +199,11 @@ final class NativeRemoteView: NativeVideoView {
         onInput?(event)
     }
     override func flagsChanged(with event: NSEvent) { onInput?(event) }
-    override func mouseMoved(with event: NSEvent) { onInput?(event) }
+    override func mouseMoved(with event: NSEvent) {
+        // Cursor rectangles apply only in the key window.
+        if tracksOutsideKeyWindow { (hidesLocalCursor ? Self.invisibleCursor : remoteCursor ?? .arrow).set() }
+        onInput?(event)
+    }
     override func mouseDragged(with event: NSEvent) { onInput?(event) }
     override func rightMouseDragged(with event: NSEvent) { onInput?(event) }
     override func otherMouseDragged(with event: NSEvent) { onInput?(event) }
@@ -211,6 +225,30 @@ final class NativeRemoteView: NativeVideoView {
         guard forwardsCommandKeys, window?.firstResponder === self, event.type == .keyDown,
               event.modifierFlags.contains(.command) else { return false }
         onInput?(event); return true
+    }
+}
+
+/// The row beside a camera housing while a viewer is full screen. Native full
+/// screen keeps windows below the housing, and only a window above the menu
+/// bar's level shows in this row. It never becomes key, so keyboard input
+/// stays with the viewer, and its frame stays where it is put.
+final class NativeCameraRow: NSWindow {
+    init(content: NSView) {
+        super.init(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
+        isReleasedWhenClosed = false; hasShadow = false; backgroundColor = .black
+        collectionBehavior = [.fullScreenAuxiliary, .ignoresCycle]
+        contentView = content
+    }
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
+
+    /// The camera housing's area in screen coordinates, or nil for a display without one.
+    static func housing(on screen: NSScreen) -> NSRect? {
+        guard screen.safeAreaInsets.top > 0, let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea,
+              right.minX > left.maxX else { return nil }
+        return NSRect(x: left.maxX, y: screen.frame.maxY - screen.safeAreaInsets.top,
+                      width: right.minX - left.maxX, height: screen.safeAreaInsets.top)
     }
 }
 
@@ -291,6 +329,20 @@ final class NativeViewerStatsView: NSVisualEffectView {
 
 final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
     let video = NativeRemoteView(frame: .zero, device: MTLCreateSystemDefaultDevice())
+    /// The top of the picture, in the row beside this Mac's camera housing.
+    let cameraRowVideo: NativeRemoteView
+    private let cameraRow: NativeCameraRow
+    /// The housing in screen coordinates while the picture extends beside it.
+    private var housing: NSRect?
+    /// Set by the session: the sharing Mac shares a display this window's
+    /// size and keeps a gap in its menu bar clear, so the picture may extend
+    /// into the row beside the camera housing.
+    var extendsBesideCamera = false { didSet { if extendsBesideCamera != oldValue { layoutCameraRow() } } }
+    /// The sharing Mac's menu bar strip in points, once it reports one. That
+    /// strip moves up beside the housing, the rest stays below it.
+    private(set) var remoteMenuBarHeight: Int?
+    /// Decided on entering full screen: this Mac's menu bar stays hidden.
+    private var fullScreenHidesMenuBar = false
     let status = label("Connecting…", size: 12, color: .secondaryLabelColor)
     /// The paired Mac this window shows; reconnecting reuses the window.
     let peerID: String
@@ -322,12 +374,20 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
     private let closeButton = NSButton(title: "Close", target: nil, action: nil)
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let allowSystemKeys = NSButton(title: "Allow ⌘-Tab…", target: nil, action: nil)
+    /// Shown once per window when control starts while ⌘-Tab stays on this
+    /// Mac, so the reason is clear even with the footer hidden.
+    private let keysNotice = NSVisualEffectView()
+    private var keysNoticeShown = false
     /// When the two Macs run different Mooring versions: what that means and,
     /// when there is one, the next step.
     private let versionNotice = NSButton(title: "", target: nil, action: nil)
     private let exitFullScreen = NSButton(title: "Exit Full Screen", target: nil, action: nil)
     init(name: String, peerID: String, showsDiagnosticBar: Bool = true) {
         self.peerID = peerID
+        let rowVideo = NativeRemoteView(frame: .zero, device: MTLCreateSystemDefaultDevice())
+        rowVideo.tracksOutsideKeyWindow = true; rowVideo.drawsLayerImages = true
+        cameraRowVideo = rowVideo
+        cameraRow = NativeCameraRow(content: rowVideo)
         let window = MooringPrivacyWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
         window.title = name + " — Mooring"
@@ -337,6 +397,7 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
         window.minSize = NSSize(width: 540, height: 360)
         super.init(window: window)
         window.delegate = self
+        video.follower = cameraRowVideo
         let root = window.contentView!
         video.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(video)
@@ -417,6 +478,32 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
             content.bottomAnchor.constraint(equalTo: ended.bottomAnchor, constant: -20),
             endedReason.widthAnchor.constraint(equalTo: content.widthAnchor)
         ])
+
+        keysNotice.material = .hudWindow; keysNotice.blendingMode = .withinWindow; keysNotice.state = .active
+        keysNotice.wantsLayer = true; keysNotice.layer?.cornerRadius = 12
+        keysNotice.translatesAutoresizingMaskIntoConstraints = false; keysNotice.isHidden = true
+        keysNotice.setAccessibilityIdentifier("Mooring.SystemShortcutsNotice")
+        let keysTitle = label("⌘-Tab and other system shortcuts stay on this Mac", size: 13, weight: .semibold)
+        let keysDetail = label("To send them to the other Mac, turn on Mooring in System Settings → Privacy & Security → Accessibility on this Mac.",
+                               size: 12, color: .secondaryLabelColor)
+        keysDetail.preferredMaxLayoutWidth = 380
+        let later = NSButton(title: "Not Now", target: self, action: #selector(dismissKeysNotice))
+        let open = NSButton(title: "Open Accessibility Settings…", target: self, action: #selector(allowKeysFromNotice))
+        for button in [later, open] { button.bezelStyle = .rounded; button.controlSize = .small }
+        MooringAppearance.primary(open)
+        let keysContent = stack([keysTitle, keysDetail, stack([NSView(), later, open], orientation: .horizontal, spacing: 8)], spacing: 8)
+        keysNotice.addSubview(keysContent)
+        root.addSubview(keysNotice)
+        NSLayoutConstraint.activate([
+            keysNotice.topAnchor.constraint(equalTo: video.topAnchor, constant: 16),
+            keysNotice.centerXAnchor.constraint(equalTo: video.centerXAnchor),
+            keysNotice.widthAnchor.constraint(equalToConstant: 420),
+            keysContent.leadingAnchor.constraint(equalTo: keysNotice.leadingAnchor, constant: 18),
+            keysContent.trailingAnchor.constraint(equalTo: keysNotice.trailingAnchor, constant: -18),
+            keysContent.topAnchor.constraint(equalTo: keysNotice.topAnchor, constant: 14),
+            keysContent.bottomAnchor.constraint(equalTo: keysNotice.bottomAnchor, constant: -12),
+            keysDetail.widthAnchor.constraint(equalTo: keysContent.widthAnchor)
+        ])
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     func showEnded(reason: String) {
@@ -430,11 +517,69 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
     func showConnecting() { showOverlay(title: "Connecting…", reason: endedReason.stringValue, reconnecting: true) }
     func hideOverlay() { ended.isHidden = true }
     var isReconnecting: Bool { !ended.isHidden && !cancelButton.isHidden }
-    func setSystemKeysAllowed(_ allowed: Bool) { allowSystemKeys.isHidden = allowed }
+    func setSystemKeysAllowed(_ allowed: Bool) {
+        allowSystemKeys.isHidden = allowed
+        if allowed { keysNotice.isHidden = true }
+    }
+    /// Once per window, when control starts while ⌘-Tab can't reach the other
+    /// Mac. It goes away by itself after 15 seconds.
+    func noteSystemKeysStayLocal() {
+        guard !keysNoticeShown, !isClosed, allowSystemKeys.isHidden == false else { return }
+        keysNoticeShown = true
+        keysNotice.isHidden = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in self?.keysNotice.isHidden = true }
+    }
+    @objc private func dismissKeysNotice() { keysNotice.isHidden = true }
+    @objc private func allowKeysFromNotice() { keysNotice.isHidden = true; onAllowSystemKeys?() }
     func setDiagnosticBarVisible(_ visible: Bool) {
         showsDiagnosticBar = visible
         diagnosticBar.isHidden = !visible
         videoBottom.constant = visible ? -34 : 0
+        window?.contentView?.layoutSubtreeIfNeeded()
+        layoutCameraRow()
+    }
+    /// The sharing Mac's menu bar height, as it reports it.
+    func setRemoteMenuBar(height: Int) {
+        guard height != remoteMenuBarHeight else { return }
+        remoteMenuBarHeight = height
+        layoutCameraRow()
+    }
+    /// The size, in points, the picture fills, beside the camera included.
+    var pictureSize: CGSize { (video.canvas ?? video.bounds).size }
+    /// The camera housing's span on a sharing display `remoteWidth` points wide,
+    /// with a margin, while the picture extends beside it; otherwise nil.
+    func cameraGap(remoteWidth: Double) -> (x: Int, width: Int)? {
+        guard let housing, let window, cameraRow.parent != nil, video.displayedVideoRect.width > 0 else { return nil }
+        let shown = window.convertToScreen(video.convert(video.displayedVideoRect, to: nil))
+        return NativeInputGeometry.hiddenSpan(of: housing, in: shown, remoteWidth: remoteWidth)
+    }
+    /// In full screen with this Mac's menu bar hidden, on a display with a
+    /// camera housing, the picture extends up into the row beside it by the
+    /// sharing Mac's menu bar height: its menu bar sits beside the housing,
+    /// level with its bottom, and nothing below the menu bar is hidden.
+    private func layoutCameraRow() {
+        guard extendsBesideCamera, fullScreenHidesMenuBar, !isClosed, let window, window.styleMask.contains(.fullScreen),
+              let screen = window.screen, let housing = NativeCameraRow.housing(on: screen),
+              let menuBar = remoteMenuBarHeight, menuBar > 0, screen.frame.maxY - window.frame.maxY >= 1 else {
+            hideCameraRow(); return
+        }
+        let row = NSRect(x: screen.frame.minX, y: window.frame.maxY, width: screen.frame.width, height: screen.frame.maxY - window.frame.maxY)
+        let area = window.convertToScreen(video.convert(video.bounds, to: nil))
+        let picture = NSRect(x: area.minX, y: area.minY, width: area.width, height: area.height + min(CGFloat(menuBar), row.height))
+        cameraRow.setFrame(row, display: false)
+        if cameraRow.parent == nil { window.addChildWindow(cameraRow, ordered: .above) }
+        // A child takes its parent's level when added; raise it after.
+        cameraRow.level = .statusBar
+        self.housing = housing
+        video.canvas = video.convert(window.convertFromScreen(picture), from: nil)
+        cameraRowVideo.canvas = cameraRowVideo.convert(cameraRow.convertFromScreen(picture), from: nil)
+        video.mirror(to: cameraRowVideo)
+    }
+    private func hideCameraRow() {
+        video.mirror(to: nil)
+        video.canvas = nil; cameraRowVideo.canvas = nil; housing = nil
+        cameraRow.parent?.removeChildWindow(cameraRow)
+        cameraRow.orderOut(nil)
     }
     func updateDiagnostics(_ snapshot: NativeViewerDiagnostics) {
         latestDiagnostics = snapshot
@@ -481,12 +626,15 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
     /// and Exit Full Screen in the status bar leave it.
     func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions)
         -> NSApplication.PresentationOptions {
-        video.forwardsCommandKeys ? [.fullScreen, .hideDock, .hideMenuBar] : proposedOptions
+        fullScreenHidesMenuBar = video.forwardsCommandKeys
+        return video.forwardsCommandKeys ? [.fullScreen, .hideDock, .hideMenuBar] : proposedOptions
     }
-    func windowDidEnterFullScreen(_ notification: Notification) { exitFullScreen.isHidden = false }
+    func windowDidEnterFullScreen(_ notification: Notification) { exitFullScreen.isHidden = false; layoutCameraRow() }
+    func windowWillExitFullScreen(_ notification: Notification) { fullScreenHidesMenuBar = false; hideCameraRow() }
     func windowDidExitFullScreen(_ notification: Notification) { exitFullScreen.isHidden = true }
-    func windowDidResize(_ notification: Notification) { onViewportChange?() }
-    func windowWillClose(_ notification: Notification) { isClosed = true; onClose?() }
+    func windowDidResize(_ notification: Notification) { layoutCameraRow(); onViewportChange?() }
+    func windowDidChangeScreen(_ notification: Notification) { layoutCameraRow() }
+    func windowWillClose(_ notification: Notification) { isClosed = true; hideCameraRow(); onClose?() }
     func windowDidResignKey(_ notification: Notification) { onReleaseInput?() }
     func windowDidMiniaturize(_ notification: Notification) { onReleaseInput?() }
     @objc func saveDiagnostics(_ sender: Any?) { onReleaseInput?(); onDiagnostics?() }

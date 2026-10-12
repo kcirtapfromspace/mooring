@@ -42,6 +42,7 @@ final class NativeSessionCoordinator {
     private static let automaticSharingKey = "native.shareAutomatically"
     private static let sharedClipboardKey = "native.shareClipboard"
     private static let matchScreenKey = "native.matchScreen"
+    private static let besideCameraKey = "native.extendBesideCamera"
     private static let playSoundKey = "native.playSound"
     private static let lowLatencyDisplayKey = "native.lowLatencyDisplay"
     private static let diagnosticBarKey = "native.showDiagnosticBar"
@@ -155,6 +156,8 @@ final class NativeSessionCoordinator {
     private let cursorWatcher = NativeCursorWatcher()
     /// Host: the display being shared, virtual when a viewer asked for its size.
     private let sharedDisplay = NativeSharedDisplay()
+    /// Host: keeps part of the menu bar clear beside a viewer's camera housing.
+    private let menuBarGap = NativeMenuBarGap()
     private var pendingDisplayRequest: (width: Int, height: Int, scale: Int)?
     private var displayRequestScheduled = false
     private var displayRestarts: [TimeInterval] = []
@@ -162,6 +165,12 @@ final class NativeSessionCoordinator {
     /// Viewer: the last size observed and the last one requested.
     private var observedScreenRequest: (width: Int, height: Int, scale: Int)?
     private var sentScreenRequest: (width: Int, height: Int, scale: Int)?
+    /// Viewer: the camera gap last observed and the last one sent.
+    private var observedCameraGap: (x: Int, width: Int)?
+    private var sentCameraGap: (x: Int, width: Int)?
+    /// Viewer: the key window also receives pointer moves over the camera
+    /// row, so each position is sent once.
+    private var lastPointerMove: NativeInputEvent?
     /// Exchanges this Mac's clipboard with a connected Mac, polled twice a second.
     private let clipboard = NativeClipboardSync()
     private var clipboardTimer: Timer?
@@ -229,6 +238,13 @@ final class NativeSessionCoordinator {
     var matchesScreen: Bool {
         get { defaults.object(forKey: Self.matchScreenKey) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Self.matchScreenKey); onChange?() }
+    }
+    /// Viewer: full screen on a Mac with a camera housing extends the picture
+    /// into the row beside it, where the sharing Mac's menu bar goes, kept
+    /// clear of the housing. Needs a matched screen. On by default.
+    var extendsBesideCamera: Bool {
+        get { defaults.object(forKey: Self.besideCameraKey) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Self.besideCameraKey); onChange?() }
     }
     /// Viewer: hand frames to the display without waiting for its refresh.
     /// Off by default, since a fast-changing picture can tear.
@@ -597,6 +613,7 @@ final class NativeSessionCoordinator {
             channel.measurements.set("capture_pixel_width", Double(geometry.pixelWidth))
             channel.measurements.set("capture_pixel_height", Double(geometry.pixelHeight))
             channel.control(.geometry(geometry, inputEnabled: NativeInputInjector.isTrusted))
+            DispatchQueue.main.async { [weak self] in self?.menuBarGap.displayChanged() }
         }
         capture.onCapturedFrame = { [weak channel] delay in
             guard live.isActive, let channel else { return }
@@ -813,11 +830,23 @@ final class NativeSessionCoordinator {
                             guard let self, let channel, self.hostChannel === channel else { return }
                             self.requestDisplay(width: width, height: height, scale: scale, channel: channel)
                         }
+                    case .control(.menuBarGap(let x, let width)):
+                        channel.deliverControl { [weak self, weak channel] in
+                            guard let self, let channel, self.hostChannel === channel else { return }
+                            self.menuBarGap.request(x: x, width: width)
+                        }
                     case .control(.hello(let capabilities)):
                         // Rust has recorded the viewer's capabilities; start with the best shared codec.
                         channel.deliverControl { [weak self, weak channel] in
                             guard let self, let channel, self.hostChannel === channel else { return }
                             if capabilities & UInt64(ML_CAPABILITY_CURSOR) != 0 { self.cursorWatcher.start(); self.cursorWatcher.resend() }
+                            if capabilities & UInt64(ML_CAPABILITY_MENU_BAR_GAP) != 0 {
+                                self.menuBarGap.onHeight = { [weak self, weak channel] height in
+                                    guard let self, let channel, self.hostChannel === channel, channel.token.isActive else { return }
+                                    channel.control(.menuBar(height: height))
+                                }
+                                self.menuBarGap.start()
+                            }
                             if capabilities & UInt64(ML_CAPABILITY_VERSION) != 0 { channel.control(.version(.local)) }
                             if self.capture == nil { self.startCapture(for: channel) }
                         }
@@ -873,7 +902,7 @@ final class NativeSessionCoordinator {
         hostChannel = nil; hostAudioGate = nil; hostPeerVersion = nil
         refreshClipboardScope(includeCurrent: false)
         cursorWatcher.stop()
-        sharedDisplay.release(); pendingDisplayRequest = nil; displayRestarts = []
+        sharedDisplay.release(); pendingDisplayRequest = nil; displayRestarts = []; menuBarGap.stop()
         endHostActivity()
         retireCapture(); hostInjector?.stop(); hostInjector = nil
         hostGeometryLock.lock(); hostGeometry = nil; hostGeometryLock.unlock()
@@ -976,7 +1005,7 @@ final class NativeSessionCoordinator {
         hostChannel?.close(); hostChannel = nil; hostAudioGate = nil; hostPeerVersion = nil
         refreshClipboardScope(includeCurrent: false)
         cursorWatcher.stop()
-        sharedDisplay.release(); pendingDisplayRequest = nil; displayRestarts = []
+        sharedDisplay.release(); pendingDisplayRequest = nil; displayRestarts = []; menuBarGap.stop()
         endHostActivity()
         retireCapture(); hostInjector?.stop(); hostInjector = nil
         permissionTimer?.invalidate(); permissionTimer = nil
@@ -1313,6 +1342,7 @@ final class NativeSessionCoordinator {
         liveLatencies = []
         drawReportTicks = 0; drawReportDecoded = 0
         observedScreenRequest = nil; sentScreenRequest = nil
+        observedCameraGap = nil; sentCameraGap = nil; lastPointerMove = nil
         viewerStarted = uptime; reconnectWork?.cancel(); reconnectWork = nil
         // What is already copied here is available to paste on the other Mac.
         refreshClipboardScope(includeCurrent: !pairing)
@@ -1328,7 +1358,7 @@ final class NativeSessionCoordinator {
             stopReconnecting()
             // Retired windows cannot act on a later connection.
             viewerWindow?.onClose = nil; viewerWindow?.onReleaseInput = nil
-            viewerWindow?.video.onInput = nil; viewerWindow?.video.onReleaseInput = nil
+            viewerWindow?.video.onInput = nil; viewerWindow?.video.onReleaseInput = nil; viewerWindow?.cameraRowVideo.onInput = nil
             viewerWindow?.close()
             window = NativeViewerWindow(name: peer.name, peerID: peer.id, showsDiagnosticBar: showsDiagnosticBar); viewerWindow = window
         }
@@ -1375,6 +1405,10 @@ final class NativeSessionCoordinator {
             guard let self, let channel, self.viewerChannel === channel else { return }
             self.sendInput(event)
         }
+        window.cameraRowVideo.onInput = { [weak self, weak channel, weak row = window.cameraRowVideo] event in
+            guard let self, let channel, self.viewerChannel === channel else { return }
+            self.sendInput(event, from: row)
+        }
         // ⌘-Tab and other system shortcuts reach an app only through an event
         // tap, which needs Accessibility on this Mac.
         let keys = systemKeys ?? NativeSystemKeyCapture(); systemKeys = keys
@@ -1390,7 +1424,9 @@ final class NativeSessionCoordinator {
             guard let self, let channel, self.viewerChannel === channel else { return }
             self.releaseViewerInput()
         }
-        window.setSystemKeysAllowed(keys.start())
+        let capturing = keys.start()
+        window.setSystemKeysAllowed(capturing)
+        NativeLog.session.notice("\(capturing ? "⌘-Tab and other system shortcuts go to the sharing Mac" : "⌘-Tab and other system shortcuts stay on this Mac until Mooring is allowed in Accessibility", privacy: .public)")
         let firstPresentationPending = NativeRunToken()
         window.video.onFrameTiming = { [weak self, weak channel] timing in
             guard let self, let channel, self.viewerChannel === channel, let latency = self.clockSync.latency(timing) else { return }
@@ -1541,7 +1577,12 @@ final class NativeSessionCoordinator {
                 // A failed Keychain cleanup must never restart a revoked session.
                 try? keychain.deletePeerCode(peerID)
             }
-        case .ping, .keyframe, .displayRequest, .updateRequest, .leaving:
+        case .menuBar(let height):
+            if viewerWindow?.remoteMenuBarHeight != height {
+                NativeLog.session.notice("the sharing Mac's menu bar is \(height) points tall")
+            }
+            viewerWindow?.setRemoteMenuBar(height: height)
+        case .ping, .keyframe, .displayRequest, .updateRequest, .leaving, .menuBarGap:
             break
         }
     }
@@ -1620,6 +1661,7 @@ final class NativeSessionCoordinator {
         if !enabled { releaseViewerInput() }
         viewerInputEnabled = enabled
         viewerWindow?.video.forwardsCommandKeys = enabled
+        if enabled, systemKeys?.isRunning != true { viewerWindow?.noteSystemKeysStayLocal() }
         // View only: the sharing Mac draws its own pointer into the video, so
         // hide this Mac's pointer over it. With control, the reverse applies.
         viewerWindow?.video.hidesLocalCursor = !enabled
@@ -1632,12 +1674,17 @@ final class NativeSessionCoordinator {
               let view = viewerWindow?.video, window.firstResponder === view else { return false }
         return true
     }
-    private func sendInput(_ event: NSEvent) {
-        guard viewerHasKeyboardFocus, let channel = viewerChannel, let view = viewerWindow?.video, view.geometry != nil,
-              view.displayedVideoRect.width > 0, view.displayedVideoRect.height > 0,
+    /// `source`: the view the event arrived in; the main video by default.
+    private func sendInput(_ event: NSEvent, from source: NativeRemoteView? = nil) {
+        guard viewerHasKeyboardFocus, let channel = viewerChannel, let window = viewerWindow else { return }
+        let view = source ?? window.video
+        inputEncoder.holdsPointerAtEdges = window.window?.styleMask.contains(.fullScreen) == true
+        guard view.geometry != nil, view.displayedVideoRect.width > 0, view.displayedVideoRect.height > 0,
               let input = inputEncoder.encode(event, in: view, contentRect: view.displayedVideoRect) else { return }
         // Rust refuses gestures to a host that did not announce it injects them.
         if input.kind.isGesture, channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_GESTURES) == 0 { return }
+        if input.kind == .pointerMove && input == lastPointerMove { return }
+        lastPointerMove = input.kind == .pointerMove ? input : nil
         channel.send(.input(input))
     }
     private func releaseViewerInput() {
@@ -1648,7 +1695,11 @@ final class NativeSessionCoordinator {
     private func updateViewerStatus() {
         guard let channel = viewerChannel, channel.token.isActive else { return }
         // Accessibility can be granted mid-session; start capturing ⌘-Tab then.
-        if let keys = systemKeys { viewerWindow?.setSystemKeysAllowed(keys.isRunning || keys.start()) }
+        if let keys = systemKeys, !keys.isRunning {
+            let started = keys.start()
+            viewerWindow?.setSystemKeysAllowed(started)
+            if started { NativeLog.session.notice("Accessibility allowed: ⌘-Tab and other system shortcuts now go to the sharing Mac") }
+        }
         let now = uptime, snapshot = channel.measurements.snapshot()
         let count = snapshot["presented_frames", default: 0]
         let fps = (count - lastPresented) / max(0.001, now - lastStatusTime)
@@ -1689,6 +1740,7 @@ final class NativeSessionCoordinator {
             for key in ["latency_ms", "latency_ms_p95", "to_viewer_ms", "display_wait_ms"] { channel.measurements.remove(key) }
         }
         requestMatchingScreen(channel)
+        requestCameraGap(channel)
         if let pendingPing, now - pendingPing.1 > 8 { channel.fail("The sharing Mac stopped answering connection checks."); return }
         if pendingPing == nil {
             pingSequence &+= 1; pendingPing = (pingSequence, now)
@@ -1700,11 +1752,13 @@ final class NativeSessionCoordinator {
     /// Retina scale, so the picture fills the window pixel for pixel.
     private func requestMatchingScreen(_ channel: NativeSessionChannel) {
         guard firstFrame, channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_VIRTUAL_DISPLAY) != 0,
-              let view = viewerWindow?.video, let window = view.window else { return }
+              let viewer = viewerWindow, let window = viewer.window else { return }
+        viewer.extendsBesideCamera = matchesScreen && extendsBesideCamera
+            && channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_MENU_BAR_GAP) != 0
         var desired: (width: Int, height: Int, scale: Int) = (0, 0, 0)
         if matchesScreen {
             let scale = window.backingScaleFactor >= 2 ? 2 : 1
-            var width = Double(view.bounds.width), height = Double(view.bounds.height)
+            var width = Double(viewer.pictureSize.width), height = Double(viewer.pictureSize.height)
             // Stay within the video limits (3840×2160 pixels), keeping the shape.
             let fit = min(1, 3840 / (width * Double(scale)), 2160 / (height * Double(scale)))
             width = (width * fit / 2).rounded(.down) * 2; height = (height * fit / 2).rounded(.down) * 2
@@ -1717,6 +1771,22 @@ final class NativeSessionCoordinator {
         sentScreenRequest = desired
         channel.control(.displayRequest(width: desired.width, height: desired.height, scale: desired.scale))
         NativeLog.session.notice("asked the sharing Mac for a \(desired.width)×\(desired.height)-point display at \(desired.scale)x")
+    }
+    /// Once a second, beside requestMatchingScreen: while the picture extends
+    /// beside this Mac's camera housing, ask the sharing Mac to keep that part
+    /// of its menu bar clear, and to stop when it no longer does. A gap is sent
+    /// once it has held for a tick, so a display change in progress isn't.
+    private func requestCameraGap(_ channel: NativeSessionChannel) {
+        guard firstFrame, channel.transport.peerCapabilities & UInt64(ML_CAPABILITY_MENU_BAR_GAP) != 0,
+              let viewer = viewerWindow else { return }
+        let gap = viewer.video.geometry.flatMap { viewer.cameraGap(remoteWidth: $0.width) } ?? (x: 0, width: 0)
+        defer { observedCameraGap = gap }
+        guard let observed = observedCameraGap, observed == gap else { return }
+        if let sent = sentCameraGap, sent == gap { return }
+        if sentCameraGap == nil && gap.width == 0 { return }
+        sentCameraGap = gap
+        channel.control(.menuBarGap(x: gap.x, width: gap.width))
+        NativeLog.session.notice("\(gap.width > 0 ? "asked the sharing Mac to keep \(gap.width) points of its menu bar clear for this Mac's camera" : "the sharing Mac's menu bar no longer needs a gap", privacy: .public)")
     }
     /// This Mac is going to sleep or locked. A session, or reconnecting, ends
     /// now, without telling the sharing Mac it's leaving, so it waits; this

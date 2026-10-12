@@ -100,7 +100,16 @@ enum {
      * without it, the host waits for the viewer to come back. */
     ML_CONTROL_LEAVING = 12,
     /* Either side removed this pairing; only its authenticated key is revoked. */
-    ML_CONTROL_REVOKE_PAIRING = 13
+    ML_CONTROL_REVOKE_PAIRING = 13,
+    /* Protocol 5, viewer to a host with ML_CAPABILITY_MENU_BAR_GAP: keep
+     * geometry.width points of the menu bar clear, from geometry.x points
+     * right of the shared display's left edge, both whole points with
+     * x + width at most 7680. Other fields zero; all zero removes the gap. */
+    ML_CONTROL_MENU_BAR_GAP = 14,
+    /* Protocol 5, host to a viewer with ML_CAPABILITY_MENU_BAR_GAP: the shared
+     * display's menu bar strip is geometry.height whole points tall (0 to 100;
+     * 0 when it shows none, as when it hides automatically). Other fields zero. */
+    ML_CONTROL_MENU_BAR = 15
 };
 enum {
     ML_INPUT_KEY_DOWN = 1, ML_INPUT_KEY_UP = 2, ML_INPUT_POINTER_MOVE = 3,
@@ -159,6 +168,7 @@ enum { ML_CODEC_H264 = 1, ML_CODEC_HEVC = 2 };
 #define ML_CAPABILITY_REMOTE_UPDATE 128ull /* a sharing Mac that updates itself when a viewer asks */
 #define ML_CAPABILITY_PAIRING_REVOCATION 512ull /* authenticated pairing removal in either direction */
 #define ML_CAPABILITY_WAITS 256ull /* previews 22-28: a sharing Mac that waits 12 h for a viewer whose session dropped */
+#define ML_CAPABILITY_MENU_BAR_GAP 1024ull /* a viewer that lays the host's menu bar beside its camera housing; a host that keeps that gap clear */
 /* A sharing Mac whose display slept, or whose screen was covered, waits this
  * long while retrying remote activity for an approved viewer. Capture still
  * requires an eligible session and an awake display. */
