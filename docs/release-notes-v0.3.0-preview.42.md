@@ -1,0 +1,9 @@
+# Mooring 0.3.0 preview 42 — Searching wider
+
+In preview 41, the clear space beside the viewing Mac's camera notch still reached well past it on the right: the sharing Mac logged 138 points to spare. The search for the spacer's slot tried positions only up to the gap's own distance from the right edge of the menu bar. That assumed an icon's stored position never exceeds its distance, which held on the Mac where the fix was tested but not on the sharing Mac. Its icons carry larger stored positions, perhaps from being arranged on a fuller or wider menu bar, so the search stopped about four icons short of the notch.
+
+Trials now start at the gap's distance and double while they land right of the gap, up to the position where macOS puts an item leftmost. Then they narrow down to a single point. A placement typically takes 10 to 13 trials of about half a second each, while the sharing Mac's status icons shuffle. The sharing Mac's log names the result, for example "menu bar gap placed beside the viewer's camera, 9 points to spare on its right (position 230 after 10 trials)". Both Macs need this preview, as for preview 39.
+
+Local validation covers Rust, the native input, media and session suites, encrypted loopback streaming, the packaged CLI and the app build. On a real menu bar, a gap asked for at 1400–1460 points among the status icons was placed at exactly 1400–1469, 9 points to spare, after 10 trials. A gap left of all the status icons, at 1200–1250, widened to the leftmost slot with 1 point to spare after 6 trials. A real two-Mac session with this preview on both Macs remains a separate acceptance check.
+
+Use **Check for Updates…** on each Mac, or download the ZIP. Updates install while idle. Apple silicon and macOS 14 or later; Developer ID signed, notarized and stapled. All tests, builds, signing and packaging run on the local Mac. GitHub Actions remains disabled.
