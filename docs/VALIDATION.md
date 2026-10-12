@@ -612,6 +612,13 @@ Reported from a new 14-inch MacBook Pro (M5 Max, macOS 27.0.1, 1800×1169 points
   - Asked for 1400–1460 on this Mac, the spacer spanned exactly 1400–1477: 17 points to spare, where the nearest slots were 1477 and 1443.
   - A trial item hidden from accessibility, or disabled, lands one 17-point slot left of a plain one. Trials and the spacer share one setup, so they agree.
   - Captured on screen, a visible marker sat where its window frame said.
+- **Preview 41 between the two Macs.** The sharing Mac logged 138 points to spare, about four icons pushed left of the notch that could have stayed right of it.
+  - The search tried positions only up to the gap's distance from the right edge (750 points there). That assumed a slot's stored position is never more than its distance, which held on this Mac.
+  - That Mac's icons evidently carry larger stored positions, as when they were arranged on a fuller menu bar, so the nearer slots needed larger values.
+- **Widening, for preview 42.**
+  - Trials start at the gap's distance. While they land right of the gap they double, up to 16,384, where macOS puts an item leftmost; then they halve to a point.
+  - The log names the winning position and the number of trials.
+  - On this Mac, a gap among the icons was placed with 9 points to spare (position 230, 10 trials). A gap left of all icons widened to the leftmost slot, 1 point to spare after 6 trials.
 - **Not yet verified.**
   - The end-to-end session needs this build on both Macs.
   - The sharing Mac's layout with long app menus, and status items that already reach the notch, are untested.
