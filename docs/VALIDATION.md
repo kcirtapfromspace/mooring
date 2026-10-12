@@ -591,6 +591,16 @@ Reported from a new 14-inch MacBook Pro (M5 Max, macOS 27.0.1, 1800×1169 points
   - Kind 15 (host to viewer) is the menu bar height.
   - Rust checks fields, direction and capability on send and receive; the Swift loopback carries both ways and refuses each in the wrong direction.
 - **The sharing Mac.** One empty status item reaches from where the other status items begin to the gap's left edge. On this Mac it reported a 39-point menu bar. Asked for a gap at 1130, it spanned 1114–1190: the item's padding adds about 16 points on the left. It was gone once the gap was removed.
+- **Preview 39 between the two Macs.**
+  - The viewer received a 30-point menu bar, asked for a 1726×1080 display and a 228-point gap.
+  - A screen recording showed the spacer in place, with macOS's screen-sharing indicator pushed left of it.
+  - But four status icons sat behind the notch (about 862–1000 points; the notch spans 790–1010). The spacer was created as the leftmost status item, so it could only keep later icons out of the gap, not move these.
+- **Placing the spacer.** For preview 40, the spacer goes just right of the gap. macOS places a new status item by its `NSStatusItem Preferred Position <autosave name>` default.
+  - A sweep on this Mac, one trial item at a time, showed the slot depends monotonically on the value but not at an exact distance: the order follows the items' stored positions. Values of 460 or more landed at the left end.
+  - Keeping a trial item while trying the next moved it 17 points, so trials go one at a time.
+  - The search halves the range of values up to six times, about three seconds of icons moving, and keeps the largest value whose item lands at or right of the gap's right edge. It then creates the spacer there and lengthens it to the gap's left edge.
+  - Asked for a gap at 1400–1460 among this Mac's status icons, the spacer spanned 1384–1477.
+  - It is placed again if icons to its right grow into the gap for five seconds, at most every 30 seconds. When no slot reaches past the gap, it stays leftmost and isn't placed again.
 - **Not yet verified.**
   - The end-to-end session needs this build on both Macs.
   - The sharing Mac's layout with long app menus, and status items that already reach the notch, are untested.
