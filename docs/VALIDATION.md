@@ -619,6 +619,12 @@ Reported from a new 14-inch MacBook Pro (M5 Max, macOS 27.0.1, 1800×1169 points
   - Trials start at the gap's distance. While they land right of the gap they double, up to 16,384, where macOS puts an item leftmost; then they halve to a point.
   - The log names the winning position and the number of trials.
   - On this Mac, a gap among the icons was placed with 9 points to spare (position 230, 10 trials). A gap left of all icons widened to the leftmost slot, 1 point to spare after 6 trials.
+- **Preview 42 between the two Macs.** The sharing Mac logged 142 points to spare at position 16384 after 6 trials. `scripts/probe-menu-bar-order.swift` on it (macOS 26.6.2, a 1726-point display) showed:
+  - Every position from 700 to 10,000 landed in one slot, just left of 1Password (x 1102).
+  - Position 16384 landed about 350 points further left (x 749), past about eight icons. The in-app search's 16384 had landed on the other side of them, so they evidently share that one stored position.
+  - A tied block can't be split by a new item's position: the gap can sit only before or after it, and Mooring correctly moves the whole block left of the notch.
+  - Fix on the sharing Mac: ⌘-drag each icon in the block once, which gives each its own position. README explains this. Settings → Viewing's tooltip says it too, and the sharing Mac's log suggests it when more than 64 points are to spare.
+  - Not yet confirmed after rearranging.
 - **Not yet verified.**
   - The end-to-end session needs this build on both Macs.
   - The sharing Mac's layout with long app menus, and status items that already reach the notch, are untested.
