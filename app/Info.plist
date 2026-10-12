@@ -21,7 +21,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>0.3.0</string>
 	<key>CFBundleVersion</key>
-	<string>48</string>
+	<string>49</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
@@ -30,8 +30,12 @@
 	<string>0.3.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_mooring-pair._tcp</string>
+	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Mooring checks the Macs you add, connects to Macs you pair with, and shares this display only when you start sharing.</string>
+	<string>Mooring finds nearby Macs showing a pairing PIN, checks the Macs you add, connects to Macs you pair with, and shares this display only when you start sharing.</string>
 	<key>SUAllowsAutomaticUpdates</key>
 	<true/>
 	<key>SUAutomaticallyUpdate</key>

@@ -31,6 +31,10 @@ pub const ML_ALTERNATES_CAPACITY: usize = crate::pairing::MAX_ALTERNATES_TEXT + 
 pub const ML_ADDRESSES_MAX: usize = crate::pairing::MAX_ADDRESSES;
 pub const ML_PAIRING_CODE_CAPACITY: usize = 2049;
 pub const ML_CREDENTIAL_CAPACITY: usize = 1024;
+/// A PIN's six characters and the NUL, rounded up.
+pub const ML_PIN_CAPACITY: usize = 8;
+const _: () = assert!(ML_PIN_CAPACITY > crate::pin::PIN_LENGTH);
+pub const ML_PIN_TRIES: u8 = crate::pin::MAX_TRIES;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -324,6 +328,16 @@ pub struct MLDevice {
     pub id: [c_char; ML_PEER_ID_CAPACITY],
     pub name: [c_char; ML_TEXT_CAPACITY],
     pub via: u8,
+}
+/// Whether a pairing listener's PIN still works: how many tries it has left
+/// and for how many seconds.
+#[repr(C)]
+#[derive(Default)]
+pub struct MLPinState {
+    pub active: u8,
+    pub tries_left: u8,
+    pub reserved: [u8; 2],
+    pub seconds_left: u32,
 }
 /// Whether Macs paired before per-device keys may still connect, until when
 /// (0: no end set) and when one last did (0: never).
@@ -1004,6 +1018,185 @@ pub unsafe extern "C" fn ml_listener_pairing_secret(id: u64, out: *mut u8) -> i3
         target.fill(0);
         let secret = transport::listener(id)?.new_pairing_secret()?;
         target.copy_from_slice(&*secret);
+        Ok(())
+    })
+}
+/// A pairing listener for this Mac's identity (see Listener::bind_pin): it
+/// approves Macs into the device list in `directory` (null: MOORING_HOME or
+/// Application Support) with a PIN, takes nothing else, and never starts a
+/// session, so it works whether or not this Mac is sharing.
+/// # Safety
+/// Host NUL terminated, `private` readable for 32 bytes, `directory` null or
+/// NUL terminated, `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_pin_listen(
+    bind_host: *const c_char,
+    port: u16,
+    private: *const u8,
+    directory: *const c_char,
+    out: *mut u64,
+) -> i32 {
+    ffi(|| {
+        let out = unsafe { output(out)? };
+        *out = 0;
+        let devices = unsafe { device_store(directory)? };
+        let ip = unsafe { text(bind_host)? }
+            .parse::<IpAddr>()
+            .map_err(|_| Error::Invalid)?;
+        let listener =
+            Listener::bind_pin(SocketAddr::new(ip, port), unsafe { key(private)? }, devices)?;
+        *out = transport::insert(Handle::Listener(Arc::new(listener)), None)?;
+        Ok(())
+    })
+}
+/// A new PIN for a pairing listener, replacing any earlier one. The Mac that
+/// pairs with it saves `address`, `computer_name` (made valid rather than
+/// refused) and `alternates` (null or space-separated; those that don't
+/// qualify or fit are left out) for this Mac.
+/// # Safety
+/// Strings NUL terminated (`alternates` may be null); `out` writable for
+/// ML_PIN_CAPACITY bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_listener_new_pin(
+    listener: u64,
+    address: *const c_char,
+    computer_name: *const c_char,
+    alternates: *const c_char,
+    out: *mut c_char,
+) -> i32 {
+    ffi(|| {
+        if out.is_null() {
+            return Err(Error::Invalid);
+        }
+        // SAFETY: caller promises ML_PIN_CAPACITY writable bytes.
+        let target = unsafe { &mut *(out as *mut [c_char; ML_PIN_CAPACITY]) };
+        target.fill(0);
+        let alternates = if alternates.is_null() {
+            vec![]
+        } else {
+            split_list(&unsafe { text(alternates)? })
+        };
+        let details = crate::pin::HostInfo::for_host(
+            &unsafe { text(address)? },
+            &unsafe { text(computer_name)? },
+            &alternates,
+        )?;
+        let pin = transport::listener(listener)?.new_pin(&details)?;
+        for (slot, byte) in target.iter_mut().zip(pin.iter()) {
+            *slot = *byte as c_char;
+        }
+        Ok(())
+    })
+}
+/// The PIN stops working now.
+#[unsafe(no_mangle)]
+pub extern "C" fn ml_listener_clear_pin(listener: u64) -> i32 {
+    ffi(|| transport::listener(listener)?.clear_pin())
+}
+/// # Safety
+/// `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_listener_pin_state(listener: u64, out: *mut MLPinState) -> i32 {
+    ffi(|| {
+        let out = unsafe { output(out)? };
+        *out = MLPinState::default();
+        let state = transport::listener(listener)?.pin_state()?;
+        *out = MLPinState {
+            active: u8::from(state.active),
+            tries_left: state.tries_left,
+            reserved: [0; 2],
+            seconds_left: state.seconds_left,
+        };
+        Ok(())
+    })
+}
+/// Waits up to `timeout_ms` for a PIN attempt on a pairing listener. OK: a Mac
+/// paired, and `id_out` and `name_out` say which. TIMEOUT: nobody tried. Any
+/// other status was an attempt that didn't pair, such as a wrong PIN.
+/// # Safety
+/// `id_out` writable for ML_PEER_ID_CAPACITY bytes, `name_out` for
+/// ML_TEXT_CAPACITY.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_pin_accept(
+    listener: u64,
+    timeout_ms: u32,
+    id_out: *mut c_char,
+    name_out: *mut c_char,
+) -> i32 {
+    ffi(|| {
+        if id_out.is_null() || name_out.is_null() {
+            return Err(Error::Invalid);
+        }
+        // SAFETY: caller promises the documented capacities.
+        let id_out = unsafe { &mut *(id_out as *mut [c_char; ML_PEER_ID_CAPACITY]) };
+        let name_out = unsafe { &mut *(name_out as *mut [c_char; ML_TEXT_CAPACITY]) };
+        id_out.fill(0);
+        name_out.fill(0);
+        let listener = transport::listener(listener)?;
+        let (id, name) = listener.accept_pin(deadline(timeout_ms)?)?;
+        write_text(id_out, &id)?;
+        write_text(name_out, &name)
+    })
+}
+/// A typed PIN in its canonical form, or INVALID. Case, spaces and dashes
+/// don't matter; O, I and L read as 0, 1 and 1.
+/// # Safety
+/// `text` NUL terminated; `out` writable for ML_PIN_CAPACITY bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ml_pin_normalize(text_in: *const c_char, out: *mut c_char) -> i32 {
+    ffi(|| {
+        if out.is_null() {
+            return Err(Error::Invalid);
+        }
+        // SAFETY: caller promises ML_PIN_CAPACITY writable bytes.
+        let target = unsafe { &mut *(out as *mut [c_char; ML_PIN_CAPACITY]) };
+        target.fill(0);
+        let pin = crate::pin::normalize(&unsafe { text(text_in)? })?;
+        for (slot, byte) in target.iter_mut().zip(pin.iter()) {
+            *slot = *byte as c_char;
+        }
+        Ok(())
+    })
+}
+/// Pairs with the PIN another Mac shows (see transport::connect_pin), approving
+/// this Mac's device key there; no session starts. `paired_out` receives the
+/// device pairing to save with that key, and `used_out` (ML_TEXT_CAPACITY
+/// bytes) the address that connected. UNAVAILABLE: no Mac at those addresses
+/// is showing a PIN. AUTH: the PIN didn't match, or was used or ran out.
+/// # Safety
+/// Strings NUL terminated; `device_private` readable for 32 bytes; outputs
+/// writable.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ml_pin_pair(
+    addresses: *const c_char,
+    port: u16,
+    pin: *const c_char,
+    device_private: *const u8,
+    device_name: *const c_char,
+    timeout_ms: u32,
+    paired_out: *mut MLPairingCode,
+    used_out: *mut c_char,
+) -> i32 {
+    ffi(|| {
+        let paired_out = unsafe { output(paired_out)? };
+        *paired_out = MLPairingCode::EMPTY;
+        if used_out.is_null() {
+            return Err(Error::Invalid);
+        }
+        // SAFETY: caller promises ML_TEXT_CAPACITY writable bytes.
+        let used_out = unsafe { &mut *(used_out as *mut [c_char; ML_TEXT_CAPACITY]) };
+        used_out.fill(0);
+        let end = deadline(timeout_ms)?;
+        let hosts = address_list(&unsafe { text(addresses)? })?;
+        let pin = crate::pin::normalize(&unsafe { text(pin)? })?;
+        let private = unsafe { key(device_private)? };
+        let name = unsafe { text(device_name)? };
+        let (code, used) = transport::connect_pin(&hosts, port, &pin, &private, &name, end)?;
+        let mut paired = MLPairingCode::EMPTY;
+        code_out(&code, &mut paired)?;
+        write_text(used_out, &used)?;
+        *paired_out = paired;
         Ok(())
     })
 }

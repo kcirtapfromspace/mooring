@@ -100,6 +100,65 @@ final class NativeTransport: @unchecked Sendable {
         guard let connected = Mode(rawValue: mode) else { _ = ml_session_close(handle); throw NativeSessionError(message: "Internal error") }
         return (NativeTransport(handle, receivesVideo: true), connected, nativeString(used))
     }
+    /// The pairing listener's port, open only while this Mac shows a PIN.
+    static let pinPort = UInt16(ML_PIN_DEFAULT_PORT)
+    /// A pairing listener for this Mac's identity: it approves Macs into
+    /// `devices` with a PIN, takes nothing else, and never starts a session.
+    static func listenForPIN(identity: NativeHostIdentity, devices: NativeDeviceStore,
+                             bindAddress: String = "0.0.0.0", port: UInt16 = pinPort) throws -> NativeTransport {
+        try identity.validate()
+        var handle: UInt64 = 0
+        let status = identity.privateKey.withUnsafeBytes { privateBytes in
+            ml_pin_listen(bindAddress, port, privateBytes.bindMemory(to: UInt8.self).baseAddress!, devices.directory, &handle)
+        }
+        try check(status)
+        return NativeTransport(handle, receivesVideo: false)
+    }
+    /// Pairing listener: a new PIN, replacing any earlier one. The Mac that
+    /// pairs saves this Mac's name and addresses.
+    func newPIN(address: String, computerName: String, alternates: [String]) throws -> String {
+        var pin = [CChar](repeating: 0, count: Int(ML_PIN_CAPACITY))
+        try Self.check(ml_listener_new_pin(id, address, computerName, alternates.joined(separator: " "), &pin))
+        return nativeString(pin)
+    }
+    func clearPIN() { _ = ml_listener_clear_pin(id) }
+    /// Whether the PIN still works, or nil once the listener closed.
+    var pinState: MLPinState? {
+        var state = MLPinState()
+        return ml_listener_pin_state(id, &state) == ML_SESSION_OK ? state : nil
+    }
+    /// Pairing listener: waits about a second for a PIN attempt. Returns the
+    /// Mac that paired, nil if nobody tried, or throws for an attempt that
+    /// didn't pair.
+    func acceptPIN() throws -> (id: String, name: String)? {
+        var device = [CChar](repeating: 0, count: Int(ML_PEER_ID_CAPACITY))
+        var name = [CChar](repeating: 0, count: Int(ML_TEXT_CAPACITY))
+        let result = ml_pin_accept(id, 1_000, &device, &name)
+        if result == ML_SESSION_TIMEOUT { return nil }
+        try Self.check(result)
+        return (nativeString(device), nativeString(name))
+    }
+    /// The canonical PIN for what was typed, or nil if it isn't one.
+    static func normalizedPIN(_ text: String) -> String? {
+        var pin = [CChar](repeating: 0, count: Int(ML_PIN_CAPACITY))
+        return ml_pin_normalize(text, &pin) == ML_SESSION_OK ? nativeString(pin) : nil
+    }
+    /// Pairs with the PIN another Mac shows, approving `deviceKey` there; no
+    /// session starts. Returns the device pairing to save with that key and
+    /// the address that connected.
+    static func pairWithPIN(_ pin: String, addresses: [String], deviceKey: NativeDeviceKey,
+                            deviceName: String = NativeDeviceKey.computerName,
+                            port: UInt16 = pinPort) throws -> (NativePairingCode, String) {
+        guard deviceKey.privateKey.count == 32 else { throw NativeSessionError(message: "This Mac's device key is invalid. Try again.") }
+        var raw = MLPairingCode()
+        var used = [CChar](repeating: 0, count: Int(ML_TEXT_CAPACITY))
+        let status = deviceKey.privateKey.withUnsafeBytes { keyBytes in
+            ml_pin_pair(addresses.joined(separator: " "), port, pin, keyBytes.bindMemory(to: UInt8.self).baseAddress!,
+                        deviceName, 15_000, &raw, &used)
+        }
+        try check(status)
+        return (NativePairingCode(raw: raw), nativeString(used))
+    }
     var listeningPort: UInt16 { ml_session_listener_port(id) }
     /// 4 or 5; capabilities are exchanged only in protocol 5.
     var protocolVersion: Int { Int(max(0, ml_session_protocol_version(id))) }
