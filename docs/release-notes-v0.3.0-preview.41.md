@@ -1,0 +1,9 @@
+# Mooring 0.3.0 preview 41 — A closer fit
+
+In preview 40, the sharing Mac's status icons moved out from behind the viewing Mac's camera notch, but the clear space reached about 80 points past the notch on the right. There were two causes. The search for the spacer's slot stopped about 12 points short of exact, and some slots can be reached only through a narrow range of positions, so it could skip the nearest one. Also, a status item is 16 points wider than its length, which pushed the spacer's left edge past the gap's.
+
+The search now narrows down to a single point, in at most ten trials. Each trial is read only once the item stops sliding into place. While the gap is placed, the sharing Mac's status icons shuffle for about four seconds. The spacer's length now allows for the padding, so its left edge meets the gap's. Its right edge may fall up to 4 points short of the gap's, which includes a margin beyond the notch. The sharing Mac's log says how much room is left over: "menu bar gap placed beside the viewer's camera, N points to spare on its right". The gap is placed again if icons push into it for five seconds, or leave more than 24 points of extra room for ten seconds, at most every 30 seconds. Both Macs need this preview, as for preview 39.
+
+Local validation covers Rust, the native input, media and session suites, encrypted loopback streaming, the packaged CLI and the app build. On a real menu bar, a gap asked for at 1400–1460 points among the status icons was placed at exactly 1400–1477, 17 points to spare, and the nearest slots were at 1443 and 1477. A real two-Mac session with this preview on both Macs remains a separate acceptance check.
+
+Use **Check for Updates…** on each Mac, or download the ZIP. Updates install while idle. Apple silicon and macOS 14 or later; Developer ID signed, notarized and stapled. All tests, builds, signing and packaging run on the local Mac. GitHub Actions remains disabled.
