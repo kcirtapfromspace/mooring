@@ -141,6 +141,10 @@ enum {
 #define ML_PEERS_MAX 32u
 #define ML_DEVICES_MAX 32u
 #define ML_PAIRING_LIFETIME_SECONDS 600u /* a one-time code works this long, once */
+#define ML_PIN_DEFAULT_PORT 45901u /* the pairing listener, while a PIN shows */
+#define ML_PIN_LENGTH 6u
+#define ML_PIN_CAPACITY 8u /* a PIN and its NUL, rounded up */
+#define ML_PIN_TRIES 5u /* attempts one PIN allows, each counted as it starts */
 #define ML_LEGACY_GRACE_SECONDS 604800u /* the old code closes a week after the first Mac moves over */
 /* Pairing kinds: an old long-lived code or credential, a one-time code (never
  * saved), and a saved device pairing without a secret. */
@@ -400,6 +404,15 @@ typedef struct {
     uint8_t via; /* ML_DEVICE_VIA_* */
 } MLDevice;
 
+/* Whether a pairing listener's PIN still works, with how many tries and
+ * seconds left. */
+typedef struct {
+    uint8_t active;
+    uint8_t tries_left;
+    uint8_t reserved[2];
+    uint32_t seconds_left;
+} MLPinState;
+
 /* Macs paired before per-device keys may use the old code while accepted is 1
  * and before closes_at (0: no end set; stopped for good once past).
  * last_used: 0 if never. */
@@ -513,6 +526,39 @@ uint16_t ml_session_listener_port(uint64_t listener);
  * so accept can return up to 1 s late. A bad peer fails that accept only;
  * explicitly call accept again if desired. Closing the listener cancels both. */
 int32_t ml_session_accept(uint64_t listener, uint32_t timeout_ms, uint64_t *out_session);
+
+/* PIN pairing, separate from sharing. A pairing listener uses this Mac's
+ * identity and approves Macs into the device list in `directory` (NULL:
+ * MOORING_HOME or Application Support). It takes only PINs and never starts
+ * a session. A PIN is six characters of Crockford base32. It works once,
+ * within ML_PAIRING_LIFETIME_SECONDS and ML_PIN_TRIES attempts, and lives only
+ * in memory. SPAKE2 turns it into the pairing secret of the per-device
+ * handshake, so each guess needs a live attempt. */
+int32_t ml_pin_listen(const char *bind_host, uint16_t port, const uint8_t private_key[32], const char *directory,
+                      uint64_t *out_listener);
+/* A new PIN (ML_PIN_CAPACITY bytes), replacing any earlier one. address,
+ * computer_name and alternates (NULL or space-separated) are what the Mac that
+ * pairs saves about this one; the name is made valid and alternates that don't
+ * qualify or fit are left out. */
+int32_t ml_listener_new_pin(uint64_t listener, const char *address, const char *computer_name, const char *alternates,
+                            char *out);
+int32_t ml_listener_clear_pin(uint64_t listener);
+int32_t ml_listener_pin_state(uint64_t listener, MLPinState *out);
+/* Waits up to timeout_ms (1..30000) for an attempt. OK: a Mac paired; id_out
+ * (ML_PEER_ID_CAPACITY) and name_out (ML_TEXT_CAPACITY) say which. TIMEOUT:
+ * nobody tried. Anything else was an attempt that didn't pair. */
+int32_t ml_pin_accept(uint64_t listener, uint32_t timeout_ms, char *id_out, char *name_out);
+/* The canonical PIN (ML_PIN_CAPACITY bytes) for what a person typed, or
+ * INVALID. Case, spaces and dashes don't matter; O, I and L read as 0, 1, 1. */
+int32_t ml_pin_normalize(const char *text, char *out);
+/* Viewer: pairs with the PIN another Mac shows, approving this Mac's device key
+ * there; no session starts. addresses are tried as by ml_session_connect_paired,
+ * but only the first Mac that takes up the PIN gets it. paired_out receives the
+ * device pairing to save with device_private; used_out (ML_TEXT_CAPACITY) the
+ * address that connected. UNAVAILABLE: no Mac there is showing a PIN. AUTH: the
+ * PIN didn't match, or was used, expired or out of tries. */
+int32_t ml_pin_pair(const char *addresses, uint16_t port, const char *pin, const uint8_t device_private[32],
+                    const char *device_name, uint32_t timeout_ms, MLPairingCode *paired_out, char *used_out);
 int32_t ml_session_connect(const char *host, uint16_t port, const uint8_t pinned_public[32], const uint8_t psk[32], uint32_t timeout_ms, uint64_t *out_session);
 int32_t ml_session_close(uint64_t handle);
 const char *ml_session_error_string(int32_t status);

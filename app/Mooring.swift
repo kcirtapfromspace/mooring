@@ -442,6 +442,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         let menu = NSMenu()
         for (title, action) in [("Open Connections", #selector(showConnections)),
                                 ("Pair a Mac…", #selector(connectNative)),
+                                ("Show Pairing PIN…", #selector(showNativePIN)),
                                 ("Share this Mac…", #selector(shareNative))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
@@ -496,6 +497,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         statusMenu.addItem(.separator())
         let nativeConnect = NSMenuItem(title: "Pair a Mac…", action: #selector(connectNative), keyEquivalent: "")
         nativeConnect.target = self; nativeConnect.isEnabled = available; statusMenu.addItem(nativeConnect)
+        let showPIN = NSMenuItem(title: "Show Pairing PIN…", action: #selector(showNativePIN), keyEquivalent: "")
+        showPIN.target = self; showPIN.toolTip = "Show a PIN to type in Pair a Mac on your other Mac."; statusMenu.addItem(showPIN)
         let share = NSMenuItem(title: native.isSharing ? "Sharing This Mac…" : "Share this Mac…", action: #selector(shareNative), keyEquivalent: "")
         share.target = self; statusMenu.addItem(share)
         if native.isSharing {
@@ -569,6 +572,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
 
     @objc private func connectNative() { native.showConnect() }
     @objc private func shareNative() { native.showShare() }
+    @objc private func showNativePIN() { native.showPIN() }
     @objc private func stopNativeSharing() { native.stopSharingByUser() }
     @objc private func checkForUpdates() { updater.checkForUpdates() }
     @objc private func installUpdate() { updater.install() }
@@ -617,6 +621,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         let file = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
         file.submenu = NSMenu(title: "File")
         file.submenu!.addItem(withTitle: "Pair a Mac…", action: #selector(connectNative), keyEquivalent: "k")
+        file.submenu!.addItem(withTitle: "Show Pairing PIN…", action: #selector(showNativePIN), keyEquivalent: "")
         file.submenu!.addItem(withTitle: "Share this Mac…", action: #selector(shareNative), keyEquivalent: "")
         file.submenu!.addItem(.separator())
         file.submenu!.addItem(withTitle: "Your Macs…", action: #selector(showConnections), keyEquivalent: "o")
@@ -672,7 +677,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
                 || item.action == #selector(addMac) || item.action == #selector(connect)
                 || item.action == #selector(checkConnection) || item.action == #selector(removeMac)
                 || item.action == #selector(connectNative) || item.action == #selector(shareNative)
-                || item.action == #selector(showConnections) || item.action == #selector(showConnectionHelp) {
+                || item.action == #selector(showNativePIN) || item.action == #selector(showConnections) || item.action == #selector(showConnectionHelp) {
                 item.target = self
             }
         }
