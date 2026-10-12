@@ -1,0 +1,9 @@
+# Mooring 0.3.0 preview 40 — Clear of the camera
+
+In preview 39, the sharing Mac kept the span behind the viewing Mac's camera notch clear with an empty status item, but created it as the leftmost status item. It kept icons added later out of the gap, but couldn't move icons already there. On a crowded menu bar, four of the sharing Mac's status icons still sat behind the notch. The empty item now goes just right of the gap and reaches left to the gap's left edge, so the icons in between move left of the notch.
+
+macOS places a new status item by the order of the items' stored positions rather than at an exact distance, so the sharing Mac finds the slot with a short search: one trial item at a time, at most six steps. While it searches, the sharing Mac's status icons shuffle for about three seconds. If icons to the right of the gap later grow into it for five seconds, as a network meter can, the gap is placed again, at most every 30 seconds. When status items already reach past the gap, it starts left of them as before. App menus still take precedence: when they reach the gap, macOS hides status items. Both Macs need this preview, as for preview 39.
+
+Local validation covers Rust, the native input, media and session suites, encrypted loopback streaming, the packaged CLI and the app build. On a real menu bar, a gap asked for at 1400–1460 points among the status icons was placed at 1384–1477 and removed afterwards. A real two-Mac session with this preview on both Macs, with status icons that sat behind the notch in preview 39, remains a separate acceptance check.
+
+Use **Check for Updates…** on each Mac, or download the ZIP. Updates install while idle. Apple silicon and macOS 14 or later; Developer ID signed, notarized and stapled. All tests, builds, signing and packaging run on the local Mac. GitHub Actions remains disabled.
