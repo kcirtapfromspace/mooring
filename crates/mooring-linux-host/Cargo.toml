@@ -1,0 +1,11 @@
+[package]
+name = "mooring-linux-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mooring-session = { path = "../mooring-session" }
+serde_json.workspace = true
+libc = "0.2"
+zeroize = "1"

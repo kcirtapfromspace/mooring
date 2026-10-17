@@ -214,6 +214,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
+name = "memchr"
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
 name = "mooring-cli"
 version = "0.3.0"
 dependencies = [
@@ -228,6 +234,16 @@ name = "mooring-core"
 version = "0.3.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "mooring-linux-host"
+version = "0.3.0"
+dependencies = [
+ "libc",
+ "mooring-session",
+ "serde_json",
+ "zeroize",
 ]
 
 [[package]]
@@ -250,12 +266,6 @@ dependencies = [
  "snow",
  "zeroize",
 ]
-
-[[package]]
-name = "memchr"
-version = "2.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "opaque-debug"

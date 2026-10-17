@@ -41,6 +41,14 @@ No home-network marking or capability checkbox is required to start. Auto starts
 
 Builds and GitHub preview releases target Apple silicon (arm64) only. Download the [native session preview](https://github.com/kcirtapfromspace/mooring/releases/latest). Distribution uses Developer ID signing, Apple notarization, and a stapled ticket checked after extracting the final ZIP. Local development builds remain ad hoc by default. See [testing instructions](docs/TESTING.md), [automation behavior](docs/AUTOMATION.md), and the [notarization workflow](docs/NOTARIZATION.md).
 
+## Experimental Linux host
+
+A first Hyprland host for a Mac running Mooring is available as `mooring-linux-host`.
+It uses the existing encrypted native-session protocol, `wf-recorder` with software H.264,
+and Linux uinput for keyboard/buttons/wheel. Build and installation instructions, permissions,
+and the hardware test checklist are in [docs/LINUX.md](docs/LINUX.md). This is a source-only
+prototype; real Omarchy/Asahi capture, input and performance have not yet been validated.
+
 ## CLI
 
 ```sh
