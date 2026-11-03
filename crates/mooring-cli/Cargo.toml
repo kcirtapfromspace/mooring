@@ -9,6 +9,7 @@ name = "mooring"
 path = "src/main.rs"
 
 [dependencies]
+libc = "0.2"
 mooring-core = { path = "../mooring-core" }
 mooring-platform = { path = "../mooring-platform" }
 serde.workspace = true

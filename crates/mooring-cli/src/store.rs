@@ -1,3 +1,4 @@
+use mooring_platform::ServerKind;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
@@ -11,6 +12,10 @@ use std::{
 const MAX_STORE_BYTES: u64 = 1024 * 1024;
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// A saved VNC endpoint. With `ssh`, `host` and `port` are as seen from the
+/// SSH host (usually 127.0.0.1:5900) and the viewer is pointed at a local
+/// tunnel instead. The new fields are omitted when unset, so connections saved
+/// before them are written back byte-for-byte unchanged.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Connection {
@@ -18,6 +23,27 @@ pub struct Connection {
     pub name: String,
     pub host: String,
     pub port: u16,
+    #[serde(default, skip_serializing_if = "ServerKind::is_mac")]
+    pub server: ServerKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<SshHop>,
+}
+
+/// The SSH destination: a `~/.ssh/config` alias or user@host. Keys, ports and
+/// jump hosts stay in the user's SSH configuration; nothing secret is saved.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshHop {
+    pub target: String,
+}
+
+/// What `add` saves, before an ID is assigned.
+pub struct NewConnection<'a> {
+    pub name: &'a str,
+    pub host: &'a str,
+    pub port: u16,
+    pub server: ServerKind,
+    pub ssh_target: Option<&'a str>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -66,6 +92,9 @@ impl Store {
         for connection in &mut document.connections {
             connection.name = validate_name(&connection.name)?;
             connection.host = mooring_platform::validate_host(&connection.host)?;
+            if let Some(ssh) = &mut connection.ssh {
+                ssh.target = mooring_platform::ssh::validate_ssh_target(&ssh.target)?;
+            }
             if connection.port == 0
                 || !valid_id(&connection.id)
                 || !ids.insert(connection.id.clone())
@@ -86,25 +115,55 @@ impl Store {
             .ok_or_else(|| format!("Saved Mac '{id}' was not found. Run mooring list."))
     }
 
+    #[cfg(test)]
     pub fn add(&self, name: &str, host: &str, port: u16) -> Result<Connection, String> {
-        let name = validate_name(name)?;
-        let host = mooring_platform::validate_host(host)?;
+        self.add_connection(NewConnection {
+            name,
+            host,
+            port,
+            server: ServerKind::Mac,
+            ssh_target: None,
+        })
+    }
+
+    pub fn add_connection(&self, new: NewConnection) -> Result<Connection, String> {
+        let name = validate_name(new.name)?;
+        let host = mooring_platform::validate_host(new.host)?;
+        let port = new.port;
         if port == 0 {
             return Err("Port must be between 1 and 65535".into());
         }
+        let ssh = new
+            .ssh_target
+            .map(mooring_platform::ssh::validate_ssh_target)
+            .transpose()?
+            .map(|target| SshHop { target });
         let _lock = self.lock()?;
         let mut connections = self.list()?;
+        // The same remote endpoint through different SSH hosts is a different
+        // connection; 127.0.0.1:5900 is the usual endpoint for every one.
+        let same_route = |c: &Connection| match (&c.ssh, &ssh) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.target.eq_ignore_ascii_case(&b.target),
+            _ => false,
+        };
         if connections
             .iter()
-            .any(|c| c.host.eq_ignore_ascii_case(&host) && c.port == port)
+            .any(|c| c.host.eq_ignore_ascii_case(&host) && c.port == port && same_route(c))
         {
-            return Err("This Mac and port are already saved".into());
+            return Err(if ssh.is_some() {
+                "This SSH host, VNC address and port are already saved".into()
+            } else {
+                "This Mac and port are already saved".into()
+            });
         }
         let connection = Connection {
             id: unique_id(),
             name,
             host,
             port,
+            server: new.server,
+            ssh,
         };
         connections.push(connection.clone());
         self.save(connections)?;
@@ -323,6 +382,91 @@ mod tests {
         let saved = directory.store().list().unwrap();
         assert_eq!(saved[0].name, "Mac");
         assert_eq!(saved[0].host, "mac.local");
+    }
+
+    fn ssh_connection<'a>(target: &'a str, host: &'a str) -> NewConnection<'a> {
+        NewConnection {
+            name: "M1 Linux",
+            host,
+            port: 5900,
+            server: ServerKind::Vnc,
+            ssh_target: Some(target),
+        }
+    }
+
+    #[test]
+    fn existing_connections_are_unchanged_by_the_new_fields() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("connections.json");
+        let legacy = serde_json::json!({"version":1,"connections":[{"id":"a-b-c","name":"Office","host":"office.local","port":5900}]});
+        fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+        let loaded = directory.store().list().unwrap();
+        assert_eq!(loaded[0].server, ServerKind::Mac);
+        assert!(loaded[0].ssh.is_none());
+        // Saving another connection writes the old one back without new keys.
+        directory
+            .store()
+            .add_connection(ssh_connection("m1-linux", "127.0.0.1"))
+            .unwrap();
+        let document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(document["connections"][0], legacy["connections"][0]);
+        assert_eq!(document["connections"][1]["server"], "vnc");
+        assert_eq!(document["connections"][1]["ssh"]["target"], "m1-linux");
+    }
+
+    #[test]
+    fn ssh_connections_round_trip_and_are_deduplicated_per_ssh_host() {
+        let directory = TestDirectory::new();
+        let store = directory.store();
+        let saved = store
+            .add_connection(ssh_connection("alex@192.0.2.20", "127.0.0.1"))
+            .unwrap();
+        let loaded = store.get(&saved.id).unwrap();
+        assert_eq!(
+            loaded.ssh,
+            Some(SshHop {
+                target: "alex@192.0.2.20".into()
+            })
+        );
+        assert_eq!((loaded.host.as_str(), loaded.port), ("127.0.0.1", 5900));
+        assert_eq!(loaded.server, ServerKind::Vnc);
+        assert!(
+            store
+                .add_connection(ssh_connection("alex@192.0.2.20", "127.0.0.1"))
+                .is_err()
+        );
+        // Another SSH host, or a direct connection, may share the endpoint.
+        store
+            .add_connection(ssh_connection("m1-linux", "127.0.0.1"))
+            .unwrap();
+        store.add("Local", "127.0.0.1", 5900).unwrap();
+        assert_eq!(store.list().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn invalid_ssh_targets_are_never_saved_or_loaded() {
+        let directory = TestDirectory::new();
+        for target in ["-oProxyCommand=id", "host -v", "host:22", "user@", ""] {
+            assert!(
+                directory
+                    .store()
+                    .add_connection(ssh_connection(target, "127.0.0.1"))
+                    .is_err(),
+                "saved {target:?}"
+            );
+        }
+        assert!(directory.store().list().unwrap().is_empty());
+        let path = directory.0.join("connections.json");
+        for entry in [
+            serde_json::json!({"id":"a-b-c","name":"X","host":"127.0.0.1","port":5900,"ssh":{"target":"-oProxyCommand=id"}}),
+            serde_json::json!({"id":"a-b-c","name":"X","host":"127.0.0.1","port":5900,"ssh":{"target":"h","port":22}}),
+            serde_json::json!({"id":"a-b-c","name":"X","host":"127.0.0.1","port":5900,"server":"linux"}),
+        ] {
+            let document = serde_json::json!({"version":1,"connections":[entry]});
+            fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+            assert!(directory.store().list().is_err(), "loaded {entry}");
+        }
     }
 
     #[cfg(unix)]

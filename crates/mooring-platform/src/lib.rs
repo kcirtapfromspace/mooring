@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub mod network_probe;
+pub mod ssh;
 
 /// The app's owner-only local telemetry socket, relative to the data directory.
 /// It lives in its own 0700 folder so no other user can reach it.
@@ -199,6 +200,11 @@ fn read_greeting(stream: &mut TcpStream, deadline: Instant) -> Result<String, St
             Err(e) => return Err(format!("Could not read the RFB greeting: {e}")),
         }
     }
+    parse_greeting(&bytes)
+}
+
+/// Validate a 12-byte `RFB xxx.yyy\n` greeting and return `xxx.yyy`.
+pub(crate) fn parse_greeting(bytes: &[u8; 12]) -> Result<String, String> {
     if &bytes[..4] != b"RFB "
         || !bytes[4..7].iter().all(u8::is_ascii_digit)
         || bytes[7] != b'.'
@@ -239,6 +245,58 @@ pub fn apple_vnc_url(host: &str, port: u16) -> Result<String, String> {
 pub enum AppleMode {
     Standard,
     HighPerformance,
+}
+
+/// What kind of VNC server a saved connection reaches. Apple's mode options
+/// (`quality=`, `numVirtualDisplays=`) and Accessibility mode switching are
+/// Mac-only; a generic server such as wayvnc on Linux gets a plain URL.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerKind {
+    #[default]
+    Mac,
+    Vnc,
+}
+
+impl ServerKind {
+    pub fn is_mac(&self) -> bool {
+        *self == ServerKind::Mac
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "mac" => Ok(Self::Mac),
+            "vnc" => Ok(Self::Vnc),
+            _ => Err(
+                "Server must be mac (Apple Screen Sharing) or vnc (any other VNC server).".into(),
+            ),
+        }
+    }
+}
+
+/// The only place a viewer URL with mode options is chosen. A mode is refused
+/// for a server that is not a Mac instead of being silently dropped.
+pub fn viewer_url(
+    server: ServerKind,
+    host: &str,
+    port: u16,
+    mode: Option<AppleMode>,
+) -> Result<String, String> {
+    match (server, mode) {
+        (_, None) => apple_vnc_url(host, port),
+        (ServerKind::Mac, Some(mode)) => apple_vnc_url_with_mode(host, port, mode),
+        (ServerKind::Vnc, Some(_)) => Err(
+            "Display modes are only for Macs. This connection is saved as another VNC server, so Mooring opens it without mode options.".into(),
+        ),
+    }
+}
+
+/// Open a URL produced by [`viewer_url`] in Apple's Screen Sharing.
+pub fn launch_viewer_url(url: &str) -> Result<(), String> {
+    if !url.starts_with("vnc://") {
+        return Err("Only vnc:// viewer URLs can be opened.".into());
+    }
+    launch_apple_url(url)
 }
 
 /// Request a mode using the query emitted by Apple's own saved-connection export
@@ -469,6 +527,37 @@ mod tests {
             apple_vnc_url_with_mode("mac.local%3fquality=full", 5900, AppleMode::Standard).is_err()
         );
         assert!(apple_vnc_url_with_mode("mac.local", 0, AppleMode::Standard).is_err());
+    }
+
+    #[test]
+    fn mode_options_are_only_sent_to_macs() {
+        assert_eq!(
+            viewer_url(ServerKind::Vnc, "127.0.0.1", 50123, None).unwrap(),
+            "vnc://127.0.0.1:50123"
+        );
+        assert_eq!(
+            viewer_url(ServerKind::Mac, "mac.local", 5900, None).unwrap(),
+            "vnc://mac.local:5900"
+        );
+        assert_eq!(
+            viewer_url(
+                ServerKind::Mac,
+                "mac.local",
+                5900,
+                Some(AppleMode::HighPerformance)
+            )
+            .unwrap(),
+            "vnc://mac.local:5900?quality=high&numVirtualDisplays=1"
+        );
+        for mode in [AppleMode::Standard, AppleMode::HighPerformance] {
+            let error = viewer_url(ServerKind::Vnc, "linux.local", 5900, Some(mode)).unwrap_err();
+            assert!(error.contains("only for Macs"), "{error}");
+        }
+        assert!(viewer_url(ServerKind::Vnc, "vnc://x", 5900, None).is_err());
+        assert_eq!(ServerKind::parse("vnc").unwrap(), ServerKind::Vnc);
+        assert_eq!(ServerKind::default(), ServerKind::Mac);
+        assert!(ServerKind::parse("linux").is_err());
+        assert!(launch_viewer_url("https://example.com").is_err());
     }
 
     #[test]

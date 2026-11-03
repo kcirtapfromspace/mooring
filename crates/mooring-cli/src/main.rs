@@ -1,15 +1,18 @@
 mod store;
 
+use mooring_platform::ServerKind;
+use mooring_platform::ssh::{self as ssh_tunnel, SshOptions, SshRoute, TunnelConfig};
 use serde_json::{Map, Value, json};
 use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
-use store::Store;
+use store::{Connection, NewConnection, SshHop, Store};
 
-const HELP: &str = "Mooring — native Mac connections, Rust foundation\n\nUsage: mooring [--config-dir PATH] COMMAND\n\n  list                         List saved Macs as JSON\n  add --name NAME --host HOST [--port PORT]\n                               Save a Mac (default port 5900)\n  remove ID                    Remove a saved Mac\n  inspect ID                   Read the server's RFB greeting; no login\n  connect ID                   Open Apple Screen Sharing\n  connect-mode ID MODE         Request standard or high_performance\n  home-network                 Identify the local network without contacting a Mac\n  network-probe ID             Measure target TCP/RFB timing and route\n  network-evaluate JSON        Evaluate live probe metadata with state\n  doctor                       Report local capabilities and limitations\n  simulate                     Run simulated adaptive-quality scenarios\n  telemetry [--count N]        Stream live native-session measurements as JSON lines\n  tune OPTIONS                 Adjust the sharing Mac's stream while connected:\n                               --bitrate-mbps 1-80  --max-width 640-3840 (even)\n                               --fps 1-60  --in-flight 1-2  --keyframe-seconds 0-10\n                               (0: keyframes only when needed, the default)\n                               --reset (restore defaults, then apply the rest)\n\nMode requests use experimental native-exported Apple URL options.\nThey do not confirm video negotiation. Telemetry and tuning use the running\napp's owner-only local socket; tuning from a viewer is sent to the sharing Mac\nover the encrypted session. No passwords are stored. MOORING_HOME overrides\nthe connection directory.\n";
+const HELP: &str = "Mooring — native Mac connections, Rust foundation\n\nUsage: mooring [--config-dir PATH] COMMAND\n\n  list                         List saved Macs as JSON\n  add --name NAME --host HOST [--port PORT] [--server mac|vnc]\n                               Save a Mac (default port 5900). Use --server vnc\n                               for another VNC server, such as wayvnc on Linux\n  add --name NAME --ssh TARGET [--host HOST] [--port PORT] [--server mac|vnc]\n                               Reach the VNC server through SSH. TARGET is a\n                               ~/.ssh/config alias or user@host; HOST and PORT\n                               are as seen from the SSH host (127.0.0.1:5900)\n  remove ID                    Remove a saved Mac\n  inspect ID                   Read the server's RFB greeting; no login\n  connect ID                   Open Apple Screen Sharing\n  connect ID [--no-viewer] [--idle-seconds N] [--wait-seconds N]\n                               SSH connections: tunnel on 127.0.0.1 through\n                               /usr/bin/ssh, open Screen Sharing there, print\n                               JSON lines until the viewer has been gone N\n                               seconds (default 60) or Ctrl-C\n  connect-mode ID MODE         Request standard or high_performance (Macs only)\n  home-network                 Identify the local network without contacting a Mac\n  network-probe ID             Measure target TCP/RFB timing and route\n  network-evaluate JSON        Evaluate live probe metadata with state\n  doctor                       Report local capabilities and limitations\n  simulate                     Run simulated adaptive-quality scenarios\n  telemetry [--count N]        Stream live native-session measurements as JSON lines\n  tune OPTIONS                 Adjust the sharing Mac's stream while connected:\n                               --bitrate-mbps 1-80  --max-width 640-3840 (even)\n                               --fps 1-60  --in-flight 1-2  --keyframe-seconds 0-10\n                               (0: keyframes only when needed, the default)\n                               --reset (restore defaults, then apply the rest)\n\nMode requests use experimental native-exported Apple URL options.\nThey do not confirm video negotiation. Telemetry and tuning use the running\napp's owner-only local socket; tuning from a viewer is sent to the sharing Mac\nover the encrypted session. No passwords are stored. MOORING_HOME overrides\nthe connection directory. SSH uses your own keys, agent and ~/.ssh/config in\nbatch mode and never prompts; MOORING_SSH_CONFIG names an alternate config.\n";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -51,8 +54,14 @@ fn execute(args: &[String]) -> Result<Value, String> {
             Ok(json!(store.list()?))
         }
         "add" => {
-            let (name, host, port) = parse_add(trailing)?;
-            Ok(json!(store.add(&name, &host, port)?))
+            let options = parse_add(trailing)?;
+            Ok(json!(store.add_connection(NewConnection {
+                name: &options.name,
+                host: &options.host,
+                port: options.port,
+                server: options.server,
+                ssh_target: options.ssh.as_deref(),
+            })?))
         }
         "remove" => {
             require_count(trailing, 1)?;
@@ -62,6 +71,9 @@ fn execute(args: &[String]) -> Result<Value, String> {
         "inspect" => {
             require_count(trailing, 1)?;
             let connection = store.get(&trailing[0])?;
+            if let Some(hop) = &connection.ssh {
+                return inspect_through_ssh(&connection, hop);
+            }
             Ok(json!(mooring_platform::inspect_host(
                 &connection.host,
                 connection.port,
@@ -69,8 +81,14 @@ fn execute(args: &[String]) -> Result<Value, String> {
             )?))
         }
         "connect" => {
-            require_count(trailing, 1)?;
-            let connection = store.get(&trailing[0])?;
+            let (id, options) = parse_connect(trailing)?;
+            let connection = store.get(id)?;
+            if let Some(hop) = &connection.ssh {
+                return connect_through_ssh(&connection, hop, options);
+            }
+            if options != ConnectOptions::default() {
+                return Err("--no-viewer, --idle-seconds and --wait-seconds apply only to connections saved with --ssh.".into());
+            }
             mooring_platform::launch_apple(&connection.host, connection.port)?;
             Ok(
                 json!({"status":"launched", "connection":connection, "note":"Apple Screen Sharing controls authentication and display mode. Launch is not confirmation of a connected session."}),
@@ -84,7 +102,16 @@ fn execute(args: &[String]) -> Result<Value, String> {
                 "high_performance" => mooring_platform::AppleMode::HighPerformance,
                 _ => return Err("Mode must be standard or high_performance.".into()),
             };
-            mooring_platform::launch_apple_with_mode(&connection.host, connection.port, mode)?;
+            if connection.ssh.is_some() {
+                return Err("Display modes are not requested through SSH tunnels, which carry only the standard VNC stream. Use mooring connect ID.".into());
+            }
+            let url = mooring_platform::viewer_url(
+                connection.server,
+                &connection.host,
+                connection.port,
+                Some(mode),
+            )?;
+            mooring_platform::launch_viewer_url(&url)?;
             Ok(
                 json!({"status":"requested", "mode":mode, "note":"Requested Apple's native exported-connection URL options. Launch does not confirm the negotiated mode."}),
             )
@@ -96,6 +123,9 @@ fn execute(args: &[String]) -> Result<Value, String> {
         "network-probe" => {
             require_count(trailing, 1)?;
             let connection = store.get(&trailing[0])?;
+            if connection.ssh.is_some() {
+                return Err("network-probe measures a direct path. This connection goes through SSH; use mooring inspect ID.".into());
+            }
             let local_network = mooring_platform::network_probe::local_network();
             match mooring_platform::inspect_host(
                 &connection.host,
@@ -135,7 +165,9 @@ fn execute(args: &[String]) -> Result<Value, String> {
                 "custom_streaming_backend":"experimental native Mooring session; both Macs run Mooring",
                 "automatic_quality":"menu-bar network policy uses live TCP/RFB checks; experimental Apple mode requests and Accessibility reconnects require setup",
                 "inspection":"RFB greeting only; does not measure video latency, bandwidth or High Performance support",
-                "password_storage":"none; Apple handles credentials"
+                "password_storage":"none; Apple handles credentials",
+                "ssh_tunnel":"connect starts /usr/bin/ssh -W per viewer connection in batch mode with your keys, agent and ~/.ssh/config; listens on 127.0.0.1 only; never prompts for or stores a password",
+                "ssh_available":Path::new(ssh_tunnel::SYSTEM_SSH).is_file()
             }))
         }
         "simulate" => {
@@ -287,10 +319,21 @@ fn require_count(args: &[String], count: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_add(args: &[String]) -> Result<(String, String, u16), String> {
+#[derive(Debug, PartialEq, Eq)]
+struct AddOptions {
+    name: String,
+    host: String,
+    port: u16,
+    server: ServerKind,
+    ssh: Option<String>,
+}
+
+fn parse_add(args: &[String]) -> Result<AddOptions, String> {
     let mut name = None;
     let mut host = None;
     let mut port = None;
+    let mut server = None;
+    let mut ssh = None;
     let (chunks, remainder) = args.as_chunks::<2>();
     for pair in chunks {
         match pair[0].as_str() {
@@ -305,17 +348,209 @@ fn parse_add(args: &[String]) -> Result<(String, String, u16), String> {
                         .ok_or("Port must be between 1 and 65535")?,
                 )
             }
+            "--server" if server.is_none() => server = Some(ServerKind::parse(&pair[1])?),
+            "--ssh" if ssh.is_none() => ssh = Some(pair[1].clone()),
             value => return Err(format!("Unknown or repeated option '{value}'")),
         }
     }
     if !remainder.is_empty() {
         return Err("Every add option requires a value".into());
     }
-    Ok((
-        name.ok_or("--name is required")?,
-        host.ok_or("--host is required")?,
-        port.unwrap_or(5900),
-    ))
+    let host = match (host, &ssh) {
+        (Some(host), _) => host,
+        (None, Some(_)) => ssh_tunnel::DEFAULT_REMOTE_HOST.to_owned(),
+        (None, None) => return Err("--host is required (or --ssh to go through SSH)".into()),
+    };
+    Ok(AddOptions {
+        name: name.ok_or("--name is required")?,
+        host,
+        port: port.unwrap_or(ssh_tunnel::DEFAULT_REMOTE_PORT),
+        server: server.unwrap_or_default(),
+        ssh,
+    })
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ConnectOptions {
+    no_viewer: bool,
+    idle_seconds: Option<u64>,
+    wait_seconds: Option<u64>,
+}
+
+fn parse_connect(args: &[String]) -> Result<(&str, ConnectOptions), String> {
+    let (id, mut rest) = args
+        .split_first()
+        .filter(|(id, _)| !id.starts_with('-'))
+        .ok_or("Usage: mooring connect ID [--no-viewer] [--idle-seconds N] [--wait-seconds N]")?;
+    let mut options = ConnectOptions::default();
+    let seconds = |flag: &str, value: Option<&String>| -> Result<u64, String> {
+        value
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| (1..=3600).contains(v))
+            .ok_or_else(|| format!("{flag} must be between 1 and 3600"))
+    };
+    while let Some((flag, tail)) = rest.split_first() {
+        rest = tail;
+        match flag.as_str() {
+            "--no-viewer" if !options.no_viewer => options.no_viewer = true,
+            "--idle-seconds" if options.idle_seconds.is_none() => {
+                options.idle_seconds = Some(seconds(flag, rest.first())?);
+                rest = &rest[1..];
+            }
+            "--wait-seconds" if options.wait_seconds.is_none() => {
+                options.wait_seconds = Some(seconds(flag, rest.first())?);
+                rest = &rest[1..];
+            }
+            other => return Err(format!("Unknown or repeated connect option '{other}'")),
+        }
+    }
+    Ok((id, options))
+}
+
+/// Set by SIGINT, SIGTERM or SIGHUP; the tunnel then shuts down in order.
+static STOP: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn request_stop(_: libc::c_int) {
+    STOP.store(true, Ordering::SeqCst);
+}
+
+fn install_stop_signals() {
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        // SAFETY: the handler only stores to an atomic, which is
+        // async-signal-safe; the sigaction struct is fully initialized.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = request_stop as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(signal, &action, std::ptr::null_mut());
+        }
+    }
+}
+
+/// One JSON object per line. A closed stdout (for example, the app that
+/// started this process has gone) stops the tunnel.
+fn emit(value: &Value) {
+    let mut out = std::io::stdout().lock();
+    if writeln!(out, "{value}").and_then(|()| out.flush()).is_err() {
+        STOP.store(true, Ordering::SeqCst);
+    }
+}
+
+fn ssh_options() -> Result<SshOptions, String> {
+    let mut options = SshOptions::default();
+    if let Some(path) = std::env::var_os("MOORING_SSH_CONFIG") {
+        let path = PathBuf::from(path);
+        if !path.is_absolute() || !path.is_file() {
+            return Err(
+                "MOORING_SSH_CONFIG must be the absolute path of an ssh config file.".into(),
+            );
+        }
+        options.config_file = Some(path);
+    }
+    Ok(options)
+}
+
+fn route_for(connection: &Connection, hop: &SshHop) -> Result<SshRoute, String> {
+    SshRoute::new(&hop.target, &connection.host, connection.port)
+}
+
+fn describe_connection(connection: &Connection, hop: &SshHop) -> Value {
+    json!({"id":connection.id, "name":connection.name, "server":connection.server,
+           "ssh_target":hop.target, "remote_host":connection.host, "remote_port":connection.port})
+}
+
+fn server_note(connection: &Connection, check: &ssh_tunnel::RouteCheck) -> Option<String> {
+    match (connection.server, check.looks_like_mac) {
+        (ServerKind::Mac, false) => Some(format!(
+            "This server announces RFB {}, not a Mac's 003.889. If it is not a Mac, save it with --server vnc.",
+            check.rfb_version
+        )),
+        (ServerKind::Vnc, true) => Some(
+            "This server announces itself as a Mac. Save it with --server mac to allow Mac display modes on a direct connection.".into(),
+        ),
+        _ => None,
+    }
+}
+
+fn inspect_through_ssh(connection: &Connection, hop: &SshHop) -> Result<Value, String> {
+    let route = route_for(connection, hop)?;
+    match ssh_tunnel::check_route(&route, &ssh_options()?, Duration::from_secs(20)) {
+        Ok(check) => {
+            let note = server_note(connection, &check);
+            let mut value = json!(check);
+            // The app's connection check reads host, port, rfb_version and note.
+            value["host"] = json!(route.remote_host);
+            value["port"] = json!(route.remote_port);
+            if let Some(extra) = note {
+                value["note"] = json!(format!("{} {extra}", check.note));
+            }
+            Ok(value)
+        }
+        Err(error) => {
+            println!(
+                "{}",
+                json!({"status":"failed", "connection":describe_connection(connection, hop), "error":error})
+            );
+            Err(error.message)
+        }
+    }
+}
+
+fn connect_through_ssh(
+    connection: &Connection,
+    hop: &SshHop,
+    options: ConnectOptions,
+) -> Result<Value, String> {
+    let mut config = TunnelConfig::new(route_for(connection, hop)?);
+    config.ssh = ssh_options()?;
+    if let Some(seconds) = options.idle_seconds {
+        config.limits.idle_timeout_ms = seconds * 1000;
+    }
+    if let Some(seconds) = options.wait_seconds {
+        config.limits.first_viewer_timeout_ms = seconds * 1000;
+    }
+    install_stop_signals();
+    // If whoever started this exits, stop too, so no tunnel outlives it.
+    let parent = std::os::unix::process::parent_id();
+    let should_stop =
+        || STOP.load(Ordering::SeqCst) || std::os::unix::process::parent_id() != parent;
+    emit(
+        &json!({"event":"starting", "connection":describe_connection(connection, hop),
+                 "limits":config.limits, "local_only":true}),
+    );
+    let server = connection.server;
+    let outcome = ssh_tunnel::run_tunnel(
+        &config,
+        &should_stop,
+        &mut |ready| {
+            if let Some(note) = server_note(connection, &ready.check) {
+                emit(&json!({"event":"note", "note":note}));
+            }
+            if options.no_viewer {
+                return Ok(None);
+            }
+            // Through SSH the viewer always gets a plain URL: Mac display
+            // modes are not requested over a tunnel, and never for non-Macs.
+            let url =
+                mooring_platform::viewer_url(server, ready.local_host, ready.local_port, None)?;
+            mooring_platform::launch_viewer_url(&url)?;
+            Ok(Some(url))
+        },
+        &mut |event| emit(&json!(event)),
+    );
+    let failed = outcome.reason.is_failure();
+    let mut summary = json!(outcome);
+    summary["event"] = json!(if failed { "failed" } else { "closed" });
+    emit(&summary);
+    if failed {
+        Err(outcome
+            .error
+            .map(|error| error.message)
+            .unwrap_or_else(|| format!("The SSH tunnel closed: {:?}.", outcome.reason)))
+    } else {
+        Ok(Value::Null)
+    }
 }
 
 #[cfg(test)]
@@ -394,7 +629,80 @@ mod tests {
     fn cli_defaults_to_screen_sharing_port() {
         assert_eq!(
             parse_add(&args(&["--name", "My Mac", "--host", "mac.local"])).unwrap(),
-            ("My Mac".into(), "mac.local".into(), 5900)
+            AddOptions {
+                name: "My Mac".into(),
+                host: "mac.local".into(),
+                port: 5900,
+                server: ServerKind::Mac,
+                ssh: None
+            }
         );
+    }
+    #[test]
+    fn ssh_connections_default_to_the_ssh_hosts_loopback_vnc() {
+        assert_eq!(
+            parse_add(&args(&[
+                "--name", "M1 Linux", "--ssh", "m1-linux", "--server", "vnc"
+            ]))
+            .unwrap(),
+            AddOptions {
+                name: "M1 Linux".into(),
+                host: "127.0.0.1".into(),
+                port: 5900,
+                server: ServerKind::Vnc,
+                ssh: Some("m1-linux".into())
+            }
+        );
+        let custom = parse_add(&args(&[
+            "--name", "Desk", "--ssh", "bastion", "--host", "desk.lan", "--port", "5901",
+        ]))
+        .unwrap();
+        assert_eq!((custom.host.as_str(), custom.port), ("desk.lan", 5901));
+        for input in [
+            vec!["--name", "X"],
+            vec!["--name", "X", "--ssh", "a", "--ssh", "b"],
+            vec!["--name", "X", "--host", "h", "--server", "linux"],
+            vec!["--name", "X", "--ssh"],
+            vec!["--name", "X", "--ssh", "a", "--ssh-password", "secret"],
+        ] {
+            assert!(parse_add(&args(&input)).is_err(), "{input:?}");
+        }
+    }
+    #[test]
+    fn connect_options_are_bounded() {
+        let parsed = args(&[
+            "abc",
+            "--no-viewer",
+            "--idle-seconds",
+            "5",
+            "--wait-seconds",
+            "30",
+        ]);
+        let (id, options) = parse_connect(&parsed).unwrap();
+        assert_eq!(id, "abc");
+        assert_eq!(
+            options,
+            ConnectOptions {
+                no_viewer: true,
+                idle_seconds: Some(5),
+                wait_seconds: Some(30)
+            }
+        );
+        assert_eq!(
+            parse_connect(&args(&["abc"])).unwrap().1,
+            ConnectOptions::default()
+        );
+        for input in [
+            vec![],
+            vec!["--no-viewer"],
+            vec!["abc", "--idle-seconds"],
+            vec!["abc", "--idle-seconds", "0"],
+            vec!["abc", "--idle-seconds", "3601"],
+            vec!["abc", "--wait-seconds", "-1"],
+            vec!["abc", "--no-viewer", "--no-viewer"],
+            vec!["abc", "extra"],
+        ] {
+            assert!(parse_connect(&args(&input)).is_err(), "{input:?}");
+        }
     }
 }

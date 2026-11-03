@@ -7,6 +7,7 @@ mod mailbox;
 pub mod network;
 mod quality;
 mod reconnect;
+pub mod tunnel;
 
 pub use mailbox::{LatestFrameMailbox, MailboxClosed, MailboxRead, MailboxStats};
 pub use network::{
