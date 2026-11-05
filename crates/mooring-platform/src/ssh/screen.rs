@@ -469,6 +469,7 @@ mod tests {
             fs::write(state.join("monitors"), "eDP-1 2560x1600\n").unwrap();
             fs::write(state.join("workspaces"), "1 eDP-1\n3 eDP-1\n").unwrap();
             fs::write(state.join("capture"), "eDP-1\n").unwrap();
+            fs::write(state.join("cursor"), "false\n").unwrap();
             let dir = fixture.0.display().to_string();
             let tool = |name: &str, body: &str| {
                 let path = bin.join(name);
@@ -499,6 +500,8 @@ case "$1 $2" in
   "workspaces "*) while read -r id mon; do printf 'workspace %s (%s) on monitor %s:\n\tmonitorID: 0\n\twindows: 1\n\n' "$id" "$id" "$mon"; done < "$S/workspaces" ;;
   "output create") echo "$4 1920x1080" >> "$S/monitors"; echo ok ;;
   "output remove") grep -v "^$3 " "$S/monitors" > "$S/m"; mv "$S/m" "$S/monitors"; sed "s/ $3\$/ eDP-1/" "$S/workspaces" > "$S/w"; mv "$S/w" "$S/workspaces"; echo ok ;;
+  "-j getoption") printf '{"option": "%s", "bool": %s, "set": true }\n' "$3" "$(cat "$S/cursor")" ;;
+  "eval hl.config"*) case "$2" in *"invisible = true"*) echo true > "$S/cursor" ;; *"invisible = false"*) echo false > "$S/cursor" ;; esac; echo ok ;;
   "eval "*) mode=$(echo "$2" | sed -n 's/.*mode = "\([0-9]*x[0-9]*\)@60".*/\1/p'); out=$(echo "$2" | sed -n 's/.*output = "\([^"]*\)".*/\1/p'); sed "s/^$out .*/$out $mode/" "$S/monitors" > "$S/m"; mv "$S/m" "$S/monitors"; echo ok ;;
   "dispatch "*)
     case "$2" in
@@ -575,6 +578,13 @@ esac"#,
             );
             assert_eq!(desktop.state("capture").trim(), "MOORING-1", "{shell}");
             assert!(desktop.log().contains("scale = 2"), "{shell}");
+            assert_eq!(
+                desktop.state("cursor").trim(),
+                "true",
+                "{shell}: Hyprland's pointer hidden"
+            );
+            let cursor_file = desktop.runtime.join("1001/mooring-virtual-screen.cursor");
+            assert!(cursor_file.exists(), "{shell}");
             assert!(
                 screen.stop(),
                 "{shell}: not restored; log: {}",
@@ -588,8 +598,48 @@ esac"#,
                 "1",
                 "{shell}: first workspace focused again"
             );
+            assert_eq!(
+                desktop.state("cursor").trim(),
+                "false",
+                "{shell}: pointer shown again"
+            );
+            assert!(!cursor_file.exists(), "{shell}");
             desktop.fixture.assert_no_survivors();
         }
+    }
+
+    #[test]
+    fn a_pointer_hidden_by_the_person_stays_hidden_and_a_stale_hide_is_undone() {
+        let size = ScreenSize::parse("1920x1200@1").unwrap();
+        // Hidden in the desktop's own settings: left alone, then and after.
+        let desktop = FakeDesktop::new();
+        fs::write(desktop.fixture.0.join("state/cursor"), "true\n").unwrap();
+        let screen = start_virtual_screen(&route(), &desktop.ssh("/bin/sh"), size, &never).unwrap();
+        assert!(screen.stop());
+        assert_eq!(desktop.state("cursor").trim(), "true");
+        assert!(!desktop.log().contains("hl.config"), "{}", desktop.log());
+        // Hidden by a session that could not restore it: shown again first.
+        let desktop = FakeDesktop::new();
+        fs::write(desktop.fixture.0.join("state/cursor"), "true\n").unwrap();
+        fs::write(
+            desktop.runtime.join("1001/mooring-virtual-screen.cursor"),
+            "hidden\n",
+        )
+        .unwrap();
+        let screen = start_virtual_screen(&route(), &desktop.ssh("/bin/sh"), size, &never).unwrap();
+        assert_eq!(
+            desktop.state("cursor").trim(),
+            "true",
+            "hidden for this session"
+        );
+        assert!(screen.stop());
+        assert_eq!(desktop.state("cursor").trim(), "false");
+        assert!(
+            !desktop
+                .runtime
+                .join("1001/mooring-virtual-screen.cursor")
+                .exists()
+        );
     }
 
     #[test]

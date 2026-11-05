@@ -1,9 +1,12 @@
 # Mooring virtual screen, version 1. While this runs, the Linux desktop's
 # workspaces show on a virtual Hyprland output sized to the viewing Mac, and
 # wayvnc captures that output. It holds while Mooring sends a heartbeat on
-# standard input. When the heartbeat stops (Mooring ended the session, quit,
-# crashed, or the network dropped), everything is put back: wayvnc returns to
-# the screen it was capturing, the virtual output is removed so its
+# standard input. Hyprland's pointer is hidden meanwhile: the virtual output
+# has no hardware cursor plane, so Hyprland would draw it into every captured
+# frame, a frame behind the Mac's own pointer, which the viewer shows instead.
+# When the heartbeat stops (Mooring ended the session, quit, crashed, or the
+# network dropped), everything is put back: wayvnc returns to the screen it
+# was capturing, the pointer shows again, the virtual output is removed so its
 # workspaces return, and the first moved workspace is focused again.
 #
 # Arguments: WIDTH HEIGHT SCALE, as pixels and 1 or 2; checked again here.
@@ -57,11 +60,19 @@ size_of() { hypr monitors all 2>/dev/null | awk -v m="$1" '/^Monitor /{on = ($2 
 # "workspace 1 (1) on monitor eDP-1:" (older Hyprland: "workspace ID 1 ...").
 workspaces_on() { hypr workspaces 2>/dev/null | awk -v m="$1" '/^workspace /{id = ($2 == "ID") ? $3 : $2; for (i = 1; i <= NF; i++) if ($i == "monitor") {n = $(i + 1); sub(":", "", n); if (n == m) print id}}'; }
 pidfile=$runtime/mooring-virtual-screen.pid
+# Present while this script has Hyprland's pointer hidden.
+cursorfile=$runtime/mooring-virtual-screen.cursor
+show_cursor() {
+  [ -f "$cursorfile" ] || return 0
+  hypr eval 'hl.config({ cursor = { invisible = false } })' >/dev/null 2>&1
+  rm -f "$cursorfile"
+}
 
 if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile" 2>/dev/null)" 2>/dev/null; then
   fail in-use
 fi
-# A virtual screen left by a session that could not clean up.
+# A virtual screen or hidden pointer left by a session that could not clean up.
+show_cursor
 if monitors | grep -qx "$NAME"; then
   hypr output remove "$NAME" >/dev/null 2>&1
   say stale-removed
@@ -74,6 +85,7 @@ restore() {
   [ -n "$restored" ] && return
   restored=1
   [ -n "$previous" ] && vnc output-set "$previous" >/dev/null 2>&1
+  show_cursor
   hypr output remove "$NAME" >/dev/null 2>&1
   first=${moved%%,*}
   [ -n "$first" ] && hypr dispatch "hl.dsp.focus({ workspace = \"$first\" })" >/dev/null 2>&1
@@ -98,6 +110,13 @@ for ws in $(workspaces_on "$previous"); do
 done
 moved=${moved#,}
 vnc output-set "$NAME" >/dev/null 2>&1 || fail capture-failed
+# Only a pointer that is showing is hidden, and so shown again later. The
+# file is written first, so an interrupted hide is still undone.
+case "$(hypr -j getoption cursor:invisible 2>/dev/null | tr -d ' \n')" in
+  *'"bool":false'*|*'"int":0'*)
+    echo hidden | as_user tee "$cursorfile" >/dev/null
+    hypr eval 'hl.config({ cursor = { invisible = true } })' >/dev/null 2>&1 ;;
+esac
 echo $$ | as_user tee "$pidfile" >/dev/null
 say "ready ${W}x${H} $NAME workspaces=${moved:-none}"
 # Hold while heartbeats arrive. Each read waits at most 20 seconds; end of
