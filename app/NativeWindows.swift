@@ -324,7 +324,9 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
     private(set) var remoteMenuBarHeight: Int?
     /// Decided on entering full screen: this Mac's menu bar stays hidden.
     private var fullScreenHidesMenuBar = false
-    let status = label("Connecting…", size: 12, color: .secondaryLabelColor)
+    /// The footer, shared with the Linux viewer.
+    private let footer = ViewerFooter()
+    var status: NSTextField { footer.status }
     /// The paired Mac this window shows; reconnecting reuses the window.
     let peerID: String
     var onClose: (() -> Void)?
@@ -338,11 +340,9 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
     var onViewportChange: (() -> Void)?
     private(set) var showsDiagnosticBar = true
     private(set) var showsStatsForNerds = false
-    private let diagnosticBar = stack([], orientation: .horizontal, spacing: 12)
     private let statsButton = NSButton(title: "Stats for nerds", target: nil, action: nil)
     private let statsView = NativeViewerStatsView()
     private var latestDiagnostics = NativeViewerDiagnostics()
-    private var videoBottom: NSLayoutConstraint!
     /// Set once the window closes; a closed window is never reused.
     private(set) var isClosed = false
     /// Full screen is entered for the first picture only, so a reconnect keeps
@@ -354,7 +354,6 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
     private let reconnectButton = NSButton(title: "Reconnect", target: nil, action: nil)
     private let closeButton = NSButton(title: "Close", target: nil, action: nil)
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
-    private let allowSystemKeys = NSButton(title: "Allow ⌘-Tab…", target: nil, action: nil)
     /// Shown once per window when control starts while ⌘-Tab stays on this
     /// Mac, so the reason is clear even with the footer hidden.
     private let keysNotice = NSVisualEffectView()
@@ -362,7 +361,6 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
     /// When the two Macs run different Mooring versions: what that means and,
     /// when there is one, the next step.
     private let versionNotice = NSButton(title: "", target: nil, action: nil)
-    private let exitFullScreen = NSButton(title: "Exit Full Screen", target: nil, action: nil)
     init(name: String, peerID: String, showsDiagnosticBar: Bool = true) {
         self.peerID = peerID
         let rowVideo = NativeRemoteView(frame: .zero, device: MTLCreateSystemDefaultDevice())
@@ -384,37 +382,13 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
         root.addSubview(video)
         statsButton.target = self; statsButton.action = #selector(toggleStatsForNerds(_:)); statsButton.bezelStyle = .inline
         statsButton.toolTip = "Live stream details (⌃⌘I). Also available from the View menu when the footer is hidden."
-        let hideBar = NSButton(image: NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Hide diagnostic footer")!, target: self, action: #selector(toggleDiagnosticBar(_:)))
-        hideBar.bezelStyle = .inline
-        hideBar.toolTip = "Hide diagnostic footer. Restore with ⌃⌘D or View → Diagnostic Footer."
-        allowSystemKeys.target = self; allowSystemKeys.action = #selector(allowKeys); allowSystemKeys.bezelStyle = .inline
-        allowSystemKeys.toolTip = "Allow Mooring in Accessibility on this Mac to send ⌘-Tab and other system shortcuts to the remote Mac."
-        allowSystemKeys.isHidden = true
+        footer.hide.target = self; footer.hide.action = #selector(toggleDiagnosticBar(_:))
+        footer.allowSystemKeys.target = self; footer.allowSystemKeys.action = #selector(allowKeys)
+        footer.allowSystemKeys.toolTip = "Allow Mooring in Accessibility on this Mac to send ⌘-Tab and other system shortcuts to the remote Mac."
         versionNotice.target = self; versionNotice.action = #selector(versionAction); versionNotice.bezelStyle = .inline
         versionNotice.isHidden = true
-        exitFullScreen.target = self; exitFullScreen.action = #selector(leaveFullScreen); exitFullScreen.bezelStyle = .inline
-        exitFullScreen.toolTip = "Or press ⌃⌘F. Swiping between Spaces also shows this Mac without leaving full screen."
-        exitFullScreen.isHidden = true
-        let mark = NSImageView(image: MooringBrand.menuBarImage)
-        mark.contentTintColor = MooringBrand.accent
-        mark.translatesAutoresizingMaskIntoConstraints = false
-        mark.widthAnchor.constraint(equalToConstant: 18).isActive = true
-        mark.heightAnchor.constraint(equalToConstant: 18).isActive = true
-        status.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        status.maximumNumberOfLines = 1
-        status.lineBreakMode = .byTruncatingTail
-        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let bar = diagnosticBar
-        for view in [mark, status, NSView(), versionNotice, allowSystemKeys, exitFullScreen, statsButton, hideBar] { bar.addArrangedSubview(view) }
-        root.addSubview(bar)
-        videoBottom = video.bottomAnchor.constraint(equalTo: root.bottomAnchor)
-        NSLayoutConstraint.activate([
-            video.leadingAnchor.constraint(equalTo: root.leadingAnchor), video.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            video.topAnchor.constraint(equalTo: root.topAnchor), videoBottom,
-            bar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
-            bar.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            bar.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -6), bar.heightAnchor.constraint(equalToConstant: 22)
-        ])
+        footer.exitFullScreen.target = self; footer.exitFullScreen.action = #selector(leaveFullScreen)
+        footer.install(in: root, below: video, leading: [versionNotice], trailing: [statsButton])
         setDiagnosticBarVisible(showsDiagnosticBar)
         statsView.isHidden = true
         statsView.onClose = { [weak self] in self?.toggleStatsForNerds(nil) }
@@ -499,13 +473,13 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
     func hideOverlay() { ended.isHidden = true }
     var isReconnecting: Bool { !ended.isHidden && !cancelButton.isHidden }
     func setSystemKeysAllowed(_ allowed: Bool) {
-        allowSystemKeys.isHidden = allowed
+        footer.allowSystemKeys.isHidden = allowed
         if allowed { keysNotice.isHidden = true }
     }
     /// Once per window, when control starts while ⌘-Tab can't reach the other
     /// Mac. It goes away by itself after 15 seconds.
     func noteSystemKeysStayLocal() {
-        guard !keysNoticeShown, !isClosed, allowSystemKeys.isHidden == false else { return }
+        guard !keysNoticeShown, !isClosed, footer.allowSystemKeys.isHidden == false else { return }
         keysNoticeShown = true
         keysNotice.isHidden = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in self?.keysNotice.isHidden = true }
@@ -514,9 +488,7 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
     @objc private func allowKeysFromNotice() { keysNotice.isHidden = true; onAllowSystemKeys?() }
     func setDiagnosticBarVisible(_ visible: Bool) {
         showsDiagnosticBar = visible
-        diagnosticBar.isHidden = !visible
-        videoBottom.constant = visible ? -34 : 0
-        window?.contentView?.layoutSubtreeIfNeeded()
+        footer.setVisible(visible)
         layoutCameraRow()
     }
     /// The sharing Mac's menu bar height, as it reports it.
@@ -610,9 +582,9 @@ final class NativeViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItem
         fullScreenHidesMenuBar = video.forwardsCommandKeys
         return video.forwardsCommandKeys ? [.fullScreen, .hideDock, .hideMenuBar] : proposedOptions
     }
-    func windowDidEnterFullScreen(_ notification: Notification) { exitFullScreen.isHidden = false; layoutCameraRow() }
+    func windowDidEnterFullScreen(_ notification: Notification) { footer.exitFullScreen.isHidden = false; layoutCameraRow() }
     func windowWillExitFullScreen(_ notification: Notification) { fullScreenHidesMenuBar = false; hideCameraRow() }
-    func windowDidExitFullScreen(_ notification: Notification) { exitFullScreen.isHidden = true }
+    func windowDidExitFullScreen(_ notification: Notification) { footer.exitFullScreen.isHidden = true }
     func windowDidResize(_ notification: Notification) { layoutCameraRow(); onViewportChange?() }
     func windowDidChangeScreen(_ notification: Notification) { layoutCameraRow() }
     func windowWillClose(_ notification: Notification) { isClosed = true; hideCameraRow(); onClose?() }

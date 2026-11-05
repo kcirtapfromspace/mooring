@@ -1351,12 +1351,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         guard native.matchesScreen, let screen = NSScreen.main else { return [] }
         let scale = screen.backingScaleFactor
         guard scale == 1 || scale == 2 else { return [] }
-        let footer = linuxShowsFooter ? VNCViewerWindow.footerHeight : 0
         let besideCamera = native.extendsBesideCamera && NativeCameraRow.housing(on: screen) != nil
-        let top = besideCamera ? 0 : screen.safeAreaInsets.top
-        let width = Int((screen.frame.width * scale).rounded()) & ~1
-        let height = Int(((screen.frame.height - top - footer) * scale).rounded()) & ~1
-        return ["--screen", "\(width)x\(height)@\(Int(scale))"]
+        let size = VNCViewerWindow.virtualScreen(size: screen.frame.size, safeTop: screen.safeAreaInsets.top, scale: scale,
+                                                 besideCamera: besideCamera, showsFooter: linuxShowsFooter)
+        return ["--screen", "\(size.width)x\(size.height)@\(Int(scale))"]
     }
 
     /// Ask for the VNC server's sign-in, once the tunnel is ready. Rust decides
@@ -1408,7 +1406,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         let viewer = VNCViewerWindow(name: mac.name, connectionID: mac.id, sessionID: session,
                                      showsDiagnosticBar: linuxShowsFooter)
         viewer.onDiagnosticBarChange = { [weak self] shows in self?.linuxShowsFooter = shows }
-        viewer.onAllowSystemKeys = { AccessibilityPermission.request() }
+        // As from the Mac-to-Mac viewer's Allow ⌘-Tab….
+        viewer.onAllowSystemKeys = {
+            AccessibilityPermission.request()
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
+        }
         // The viewer checks the desktop's size before using the camera row.
         viewer.extendsBesideCamera = native.matchesScreen && native.extendsBesideCamera
         if let desktop = desktopStates[mac.id] { viewer.showDesktop(desktop.title) }

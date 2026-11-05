@@ -4,7 +4,8 @@ import IOSurface
 // Drives the real VNCView and ml_vnc_* against scripts/fake-vnc-server.py on
 // loopback: pixels and their orientation in memory, the double-buffer
 // catch-up, window-to-desktop pointer mapping, and the key and button events
-// the server receives, including releases when the session closes.
+// the server receives, including releases when the session closes. Then the
+// viewer window: its footer in a window and in full screen, and ⌃⌘D.
 
 func label(_ text: String, size: CGFloat = 13, weight: NSFont.Weight = .regular,
            color: NSColor = .labelColor) -> NSTextField {
@@ -142,6 +143,107 @@ struct VNCViewerTests {
         mirror.region = (0, 1)
         view.mirror = mirror
         view.region = nil
+
+        // The viewer window's footer, as in Mac-to-Mac viewing: below the
+        // picture in a window and in full screen, with Exit Full Screen there,
+        // and ⌃⌘D through the responder chain. The window's picture takes the
+        // desktop's 8x4 size from the session view above, as the camera row's
+        // view does; with no session of its own it never polls or draws. Full
+        // screen is driven through the delegate calls AppKit makes, at the size
+        // AppKit gives it on a 14-inch MacBook Pro: 1800x1130, below the housing.
+        let viewer = VNCViewerWindow(name: "Footer test", connectionID: "footer-test", sessionID: 0)
+        viewer.view.source = view
+        let viewerWindow = viewer.window!
+        let content = viewerWindow.contentView!
+        let footer = viewer.footer
+        var footerChanges: [Bool] = []
+        viewer.onDiagnosticBarChange = { footerChanges.append($0) }
+        func note(_ name: Notification.Name) -> Notification { Notification(name: name, object: viewerWindow) }
+        func checkFooter(shown: Bool, _ context: String) {
+            content.layoutSubtreeIfNeeded()
+            let size = content.bounds.size
+            let bar = footer.bar.convert(footer.bar.bounds, to: content), picture = viewer.view.frame
+            if shown {
+                check(!footer.bar.isHidden && bar == CGRect(x: 12, y: 6, width: size.width - 24, height: 22), "\(context): footer bar at \(bar) in \(size)")
+                check(picture == CGRect(x: 0, y: 34, width: size.width, height: size.height - 34), "\(context): picture above the footer: \(picture)")
+            } else {
+                check(footer.bar.isHidden, "\(context): footer hidden")
+                check(picture == CGRect(origin: .zero, size: size), "\(context): picture fills the window: \(picture)")
+            }
+        }
+        let items = footer.bar.arrangedSubviews
+        check(footer.bar.superview === content && items.count == 6 && items[0] is NSImageView && items[1] === footer.status
+              && items[3] === footer.allowSystemKeys && items[4] === footer.exitFullScreen && items[5] === footer.hide,
+              "footer on the window background: mark, status, Allow ⌘-Tab…, Exit Full Screen, hide: \(items)")
+        check(footer.status.font == NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular), "status font: \(String(describing: footer.status.font))")
+        check(footer.allowSystemKeys.isHidden == NativeSystemKeyCapture.isPermitted, "Allow ⌘-Tab… only without Accessibility")
+        checkFooter(shown: true, "window")
+        check(footer.exitFullScreen.isHidden, "no Exit Full Screen in a window")
+        let chrome = viewerWindow.frame.height - content.frame.height
+        check(viewer.windowWillResize(viewerWindow, to: NSSize(width: 1000, height: 999)) == NSSize(width: 1000, height: 500 + 34 + chrome),
+              "a window keeps the desktop's shape above the footer")
+
+        let proposed: NSApplication.PresentationOptions = [.fullScreen, .autoHideMenuBar, .autoHideDock, .autoHideToolbar]
+        let options = viewer.window(viewerWindow, willUseFullScreenPresentationOptions: proposed)
+        let expectedOptions: NSApplication.PresentationOptions = NativeSystemKeyCapture.isPermitted ? [.fullScreen, .hideDock, .hideMenuBar] : proposed
+        check(options == expectedOptions, "full screen hides this Mac's menu bar and Dock only while ⌘ keys are captured: \(options)")
+        viewer.windowWillEnterFullScreen(note(NSWindow.willEnterFullScreenNotification))
+        // AppKit resizes during the transition; the desktop's shape must not
+        // make the window taller than the screen.
+        let fullScreen = NSSize(width: 1800, height: 1130)
+        check(viewer.windowWillResize(viewerWindow, to: fullScreen) == fullScreen, "full screen keeps AppKit's size")
+        viewerWindow.setContentSize(fullScreen)
+        viewer.windowDidEnterFullScreen(note(NSWindow.didEnterFullScreenNotification))
+        checkFooter(shown: true, "full screen")
+        check(!footer.exitFullScreen.isHidden, "Exit Full Screen in full screen")
+
+        // View → Diagnostic Footer (⌃⌘D) has no target: AppKit sends it along
+        // the key window's responder chain, then to the window's delegate.
+        let menuItem = NSMenuItem(title: "Diagnostic Footer", action: #selector(VNCViewerWindow.toggleDiagnosticBar(_:)), keyEquivalent: "d")
+        menuItem.keyEquivalentModifierMask = [.control, .command]
+        var responder: NSResponder? = viewerWindow.firstResponder
+        while let current = responder, !current.responds(to: menuItem.action) { responder = current.nextResponder }
+        let target: AnyObject? = responder ?? viewerWindow.delegate
+        check(target === viewer, "⌃⌘D reaches the viewer: \(String(describing: target))")
+        check(viewer.validateMenuItem(menuItem) && menuItem.state == .on, "Diagnostic Footer enabled and checked")
+        check(NSApplication.shared.sendAction(menuItem.action!, to: target, from: menuItem), "⌃⌘D sent")
+        checkFooter(shown: false, "⌃⌘D in full screen")
+        check(viewer.validateMenuItem(menuItem) && menuItem.state == .off, "Diagnostic Footer unchecked")
+        check(NSApplication.shared.sendAction(menuItem.action!, to: target, from: menuItem), "⌃⌘D sent again")
+        checkFooter(shown: true, "⌃⌘D again")
+        footer.hide.performClick(nil)
+        checkFooter(shown: false, "hide chevron")
+        viewer.toggleDiagnosticBar(nil)
+        check(footerChanges == [false, true, false, true], "each change is remembered: \(footerChanges)")
+
+        viewer.windowWillExitFullScreen(note(NSWindow.willExitFullScreenNotification))
+        viewer.windowDidExitFullScreen(note(NSWindow.didExitFullScreenNotification))
+        check(footer.exitFullScreen.isHidden && !viewer.isFullScreen, "Exit Full Screen gone after leaving")
+        // Leaving sized the window to the tiny desktop; give it a usable size.
+        viewerWindow.setContentSize(NSSize(width: 1000, height: 534))
+        checkFooter(shown: true, "window again")
+        check(viewer.windowWillResize(viewerWindow, to: NSSize(width: 1000, height: 999)).height == 500 + 34 + chrome,
+              "the desktop's shape again in a window")
+        viewer.close()
+        check(viewer.isClosed && !viewer.validateMenuItem(menuItem), "a closed viewer takes no menu actions")
+
+        // On that Mac (1800x1169 points at 2x, a 38-point housing, full screen
+        // 1800x1130 below a 39-point row), the virtual screen asked for fills
+        // the row and the picture area above the footer exactly, so the footer
+        // stays on screen and the desktop's top 78 rows sit beside the housing.
+        let notched = CGSize(width: 1800, height: 1169)
+        let screen = VNCViewerWindow.virtualScreen(size: notched, safeTop: 38, scale: 2, besideCamera: true, showsFooter: true)
+        check(screen == (3600, 2270), "virtual screen with the footer: \(screen)")
+        check(VNCViewerWindow.cameraRowRows(remoteHeight: 2270, scale: 2, rowHeight: 39, below: 1130 - 34) == 78, "78 rows beside the housing")
+        // ⌃⌘D in full screen: the picture area no longer matches that screen,
+        // so the whole desktop fits below the housing.
+        check(VNCViewerWindow.cameraRowRows(remoteHeight: 2270, scale: 2, rowHeight: 39, below: 1130) == nil, "no split without the footer")
+        let bare = VNCViewerWindow.virtualScreen(size: notched, safeTop: 38, scale: 2, besideCamera: true, showsFooter: false)
+        check(bare == (3600, 2338) && VNCViewerWindow.cameraRowRows(remoteHeight: 2338, scale: 2, rowHeight: 39, below: 1130) == 78,
+              "virtual screen without the footer: \(bare)")
+        check(VNCViewerWindow.virtualScreen(size: notched, safeTop: 38, scale: 2, besideCamera: false, showsFooter: true) == (3600, 2194),
+              "virtual screen below the housing")
+
         func key(_ type: NSEvent.EventType, _ code: UInt16, _ text: String, _ flags: UInt = 0) -> NSEvent {
             NSEvent.keyEvent(with: type, location: .zero, modifierFlags: NSEvent.ModifierFlags(rawValue: flags), timestamp: 0,
                              windowNumber: window.windowNumber, context: nil, characters: text,
@@ -170,6 +272,6 @@ struct VNCViewerTests {
         check(Array(keys.prefix(4)).elementsEqual(expected, by: ==), "keys sent: \(keys)")
         let released = Set(keys.dropFirst(4).filter { $0.0 == 0 }.map { $0.1 })
         check(released == [0xffe1, 0xff0d], "held Shift and Return released on close: \(keys)")
-        print("VNC viewer: \(events.count) events, opaque BGRA in two surfaces with catch-up, pointer mapping, keys and releases on close passed.")
+        print("VNC viewer: \(events.count) events, opaque BGRA in two surfaces with catch-up, pointer mapping, keys and releases on close, footer in a window and in full screen with ⌃⌘D, and camera-row sizing passed.")
     }
 }

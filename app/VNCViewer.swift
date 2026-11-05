@@ -250,21 +250,17 @@ final class VNCView: NSView {
     }
 }
 
-/// The viewer window, laid out like the Mac-to-Mac viewer: the picture, a
+/// The viewer window, laid out like the Mac-to-Mac viewer: the picture, its
 /// diagnostic footer (⌃⌘D), full screen once the first picture arrives (⌃⌘F),
 /// and an overlay when the session ends.
-final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
+final class VNCViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
     let connectionID: String
     let view = VNCView(frame: NSRect(x: 0, y: 0, width: 1100, height: 700))
     private var link: CADisplayLink?
-    private let status = label("Connecting…", size: 11, color: .secondaryLabelColor)
-    private let diagnosticBar = stack([], orientation: .horizontal, spacing: 12)
-    /// Holds the bar, always below the picture as in the Mac-to-Mac viewer.
-    /// The virtual screen on the Linux desktop is sized to the area above it.
-    private let footer = NSVisualEffectView()
-    private let exitFullScreen = NSButton(title: "Exit Full Screen", target: nil, action: nil)
-    private let allowSystemKeys = NSButton(title: "Allow ⌘-Tab…", target: nil, action: nil)
-    private var videoBottom: NSLayoutConstraint!
+    /// The Mac-to-Mac viewer's footer: below the picture, in a window and in
+    /// full screen, until ⌃⌘D hides it. The virtual screen on the Linux
+    /// desktop is sized to the area above it.
+    let footer = ViewerFooter()
     /// The top of the picture, in the row beside this Mac's camera housing,
     /// as in the Mac-to-Mac viewer. Used when the virtual screen includes it.
     private let rowView = VNCView(frame: .zero)
@@ -276,8 +272,11 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
     /// sees them; with Accessibility allowed, this sends them to the desktop
     /// while the viewer is in front. ⌃⌘F, ⌃⌘D, ⌃⌘Q and ⌥⌘Esc stay here.
     private let systemKeys = NativeSystemKeyCapture()
-    static let footerHeight: CGFloat = 34
     private(set) var showsDiagnosticBar: Bool
+    /// From the start of entering full screen to the start of leaving it.
+    /// AppKit resizes the window during the transition, so this does not
+    /// wait for the style mask.
+    private(set) var isFullScreen = false
     private let ended = NSVisualEffectView()
     private let endedTitle = label("Session ended", size: 17, weight: .semibold)
     private let endedReason = label("", size: 13, color: .secondaryLabelColor)
@@ -321,43 +320,14 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
         let root = window.contentView!
         view.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(view)
-
-        let mark = NSImageView(image: MooringBrand.menuBarImage)
-        mark.contentTintColor = MooringBrand.accent
-        mark.translatesAutoresizingMaskIntoConstraints = false
-        mark.widthAnchor.constraint(equalToConstant: 18).isActive = true
-        mark.heightAnchor.constraint(equalToConstant: 18).isActive = true
-        status.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        status.maximumNumberOfLines = 1
-        status.lineBreakMode = .byTruncatingTail
-        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        status.toolTip = "The Linux desktop sends an update only when its screen changes. Moving your own pointer does not count."
-        exitFullScreen.target = self; exitFullScreen.action = #selector(leaveFullScreen); exitFullScreen.bezelStyle = .inline
-        exitFullScreen.toolTip = "Or press ⌃⌘F."
-        exitFullScreen.isHidden = true
-        let hideBar = NSButton(image: NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Hide diagnostic footer")!,
-                               target: self, action: #selector(toggleDiagnosticBar(_:)))
-        hideBar.bezelStyle = .inline
-        hideBar.toolTip = "Hide diagnostic footer. Restore with ⌃⌘D or View → Diagnostic Footer."
-        allowSystemKeys.target = self; allowSystemKeys.action = #selector(allowKeys); allowSystemKeys.bezelStyle = .inline
-        allowSystemKeys.toolTip = "Allow Mooring in Accessibility on this Mac to send ⌘-Tab, ⌘-Space and other system shortcuts to the Linux desktop."
-        allowSystemKeys.isHidden = NativeSystemKeyCapture.isPermitted
-        for item in [mark, status, NSView(), allowSystemKeys, exitFullScreen, hideBar] { diagnosticBar.addArrangedSubview(item) }
-        footer.material = .titlebar; footer.blendingMode = .withinWindow; footer.state = .active
-        footer.translatesAutoresizingMaskIntoConstraints = false
-        footer.addSubview(diagnosticBar)
-        root.addSubview(footer)
-        videoBottom = view.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -Self.footerHeight)
-        NSLayoutConstraint.activate([
-            view.leadingAnchor.constraint(equalTo: root.leadingAnchor), view.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            view.topAnchor.constraint(equalTo: root.topAnchor), videoBottom,
-            footer.leadingAnchor.constraint(equalTo: root.leadingAnchor), footer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            footer.bottomAnchor.constraint(equalTo: root.bottomAnchor), footer.heightAnchor.constraint(equalToConstant: Self.footerHeight),
-            diagnosticBar.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: 12),
-            diagnosticBar.trailingAnchor.constraint(equalTo: footer.trailingAnchor, constant: -12),
-            diagnosticBar.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
-            diagnosticBar.heightAnchor.constraint(equalToConstant: 22),
-        ])
+        footer.status.toolTip = "The Linux desktop sends an update only when its screen changes. Moving your own pointer does not count."
+        footer.hide.target = self; footer.hide.action = #selector(toggleDiagnosticBar(_:))
+        footer.allowSystemKeys.target = self; footer.allowSystemKeys.action = #selector(allowKeys)
+        footer.allowSystemKeys.toolTip = "Allow Mooring in Accessibility on this Mac to send ⌘-Tab, ⌘-Space and other system shortcuts to the Linux desktop."
+        footer.allowSystemKeys.isHidden = NativeSystemKeyCapture.isPermitted
+        footer.exitFullScreen.target = self; footer.exitFullScreen.action = #selector(leaveFullScreen)
+        footer.install(in: root, below: view)
+        footer.setVisible(showsDiagnosticBar)
 
         ended.material = .hudWindow; ended.blendingMode = .withinWindow; ended.state = .active
         ended.wantsLayer = true; ended.layer?.cornerRadius = 14
@@ -382,7 +352,6 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
             endedReason.widthAnchor.constraint(equalTo: content.widthAnchor),
         ])
 
-        layoutFooter()
         systemKeys.isCapturing = { [weak self] in
             guard let self, let window = self.window else { return false }
             return window.isKeyWindow && self.view.sessionID != 0
@@ -414,10 +383,13 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
 
     private func render() {
         let parts = [summary, rates, desktopNote].filter { !$0.isEmpty }
-        status.stringValue = parts.joined(separator: " · ")
+        footer.status.stringValue = parts.joined(separator: " · ")
     }
 
     private func updateRates() {
+        // Accessibility can be allowed mid-session; capture ⌘-Tab from then on,
+        // and drop Allow ⌘-Tab… within a second, as the Mac-to-Mac viewer does.
+        if let window, window.isKeyWindow, !systemKeys.isRunning { footer.allowSystemKeys.isHidden = systemKeys.start() }
         guard view.sessionID != 0 else { return }
         var now = MLVncStats()
         guard ml_vnc_stats(view.sessionID, &now) == 0 else { return }
@@ -471,8 +443,8 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
     /// pixel when that fits, otherwise as large as fits, and keep that shape
     /// while resizing.
     private func fitToPicture(width: Int, height: Int) {
-        guard let window, width > 0, height > 0, !window.styleMask.contains(.fullScreen) else { return }
-        let footer = showsDiagnosticBar ? Self.footerHeight : 0
+        guard let window, width > 0, height > 0, !isFullScreen, !window.styleMask.contains(.fullScreen) else { return }
+        let footer = showsDiagnosticBar ? ViewerFooter.height : 0
         let scale = window.backingScaleFactor
         var size = CGSize(width: CGFloat(width) / scale, height: CGFloat(height) / scale)
         if let visible = window.screen?.visibleFrame {
@@ -484,11 +456,12 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
         if !sizedToPicture { window.center(); sizedToPicture = true }
     }
 
-    /// Keep the picture area at the desktop's shape while resizing.
+    /// Keep the picture area at the desktop's shape while resizing in a
+    /// window; full screen, including the transition, takes AppKit's size.
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
         let remote = view.remoteSize
-        guard remote.width > 0, remote.height > 0, !sender.styleMask.contains(.fullScreen) else { return frameSize }
-        let footer = showsDiagnosticBar ? Self.footerHeight : 0
+        guard remote.width > 0, remote.height > 0, !isFullScreen, !sender.styleMask.contains(.fullScreen) else { return frameSize }
+        let footer = showsDiagnosticBar ? ViewerFooter.height : 0
         let chrome = sender.frame.height - (sender.contentView?.frame.height ?? sender.frame.height)
         let width = frameSize.width
         let pictureHeight = (width * remote.height / remote.width).rounded()
@@ -496,18 +469,35 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
     }
 
     private func firstPicture() {
-        guard let window, !window.styleMask.contains(.fullScreen) else { return }
+        guard let window, !isFullScreen, !window.styleMask.contains(.fullScreen) else { return }
         window.toggleFullScreen(nil)
     }
 
+    /// As in a Mac-to-Mac viewer that controls the other Mac (a Linux viewer
+    /// always sends input): full screen hides this Mac's menu bar and Dock,
+    /// so the top edge reaches the desktop's top bar instead of sliding down
+    /// this Mac's menu bar and the viewer's title bar, and the bottom edge
+    /// reaches the footer without the Dock. ⌃⌘F, Exit Full Screen in the
+    /// footer and a swipe between Spaces lead back.
+    /// As in the Mac-to-Mac viewer: while ⌘ shortcuts go to the desktop
+    /// (Accessibility allowed), this Mac's menu bar and Dock stay hidden in
+    /// full screen; otherwise they appear at the screen's edges as usual.
+    func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions)
+        -> NSApplication.PresentationOptions {
+        NativeSystemKeyCapture.isPermitted ? [.fullScreen, .hideDock, .hideMenuBar] : proposedOptions
+    }
+    func windowWillEnterFullScreen(_ notification: Notification) { isFullScreen = true }
     func windowDidEnterFullScreen(_ notification: Notification) {
-        exitFullScreen.isHidden = false
+        footer.exitFullScreen.isHidden = false
         layoutCameraRow()
     }
-    func windowWillExitFullScreen(_ notification: Notification) { hideCameraRow() }
+    func windowDidFailToEnterFullScreen(_ window: NSWindow) { isFullScreen = false; hideCameraRow() }
+    func windowWillExitFullScreen(_ notification: Notification) { isFullScreen = false; hideCameraRow() }
+    func windowDidFailToExitFullScreen(_ window: NSWindow) { isFullScreen = true; layoutCameraRow() }
     func windowDidResize(_ notification: Notification) { layoutCameraRow() }
+    func windowDidChangeScreen(_ notification: Notification) { layoutCameraRow() }
     func windowDidExitFullScreen(_ notification: Notification) {
-        exitFullScreen.isHidden = true
+        footer.exitFullScreen.isHidden = true
         let remote = view.remoteSize
         if remote.width > 0 { fitToPicture(width: Int(remote.width), height: Int(remote.height)) }
     }
@@ -516,15 +506,21 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
 
     /// View → Diagnostic Footer (⌃⌘D), shared with the Mac-to-Mac viewer.
     @objc func toggleDiagnosticBar(_ sender: Any?) {
-        showsDiagnosticBar.toggle()
-        layoutFooter()
+        setDiagnosticBarVisible(!showsDiagnosticBar)
         onDiagnosticBarChange?(showsDiagnosticBar)
     }
 
-    private func layoutFooter() {
-        videoBottom.constant = showsDiagnosticBar ? -Self.footerHeight : 0
-        footer.isHidden = !showsDiagnosticBar
-        window?.contentView?.layoutSubtreeIfNeeded()
+    func setDiagnosticBarVisible(_ visible: Bool) {
+        showsDiagnosticBar = visible
+        footer.setVisible(visible)
+        // The footer changes the picture's height, and with it whether, and
+        // where, the picture is split with the row beside the camera.
+        layoutCameraRow()
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(toggleDiagnosticBar(_:)) { item.state = showsDiagnosticBar ? .on : .off }
+        return !isClosed && window?.attachedSheet == nil
     }
 
     @objc private func closeWindow() { window?.performClose(nil) }
@@ -547,7 +543,7 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
-        allowSystemKeys.isHidden = systemKeys.start()
+        footer.allowSystemKeys.isHidden = systemKeys.start()
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -561,18 +557,16 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
     /// picture in the row beside it, when the virtual screen was sized to
     /// include that row. Otherwise the whole picture fits below it.
     private func layoutCameraRow() {
-        guard extendsBesideCamera, !isClosed, let window, window.styleMask.contains(.fullScreen),
+        guard extendsBesideCamera, isFullScreen, !isClosed, let window,
               let screen = window.screen, NativeCameraRow.housing(on: screen) != nil else {
             hideCameraRow(); return
         }
         let rowHeight = screen.frame.maxY - window.frame.maxY
         let remote = view.remoteSize
-        let below = view.bounds.height
-        guard rowHeight >= 1, remote.height > 0, below > 0,
-              abs(remote.height / screen.backingScaleFactor - (below + rowHeight)) < 2 else {
+        guard let rowRows = Self.cameraRowRows(remoteHeight: remote.height, scale: screen.backingScaleFactor,
+                                               rowHeight: rowHeight, below: view.bounds.height) else {
             hideCameraRow(); return
         }
-        let rowRows = Double(remote.height) * Double(rowHeight / (below + rowHeight))
         rowView.region = (0, rowRows)
         view.region = (rowRows, Double(remote.height) - rowRows)
         cameraRow.setFrame(NSRect(x: screen.frame.minX, y: window.frame.maxY, width: screen.frame.width, height: rowHeight), display: false)
@@ -580,6 +574,28 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
         // A child takes its parent's level when added; raise it after.
         cameraRow.level = .statusBar
         cameraRow.orderFront(nil)
+    }
+
+    /// The desktop's rows shown in the row beside the camera housing: when a
+    /// desktop `remoteHeight` pixels tall at `scale` fills that row and the
+    /// picture area below it (both in points) to within 2 points. Otherwise
+    /// nil, and the whole desktop fits below the housing.
+    static func cameraRowRows(remoteHeight: CGFloat, scale: CGFloat, rowHeight: CGFloat, below: CGFloat) -> Double? {
+        guard rowHeight >= 1, remoteHeight > 0, below > 0, scale > 0,
+              abs(remoteHeight / scale - (below + rowHeight)) < 2 else { return nil }
+        return Double(remoteHeight) * Double(rowHeight / (below + rowHeight))
+    }
+
+    /// The virtual screen to ask the Linux desktop for, in pixels, so it fills
+    /// the picture area in full screen on a screen `size` points at `scale`:
+    /// the whole height when the picture uses the row beside the camera
+    /// housing, otherwise the height below `safeTop`; less the footer when it
+    /// is shown. Rust checks the size again.
+    static func virtualScreen(size: CGSize, safeTop: CGFloat, scale: CGFloat, besideCamera: Bool,
+                              showsFooter: Bool) -> (width: Int, height: Int) {
+        let top = besideCamera ? 0 : safeTop
+        let footer = showsFooter ? ViewerFooter.height : 0
+        return (Int((size.width * scale).rounded()) & ~1, Int(((size.height - top - footer) * scale).rounded()) & ~1)
     }
 
     private func hideCameraRow() {

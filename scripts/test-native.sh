@@ -37,7 +37,7 @@ target/mooring-native-input-tests
 # Mooring's VNC viewer against a loopback server with no sign-in.
 swiftc -swift-version 5 -warnings-as-errors -parse-as-library -target arm64-apple-macosx14.0 \
   -framework AppKit -framework IOSurface -framework QuartzCore -framework ApplicationServices "${bridge[@]}" \
-  app/VNCViewer.swift app/NativeCameraRow.swift app/NativeInput.swift app/MooringPrivacy.swift app/MooringAppearance.swift app/MooringBrand.swift scripts/test-vnc-viewer.swift \
+  app/VNCViewer.swift app/ViewerFooter.swift app/NativeCameraRow.swift app/NativeInput.swift app/MooringPrivacy.swift app/MooringAppearance.swift app/MooringBrand.swift scripts/test-vnc-viewer.swift \
   -o target/mooring-vnc-viewer-tests
 target/mooring-vnc-viewer-tests "$project_root"
 swiftc -O -swift-version 5 -warnings-as-errors -parse-as-library -target arm64-apple-macosx14.0 \
