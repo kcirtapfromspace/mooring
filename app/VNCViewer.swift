@@ -473,18 +473,17 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItemVal
         window.toggleFullScreen(nil)
     }
 
-    /// As in a Mac-to-Mac viewer that controls the other Mac (a Linux viewer
-    /// always sends input): full screen hides this Mac's menu bar and Dock,
-    /// so the top edge reaches the desktop's top bar instead of sliding down
-    /// this Mac's menu bar and the viewer's title bar, and the bottom edge
-    /// reaches the footer without the Dock. ⌃⌘F, Exit Full Screen in the
-    /// footer and a swipe between Spaces lead back.
-    /// As in the Mac-to-Mac viewer: while ⌘ shortcuts go to the desktop
-    /// (Accessibility allowed), this Mac's menu bar and Dock stay hidden in
-    /// full screen; otherwise they appear at the screen's edges as usual.
+    /// As in a Mac-to-Mac viewer that controls the other Mac, full screen
+    /// hides this Mac's menu bar and Dock, so the top edge reaches the
+    /// desktop's top bar instead of sliding down this Mac's menu bar and the
+    /// viewer's title bar, and the bottom edge reaches the footer without the
+    /// Dock. A Linux viewer always sends input, and ⌘ shortcuts reach the
+    /// desktop without Accessibility (which only adds ⌘-Tab and the other
+    /// system shortcuts), so this does not depend on it. ⌃⌘F, Exit Full Screen
+    /// in the footer and a swipe between Spaces lead back.
     func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions)
         -> NSApplication.PresentationOptions {
-        NativeSystemKeyCapture.isPermitted ? [.fullScreen, .hideDock, .hideMenuBar] : proposedOptions
+        [.fullScreen, .hideDock, .hideMenuBar]
     }
     func windowWillEnterFullScreen(_ notification: Notification) { isFullScreen = true }
     func windowDidEnterFullScreen(_ notification: Notification) {

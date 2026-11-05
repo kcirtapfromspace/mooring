@@ -185,8 +185,8 @@ struct VNCViewerTests {
 
         let proposed: NSApplication.PresentationOptions = [.fullScreen, .autoHideMenuBar, .autoHideDock, .autoHideToolbar]
         let options = viewer.window(viewerWindow, willUseFullScreenPresentationOptions: proposed)
-        let expectedOptions: NSApplication.PresentationOptions = NativeSystemKeyCapture.isPermitted ? [.fullScreen, .hideDock, .hideMenuBar] : proposed
-        check(options == expectedOptions, "full screen hides this Mac's menu bar and Dock only while ⌘ keys are captured: \(options)")
+        check(options == [.fullScreen, .hideDock, .hideMenuBar],
+              "full screen hides this Mac's menu bar and Dock, with or without Accessibility: \(options)")
         viewer.windowWillEnterFullScreen(note(NSWindow.willEnterFullScreenNotification))
         // AppKit resizes during the transition; the desktop's shape must not
         // make the window taller than the screen.

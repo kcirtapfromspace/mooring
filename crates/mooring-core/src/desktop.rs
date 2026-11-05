@@ -113,8 +113,27 @@ struct HyprMonitor {
 #[derive(Debug, Deserialize)]
 struct OmarchyLock {
     locked: bool,
+    requested: Option<bool>,
+    #[serde(rename = "sessionLocked")]
+    session_locked: Option<bool>,
+    secure: Option<bool>,
     #[serde(default)]
     authenticating: bool,
+}
+
+impl OmarchyLock {
+    /// Omarchy defines `locked` as requested, session-locked or secure. Its
+    /// summary has been seen to stay true after an unlock while all three
+    /// read false, so Mooring goes by the three when the shell reports them,
+    /// and by `locked` from shells that report only that.
+    fn is_locked(&self) -> bool {
+        match (self.requested, self.session_locked, self.secure) {
+            (Some(requested), Some(session_locked), Some(secure)) => {
+                requested || session_locked || secure
+            }
+            _ => self.locked,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -246,7 +265,7 @@ fn sets_locked_hint(desktop: Option<&str>) -> bool {
 
 fn evaluate(probe: Probe) -> DesktopStatus {
     let hypr_lock = probe.monitors.as_deref().and_then(hyprland_lock);
-    let omarchy_lock = probe.omarchy.as_ref().map(|lock| lock.locked);
+    let omarchy_lock = probe.omarchy.as_ref().map(OmarchyLock::is_locked);
     let mut notes = Vec::new();
     let session = if probe.no_logind {
         SessionState::NoLogind
@@ -578,6 +597,44 @@ end
         assert_eq!(json["lock"], "locked");
         assert_eq!(json["display"], "off");
         assert_eq!(json["evidence"], "hyprland_session_lock");
+    }
+
+    #[test]
+    fn a_stale_omarchy_summary_does_not_keep_an_unlocked_desktop_locked() {
+        // m1-linux after an unlock: Omarchy's summary still says locked while
+        // its parts, and Hyprland, say the lock is gone.
+        let stale = r#"omarchy.lock={"locked":true,"requested":false,"pending":false,"sessionLocked":false,"secure":false,"realScreens":2,"passwordPam":true,"fingerprint":false,"authenticating":false,"lastEvent":"unlocked","lastEventAt":"2026-11-05T21:18:18.887Z"}"#;
+        let screens = monitors(&[
+            ("eDP-1", true, r#"["WINDOWED","CANDIDATE"]"#),
+            ("MOORING-1", true, r#"["WINDOWED","CANDIDATE"]"#),
+        ]);
+        let status = parse_probe(&probe(&["session.Name=alex", &screens, stale])).unwrap();
+        assert_eq!(
+            (status.lock, status.evidence),
+            (LockState::Unlocked, LockEvidence::HyprlandSessionLock)
+        );
+        assert_eq!(status.title, "Unlocked");
+        // Without Hyprland, the parts alone decide.
+        let status = parse_probe(&probe(&["session.Name=alex", stale])).unwrap();
+        assert_eq!(
+            (status.lock, status.evidence),
+            (LockState::Unlocked, LockEvidence::OmarchyLockScreen)
+        );
+        // A lock still being acquired counts as locked before Hyprland has it.
+        let requested =
+            r#"omarchy.lock={"locked":true,"requested":true,"sessionLocked":false,"secure":false}"#;
+        let status = parse_probe(&probe(&["session.Name=alex", &screens, requested])).unwrap();
+        assert_eq!(
+            (status.lock, status.evidence),
+            (LockState::Locked, LockEvidence::OmarchyLockScreen)
+        );
+        // Shells that report only the summary are still read by it.
+        let status = parse_probe(&probe(&[
+            "session.Name=alex",
+            r#"omarchy.lock={"locked":true}"#,
+        ]))
+        .unwrap();
+        assert_eq!(status.lock, LockState::Locked);
     }
 
     #[test]
