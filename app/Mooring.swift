@@ -363,6 +363,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     private var vncViewers: [String: VNCViewerWindow] = [:]
     /// Tunnels that are ready and waiting for the sign-in prompt: local port.
     private var vncPending: [String: UInt16] = [:]
+    /// Whether Linux viewers show their footer: on unless hidden with ⌃⌘D in
+    /// one, separate from the Mac-to-Mac viewer's choice.
+    private var linuxShowsFooter: Bool {
+        get { UserDefaults.standard.object(forKey: "vnc.showDiagnosticBar") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "vnc.showDiagnosticBar") }
+    }
     /// The latest read-only desktop check per connection: user, title, message.
     private var desktopStates: [String: (user: String?, title: String, message: String)] = [:]
     private var tunnelEnded = Set<String>()
@@ -1337,15 +1343,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     /// With Match this screen on, the Linux desktop shows on a virtual screen
-    /// the size of the picture in full screen: this Mac's screen below the
-    /// camera housing, less the footer when it is shown. Rust checks the size.
+    /// the size of the picture in full screen: this Mac's whole screen when
+    /// the picture may use the row beside the camera housing (as in Mac-to-Mac
+    /// viewing), otherwise the screen below it; less the footer when shown.
+    /// Rust checks the size.
     private func virtualScreenArguments() -> [String] {
         guard native.matchesScreen, let screen = NSScreen.main else { return [] }
         let scale = screen.backingScaleFactor
         guard scale == 1 || scale == 2 else { return [] }
-        let footer = native.showsDiagnosticBar ? VNCViewerWindow.footerHeight : 0
+        let footer = linuxShowsFooter ? VNCViewerWindow.footerHeight : 0
+        let besideCamera = native.extendsBesideCamera && NativeCameraRow.housing(on: screen) != nil
+        let top = besideCamera ? 0 : screen.safeAreaInsets.top
         let width = Int((screen.frame.width * scale).rounded()) & ~1
-        let height = Int(((screen.frame.height - screen.safeAreaInsets.top - footer) * scale).rounded()) & ~1
+        let height = Int(((screen.frame.height - top - footer) * scale).rounded()) & ~1
         return ["--screen", "\(width)x\(height)@\(Int(scale))"]
     }
 
@@ -1396,11 +1406,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     private func openVNCViewer(_ mac: SavedMac, session: UInt64, port: UInt16) {
         if let old = vncViewers[mac.id] { old.onClose = nil; old.close() }
         let viewer = VNCViewerWindow(name: mac.name, connectionID: mac.id, sessionID: session,
-                                     showsDiagnosticBar: native.showsDiagnosticBar)
-        viewer.onDiagnosticBarChange = { [weak self] shows in
-            self?.native.showsDiagnosticBar = shows
-            self?.refreshSettings()
-        }
+                                     showsDiagnosticBar: linuxShowsFooter)
+        viewer.onDiagnosticBarChange = { [weak self] shows in self?.linuxShowsFooter = shows }
+        viewer.onAllowSystemKeys = { AccessibilityPermission.request() }
+        // The viewer checks the desktop's size before using the camera row.
+        viewer.extendsBesideCamera = native.matchesScreen && native.extendsBesideCamera
         if let desktop = desktopStates[mac.id] { viewer.showDesktop(desktop.title) }
         viewer.onClose = { [weak self] in
             self?.vncViewers[mac.id] = nil

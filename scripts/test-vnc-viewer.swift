@@ -114,6 +114,34 @@ struct VNCViewerTests {
         check(pixel(second, 0, 0) == [0, 0, 200, 255] && pixel(second, 0, 3) == [200, 0, 0, 255], "back surface caught up")
         check(pixel(shown, 1, 1) == [0, 0, 0, 255], "the shown surface was not written while shown")
         view.mouseMoved(with: mouse(.mouseMoved, NSPoint(x: 79, y: 1)))
+
+        // A view showing only some rows, as the main view and the camera row
+        // do: what it draws, and where its pointer lands.
+        func center(_ view: VNCView) -> [UInt8] {
+            let context = CGContext(data: nil, width: 4, height: 4, bitsPerComponent: 8, bytesPerRow: 16,
+                                    space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            let layer = view.layer!
+            let frame = layer.frame
+            layer.frame = CGRect(x: 0, y: 0, width: 4, height: 4)
+            layer.render(in: context)
+            layer.frame = frame
+            let data = context.data!.assumingMemoryBound(to: UInt8.self)
+            return [data[2 * 16 + 8], data[2 * 16 + 9], data[2 * 16 + 10]]
+        }
+        // Colour management and smoothing shift the values a little; which
+        // colour dominates is what shows the right rows are drawn.
+        func isRed(_ c: [UInt8]) -> Bool { c[0] > 150 && c[2] < 60 }
+        func isBlue(_ c: [UInt8]) -> Bool { c[2] > 150 && c[0] < 60 }
+        view.region = (0, 1)
+        check(isRed(center(view)), "top row alone is red: \(center(view))")
+        view.region = (3, 1)
+        check(isBlue(center(view)), "bottom row alone is blue: \(center(view))")
+        view.mouseMoved(with: mouse(.mouseMoved, NSPoint(x: 15, y: 20)))
+        let mirror = VNCView(frame: NSRect(x: 0, y: 0, width: 80, height: 10))
+        mirror.source = view
+        mirror.region = (0, 1)
+        view.mirror = mirror
+        view.region = nil
         func key(_ type: NSEvent.EventType, _ code: UInt16, _ text: String, _ flags: UInt = 0) -> NSEvent {
             NSEvent.keyEvent(with: type, location: .zero, modifierFlags: NSEvent.ModifierFlags(rawValue: flags), timestamp: 0,
                              windowNumber: window.windowNumber, context: nil, characters: text,
@@ -137,6 +165,7 @@ struct VNCViewerTests {
         check((result["encodings"] as! [Int]).first == 16, "ZRLE preferred: \(result["encodings"]!)")
         check(pointer.first == [0, 1, 0], "pointer mapped to (1, 0): \(pointer)")
         check(pointer.contains([0, 7, 3]), "pointer at the far corner: \(pointer)")
+        check(pointer.contains([0, 1, 3]), "pointer in a view of the bottom row lands on row 3: \(pointer)")
         let expected: [(Int, Int)] = [(1, 0x61), (0, 0x61), (1, 0xffe1), (1, 0xff0d)]
         check(Array(keys.prefix(4)).elementsEqual(expected, by: ==), "keys sent: \(keys)")
         let released = Set(keys.dropFirst(4).filter { $0.0 == 0 }.map { $0.1 })

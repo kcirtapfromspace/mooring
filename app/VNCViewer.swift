@@ -14,9 +14,25 @@ final class VNCView: NSView {
     var sessionID: UInt64 = 0
     /// Called once, when the first picture is on screen.
     var onFirstPicture: (() -> Void)?
+    /// Called when the remote desktop's size becomes known or changes.
+    var onRemoteSize: (() -> Void)?
     private var shownPicture = false
+    /// A second view showing part of the same picture (the row beside the
+    /// camera housing). It is given each new surface; it never copies pixels.
+    weak var mirror: VNCView?
+    /// For a mirror: the view that owns the session and its surfaces.
+    weak var source: VNCView?
+    /// Show only these remote rows, filling the view exactly (their shape
+    /// matches the view's); nil shows the whole picture, aspect-fit.
+    var region: (top: Double, rows: Double)? { didSet { applyRegion() } }
+    /// For a view in a window that never becomes key, such as the camera row.
+    var tracksOutsideKeyWindow = false
     /// The remote desktop's size in pixels, once known.
-    var remoteSize: CGSize { CGSize(width: surfaceSize.width, height: surfaceSize.height) }
+    var remoteSize: CGSize {
+        if let source { return source.remoteSize }
+        return CGSize(width: surfaceSize.width, height: surfaceSize.height)
+    }
+    private var session: UInt64 { source?.sessionID ?? sessionID }
     /// Two surfaces, swapped on each change: Core Animation shows a surface
     /// only when it is assigned as contents, so it is never written while shown.
     private var surfaces: [IOSurface] = []
@@ -45,7 +61,8 @@ final class VNCView: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let tracking { removeTrackingArea(tracking) }
-        let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self)
+        let activity: NSTrackingArea.Options = tracksOutsideKeyWindow ? .activeAlways : .activeInKeyWindow
+        let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, activity, .inVisibleRect], owner: self)
         addTrackingArea(area)
         tracking = area
     }
@@ -62,7 +79,23 @@ final class VNCView: NSView {
         front = 0
         stale = MLVncRect()
         surfaceSize = (Int(width), Int(height))
+        applyRegion()
+        onRemoteSize?()
         return true
+    }
+
+    /// The part of the picture shown, as a contents rectangle. Core Animation's
+    /// unit space starts at the bottom left here, while remote rows count from
+    /// the top.
+    private func applyRegion() {
+        let height = Double(remoteSize.height)
+        guard let region, height > 0 else {
+            layer?.contentsRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+            layer?.contentsGravity = .resizeAspect
+            return
+        }
+        layer?.contentsGravity = .resize
+        layer?.contentsRect = CGRect(x: 0, y: (height - region.top - region.rows) / height, width: 1, height: region.rows / height)
     }
 
     /// Copy what changed since the last refresh. Called once per frame.
@@ -88,6 +121,7 @@ final class VNCView: NSView {
         switch status {
         case Int32(ML_VNC_COPIED):
             layer?.contents = back
+            mirror?.layer?.contents = back
             front = 1 - front
             stale = region
             if !shownPicture { shownPicture = true; onFirstPicture?() }
@@ -102,12 +136,18 @@ final class VNCView: NSView {
         sessionID = 0
         surfaces = []
         layer?.contents = nil
+        mirror?.layer?.contents = nil
     }
 
-    /// The event's position in remote desktop pixels, given the aspect fit.
+    /// The event's position in remote desktop pixels: in the region shown, or
+    /// given the aspect fit.
     private func remotePoint(_ event: NSEvent) -> (Double, Double) {
         let point = convert(event.locationInWindow, from: nil)
-        let width = Double(max(surfaceSize.width, 1)), height = Double(max(surfaceSize.height, 1))
+        let width = Double(max(remoteSize.width, 1)), height = Double(max(remoteSize.height, 1))
+        if let region, bounds.width > 0, bounds.height > 0 {
+            return (Double(point.x) / Double(bounds.width) * width,
+                    region.top + (1 - Double(point.y) / Double(bounds.height)) * region.rows)
+        }
         let scale = min(Double(bounds.width) / width, Double(bounds.height) / height)
         guard scale > 0 else { return (0, 0) }
         let left = (Double(bounds.width) - width * scale) / 2
@@ -122,13 +162,16 @@ final class VNCView: NSView {
     }
 
     private func pointer(_ event: NSEvent) {
-        guard sessionID != 0 else { return }
+        guard session != 0 else { return }
         let (x, y) = remotePoint(event)
-        _ = ml_vnc_pointer(sessionID, x, y, buttons)
+        _ = ml_vnc_pointer(session, x, y, buttons)
     }
 
     override func mouseMoved(with event: NSEvent) { pointer(event) }
-    override func mouseDown(with event: NSEvent) { window?.makeFirstResponder(self); pointer(event) }
+    override func mouseDown(with event: NSEvent) {
+        if source == nil { window?.makeFirstResponder(self) }
+        pointer(event)
+    }
     override func mouseUp(with event: NSEvent) { pointer(event) }
     override func mouseDragged(with event: NSEvent) { pointer(event) }
     override func rightMouseDown(with event: NSEvent) { pointer(event) }
@@ -139,11 +182,21 @@ final class VNCView: NSView {
     override func otherMouseDragged(with event: NSEvent) { pointer(event) }
 
     override func scrollWheel(with event: NSEvent) {
-        guard sessionID != 0 else { return }
+        guard session != 0 else { return }
         pointer(event)
         // AppKit's deltas are positive for up and left, in points for trackpads.
         let divisor = event.hasPreciseScrollingDeltas ? 16.0 : 1.0
-        _ = ml_vnc_scroll(sessionID, -Double(event.scrollingDeltaX) / divisor, -Double(event.scrollingDeltaY) / divisor)
+        _ = ml_vnc_scroll(session, -Double(event.scrollingDeltaX) / divisor, -Double(event.scrollingDeltaY) / divisor)
+    }
+
+    /// Keys forwarded by the system-shortcut tap, by event type.
+    func forwardKey(_ event: NSEvent) {
+        switch event.type {
+        case .keyDown: keyDown(with: event)
+        case .keyUp: keyUp(with: event)
+        case .flagsChanged: flagsChanged(with: event)
+        default: break
+        }
     }
 
     private func key(_ code: UInt16, _ characters: String, down: Bool) {
@@ -210,7 +263,19 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
     /// The virtual screen on the Linux desktop is sized to the area above it.
     private let footer = NSVisualEffectView()
     private let exitFullScreen = NSButton(title: "Exit Full Screen", target: nil, action: nil)
+    private let allowSystemKeys = NSButton(title: "Allow ⌘-Tab…", target: nil, action: nil)
     private var videoBottom: NSLayoutConstraint!
+    /// The top of the picture, in the row beside this Mac's camera housing,
+    /// as in the Mac-to-Mac viewer. Used when the virtual screen includes it.
+    private let rowView = VNCView(frame: .zero)
+    private lazy var cameraRow = NativeCameraRow(content: rowView)
+    /// Set by the app: the Linux desktop was given a virtual screen that
+    /// includes the row beside the camera housing.
+    var extendsBesideCamera = false { didSet { layoutCameraRow() } }
+    /// macOS acts on ⌘-Tab, ⌘-Space and other system shortcuts before Mooring
+    /// sees them; with Accessibility allowed, this sends them to the desktop
+    /// while the viewer is in front. ⌃⌘F, ⌃⌘D, ⌃⌘Q and ⌥⌘Esc stay here.
+    private let systemKeys = NativeSystemKeyCapture()
     static let footerHeight: CGFloat = 34
     private(set) var showsDiagnosticBar: Bool
     private let ended = NSVisualEffectView()
@@ -229,8 +294,9 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
     var onSignInRejected: ((String) -> Void)?
     var onEnded: ((String?) -> Void)?
     var onReconnect: (() -> Void)?
-    /// ⌃⌘D changed the footer; the choice is shared with the Mac-to-Mac viewer.
+    /// ⌃⌘D changed the footer; the app remembers it for Linux viewers.
     var onDiagnosticBarChange: ((Bool) -> Void)?
+    var onAllowSystemKeys: (() -> Void)?
 
     init(name: String, connectionID: String, sessionID: UInt64, showsDiagnosticBar: Bool = true) {
         self.connectionID = connectionID
@@ -247,6 +313,11 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
         window.delegate = self
         view.sessionID = sessionID
         view.onFirstPicture = { [weak self] in self?.firstPicture() }
+        view.onRemoteSize = { [weak self] in self?.layoutCameraRow() }
+        view.mirror = rowView
+        rowView.source = view
+        rowView.tracksOutsideKeyWindow = true
+        rowView.setAccessibilityLabel("Remote desktop, top bar")
         let root = window.contentView!
         view.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(view)
@@ -268,7 +339,10 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
                                target: self, action: #selector(toggleDiagnosticBar(_:)))
         hideBar.bezelStyle = .inline
         hideBar.toolTip = "Hide diagnostic footer. Restore with ⌃⌘D or View → Diagnostic Footer."
-        for item in [mark, status, NSView(), exitFullScreen, hideBar] { diagnosticBar.addArrangedSubview(item) }
+        allowSystemKeys.target = self; allowSystemKeys.action = #selector(allowKeys); allowSystemKeys.bezelStyle = .inline
+        allowSystemKeys.toolTip = "Allow Mooring in Accessibility on this Mac to send ⌘-Tab, ⌘-Space and other system shortcuts to the Linux desktop."
+        allowSystemKeys.isHidden = NativeSystemKeyCapture.isPermitted
+        for item in [mark, status, NSView(), allowSystemKeys, exitFullScreen, hideBar] { diagnosticBar.addArrangedSubview(item) }
         footer.material = .titlebar; footer.blendingMode = .withinWindow; footer.state = .active
         footer.translatesAutoresizingMaskIntoConstraints = false
         footer.addSubview(diagnosticBar)
@@ -309,6 +383,15 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
         ])
 
         layoutFooter()
+        systemKeys.isCapturing = { [weak self] in
+            guard let self, let window = self.window else { return false }
+            return window.isKeyWindow && self.view.sessionID != 0
+        }
+        systemKeys.forward = { [weak self] event in self?.view.forwardKey(event) }
+        // Releases the tap missed would leave keys held on the desktop.
+        systemKeys.onInterrupted = { [weak self] in
+            if let id = self?.view.sessionID, id != 0 { _ = ml_vnc_release_all(id) }
+        }
         let link = view.displayLink(target: self, selector: #selector(tick))
         link.add(to: .main, forMode: .common)
         self.link = link
@@ -417,7 +500,12 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
         window.toggleFullScreen(nil)
     }
 
-    func windowDidEnterFullScreen(_ notification: Notification) { exitFullScreen.isHidden = false }
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        exitFullScreen.isHidden = false
+        layoutCameraRow()
+    }
+    func windowWillExitFullScreen(_ notification: Notification) { hideCameraRow() }
+    func windowDidResize(_ notification: Notification) { layoutCameraRow() }
     func windowDidExitFullScreen(_ notification: Notification) {
         exitFullScreen.isHidden = true
         let remote = view.remoteSize
@@ -458,12 +546,53 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
         render()
     }
 
+    func windowDidBecomeKey(_ notification: Notification) {
+        allowSystemKeys.isHidden = systemKeys.start()
+    }
+
     func windowDidResignKey(_ notification: Notification) {
+        systemKeys.stop()
         if view.sessionID != 0 { _ = ml_vnc_release_all(view.sessionID) }
+    }
+
+    @objc private func allowKeys() { onAllowSystemKeys?() }
+
+    /// In full screen on a Mac with a camera housing, show the top of the
+    /// picture in the row beside it, when the virtual screen was sized to
+    /// include that row. Otherwise the whole picture fits below it.
+    private func layoutCameraRow() {
+        guard extendsBesideCamera, !isClosed, let window, window.styleMask.contains(.fullScreen),
+              let screen = window.screen, NativeCameraRow.housing(on: screen) != nil else {
+            hideCameraRow(); return
+        }
+        let rowHeight = screen.frame.maxY - window.frame.maxY
+        let remote = view.remoteSize
+        let below = view.bounds.height
+        guard rowHeight >= 1, remote.height > 0, below > 0,
+              abs(remote.height / screen.backingScaleFactor - (below + rowHeight)) < 2 else {
+            hideCameraRow(); return
+        }
+        let rowRows = Double(remote.height) * Double(rowHeight / (below + rowHeight))
+        rowView.region = (0, rowRows)
+        view.region = (rowRows, Double(remote.height) - rowRows)
+        cameraRow.setFrame(NSRect(x: screen.frame.minX, y: window.frame.maxY, width: screen.frame.width, height: rowHeight), display: false)
+        if cameraRow.parent == nil { window.addChildWindow(cameraRow, ordered: .above) }
+        // A child takes its parent's level when added; raise it after.
+        cameraRow.level = .statusBar
+        cameraRow.orderFront(nil)
+    }
+
+    private func hideCameraRow() {
+        view.region = nil
+        rowView.region = nil
+        cameraRow.parent?.removeChildWindow(cameraRow)
+        cameraRow.orderOut(nil)
     }
 
     func windowWillClose(_ notification: Notification) {
         isClosed = true
+        systemKeys.stop()
+        hideCameraRow()
         statsTimer?.invalidate(); statsTimer = nil
         let id = view.sessionID
         view.clear()
