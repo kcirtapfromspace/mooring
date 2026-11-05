@@ -14,8 +14,6 @@ final class VNCView: NSView {
     var sessionID: UInt64 = 0
     /// Called once, when the first picture is on screen.
     var onFirstPicture: (() -> Void)?
-    /// The pointer's position in this view, for revealing the footer.
-    var onPointer: ((NSPoint) -> Void)?
     private var shownPicture = false
     /// The remote desktop's size in pixels, once known.
     var remoteSize: CGSize { CGSize(width: surfaceSize.width, height: surfaceSize.height) }
@@ -124,7 +122,6 @@ final class VNCView: NSView {
     }
 
     private func pointer(_ event: NSEvent) {
-        onPointer?(convert(event.locationInWindow, from: nil))
         guard sessionID != 0 else { return }
         let (x, y) = remotePoint(event)
         _ = ml_vnc_pointer(sessionID, x, y, buttons)
@@ -209,16 +206,13 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
     private var link: CADisplayLink?
     private let status = label("Connecting…", size: 11, color: .secondaryLabelColor)
     private let diagnosticBar = stack([], orientation: .horizontal, spacing: 12)
-    /// Holds the bar. Below the picture in a window; in full screen it floats
-    /// over the picture's bottom edge and hides, because a Linux desktop can't
-    /// resize to the screen the way a sharing Mac does.
+    /// Holds the bar, always below the picture as in the Mac-to-Mac viewer.
+    /// The virtual screen on the Linux desktop is sized to the area above it.
     private let footer = NSVisualEffectView()
-    private var footerHide: DispatchWorkItem?
-    private var isFullScreen: Bool { window?.styleMask.contains(.fullScreen) ?? false }
     private let exitFullScreen = NSButton(title: "Exit Full Screen", target: nil, action: nil)
     private var videoBottom: NSLayoutConstraint!
-    private static let footerHeight: CGFloat = 34
-    private(set) var showsDiagnosticBar = true
+    static let footerHeight: CGFloat = 34
+    private(set) var showsDiagnosticBar: Bool
     private let ended = NSVisualEffectView()
     private let endedTitle = label("Session ended", size: 17, weight: .semibold)
     private let endedReason = label("", size: 13, color: .secondaryLabelColor)
@@ -235,9 +229,12 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
     var onSignInRejected: ((String) -> Void)?
     var onEnded: ((String?) -> Void)?
     var onReconnect: (() -> Void)?
+    /// ⌃⌘D changed the footer; the choice is shared with the Mac-to-Mac viewer.
+    var onDiagnosticBarChange: ((Bool) -> Void)?
 
-    init(name: String, connectionID: String, sessionID: UInt64) {
+    init(name: String, connectionID: String, sessionID: UInt64, showsDiagnosticBar: Bool = true) {
         self.connectionID = connectionID
+        self.showsDiagnosticBar = showsDiagnosticBar
         let window = MooringPrivacyWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 700),
                                           styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
         window.title = name + " — Mooring"
@@ -287,7 +284,6 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
             diagnosticBar.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
             diagnosticBar.heightAnchor.constraint(equalToConstant: 22),
         ])
-        view.onPointer = { [weak self] point in self?.pointerMoved(point) }
 
         ended.material = .hudWindow; ended.blendingMode = .withinWindow; ended.state = .active
         ended.wantsLayer = true; ended.layer?.cornerRadius = 14
@@ -312,6 +308,7 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
             endedReason.widthAnchor.constraint(equalTo: content.widthAnchor),
         ])
 
+        layoutFooter()
         let link = view.displayLink(target: self, selector: #selector(tick))
         link.add(to: .main, forMode: .common)
         self.link = link
@@ -420,15 +417,9 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
         window.toggleFullScreen(nil)
     }
 
-    func windowDidEnterFullScreen(_ notification: Notification) {
-        exitFullScreen.isHidden = false
-        layoutFooter()
-        revealFooter()
-    }
+    func windowDidEnterFullScreen(_ notification: Notification) { exitFullScreen.isHidden = false }
     func windowDidExitFullScreen(_ notification: Notification) {
         exitFullScreen.isHidden = true
-        footerHide?.cancel()
-        layoutFooter()
         let remote = view.remoteSize
         if remote.width > 0 { fitToPicture(width: Int(remote.width), height: Int(remote.height)) }
     }
@@ -439,36 +430,13 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate {
     @objc func toggleDiagnosticBar(_ sender: Any?) {
         showsDiagnosticBar.toggle()
         layoutFooter()
-        if isFullScreen && showsDiagnosticBar { revealFooter() }
+        onDiagnosticBarChange?(showsDiagnosticBar)
     }
 
-    /// In a window the footer sits below the picture; in full screen the
-    /// picture fills the screen and the footer floats over it.
     private func layoutFooter() {
-        let floating = isFullScreen
-        videoBottom.constant = showsDiagnosticBar && !floating ? -Self.footerHeight : 0
+        videoBottom.constant = showsDiagnosticBar ? -Self.footerHeight : 0
         footer.isHidden = !showsDiagnosticBar
-        footer.alphaValue = floating ? footer.alphaValue : 1
         window?.contentView?.layoutSubtreeIfNeeded()
-    }
-
-    /// Show the floating footer, then fade it after a few seconds.
-    private func revealFooter() {
-        guard isFullScreen, showsDiagnosticBar else { return }
-        footerHide?.cancel()
-        NSAnimationContext.runAnimationGroup { $0.duration = 0.15; footer.animator().alphaValue = 1 }
-        let hide = DispatchWorkItem { [weak self] in
-            guard let self, self.isFullScreen else { return }
-            NSAnimationContext.runAnimationGroup { $0.duration = 0.3; self.footer.animator().alphaValue = 0 }
-        }
-        footerHide = hide
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: hide)
-    }
-
-    /// In full screen, the pointer at the bottom edge brings the footer back.
-    private func pointerMoved(_ point: NSPoint) {
-        guard isFullScreen, showsDiagnosticBar, point.y < 6 else { return }
-        revealFooter()
     }
 
     @objc private func closeWindow() { window?.performClose(nil) }

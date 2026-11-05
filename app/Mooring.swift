@@ -1337,14 +1337,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     /// With Match this screen on, the Linux desktop shows on a virtual screen
-    /// the size of this Mac's full-screen area (below the camera housing), so
-    /// the viewer fills the screen. Rust checks the size.
+    /// the size of the picture in full screen: this Mac's screen below the
+    /// camera housing, less the footer when it is shown. Rust checks the size.
     private func virtualScreenArguments() -> [String] {
         guard native.matchesScreen, let screen = NSScreen.main else { return [] }
         let scale = screen.backingScaleFactor
         guard scale == 1 || scale == 2 else { return [] }
+        let footer = native.showsDiagnosticBar ? VNCViewerWindow.footerHeight : 0
         let width = Int((screen.frame.width * scale).rounded()) & ~1
-        let height = Int(((screen.frame.height - screen.safeAreaInsets.top) * scale).rounded()) & ~1
+        let height = Int(((screen.frame.height - screen.safeAreaInsets.top - footer) * scale).rounded()) & ~1
         return ["--screen", "\(width)x\(height)@\(Int(scale))"]
     }
 
@@ -1394,7 +1395,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
 
     private func openVNCViewer(_ mac: SavedMac, session: UInt64, port: UInt16) {
         if let old = vncViewers[mac.id] { old.onClose = nil; old.close() }
-        let viewer = VNCViewerWindow(name: mac.name, connectionID: mac.id, sessionID: session)
+        let viewer = VNCViewerWindow(name: mac.name, connectionID: mac.id, sessionID: session,
+                                     showsDiagnosticBar: native.showsDiagnosticBar)
+        viewer.onDiagnosticBarChange = { [weak self] shows in
+            self?.native.showsDiagnosticBar = shows
+            self?.refreshSettings()
+        }
         if let desktop = desktopStates[mac.id] { viewer.showDesktop(desktop.title) }
         viewer.onClose = { [weak self] in
             self?.vncViewers[mac.id] = nil
