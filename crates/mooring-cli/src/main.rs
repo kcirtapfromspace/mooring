@@ -15,7 +15,7 @@ use std::{
 };
 use store::{Connection, NewConnection, SshHop, Store};
 
-const HELP: &str = "Mooring — native Mac connections, Rust foundation\n\nUsage: mooring [--config-dir PATH] COMMAND\n\n  list                         List saved VNC desktops as JSON\n  add --name NAME --ssh TARGET [--host HOST] [--port PORT]\n                               Save a VNC server, such as wayvnc on Linux, reached\n                               through SSH. TARGET is a ~/.ssh/config alias or\n                               user@host; HOST and PORT are as seen from the SSH\n                               host (127.0.0.1:5900)\n  remove ID                    Remove a saved connection\n  inspect ID                   Read the server's RFB greeting; no login\n  desktop-status ID            Whether the remote desktop is locked and its\n                               display on. Read-only over SSH\n  vnc-check ID                 Run Mooring's encrypted VNC sign-in handshake\n                               until the server asks for credentials, then stop.\n                               Sends none\n  connect ID [--idle-seconds N] [--wait-seconds N]\n                               Open the SSH tunnel on 127.0.0.1 for Mooring's\n                               viewer and print JSON lines (including whether\n                               the desktop is locked) until no viewer has been\n                               connected for N seconds (default 60) or Ctrl-C\n  doctor                       Report local capabilities and limitations\n  simulate                     Run simulated adaptive-quality scenarios\n  telemetry [--count N]        Stream live native-session measurements as JSON lines\n  tune OPTIONS                 Adjust the sharing Mac's stream while connected:\n                               --bitrate-mbps 1-80  --max-width 640-3840 (even)\n                               --fps 1-60  --in-flight 1-2  --keyframe-seconds 0-10\n                               (0: keyframes only when needed, the default)\n                               --reset (restore defaults, then apply the rest)\n\nMacs connect through Mooring's own pairing, not Apple Screen Sharing.\nTelemetry and tuning use the running app's owner-only local socket; tuning\nfrom a viewer is sent to the sharing Mac over the encrypted session. No\npasswords are stored. MOORING_HOME overrides the connection directory. SSH\nuses your own keys, agent and ~/.ssh/config in batch mode and never prompts;\nMOORING_SSH_CONFIG names an alternate config.\n";
+const HELP: &str = "Mooring — native Mac connections, Rust foundation\n\nUsage: mooring [--config-dir PATH] COMMAND\n\n  list                         List saved VNC desktops as JSON\n  add --name NAME --ssh TARGET [--host HOST] [--port PORT]\n                               Save a VNC server, such as wayvnc on Linux, reached\n                               through SSH. TARGET is a ~/.ssh/config alias or\n                               user@host; HOST and PORT are as seen from the SSH\n                               host (127.0.0.1:5900)\n  remove ID                    Remove a saved connection\n  inspect ID                   Read the server's RFB greeting; no login\n  desktop-status ID            Whether the remote desktop is locked and its\n                               display on. Read-only over SSH\n  vnc-check ID                 Run Mooring's encrypted VNC sign-in handshake\n                               until the server asks for credentials, then stop.\n                               Sends none\n  connect ID [--idle-seconds N] [--wait-seconds N] [--screen WxH@SCALE]\n                               Open the SSH tunnel on 127.0.0.1 for Mooring's\n                               viewer and print JSON lines (including whether\n                               the desktop is locked) until no viewer has been\n                               connected for N seconds (default 60) or Ctrl-C.\n                               --screen shows the desktop on a virtual screen of\n                               that size (Hyprland and wayvncctl) until then\n  doctor                       Report local capabilities and limitations\n  simulate                     Run simulated adaptive-quality scenarios\n  telemetry [--count N]        Stream live native-session measurements as JSON lines\n  tune OPTIONS                 Adjust the sharing Mac's stream while connected:\n                               --bitrate-mbps 1-80  --max-width 640-3840 (even)\n                               --fps 1-60  --in-flight 1-2  --keyframe-seconds 0-10\n                               (0: keyframes only when needed, the default)\n                               --reset (restore defaults, then apply the rest)\n\nMacs connect through Mooring's own pairing, not Apple Screen Sharing.\nTelemetry and tuning use the running app's owner-only local socket; tuning\nfrom a viewer is sent to the sharing Mac over the encrypted session. No\npasswords are stored. MOORING_HOME overrides the connection directory. SSH\nuses your own keys, agent and ~/.ssh/config in batch mode and never prompts;\nMOORING_SSH_CONFIG names an alternate config.\n";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -327,13 +327,17 @@ struct ConnectOptions {
     no_viewer: bool,
     idle_seconds: Option<u64>,
     wait_seconds: Option<u64>,
+    /// Show the desktop on a virtual screen of this size while connected.
+    screen: Option<ssh_tunnel::ScreenSize>,
 }
 
 fn parse_connect(args: &[String]) -> Result<(&str, ConnectOptions), String> {
     let (id, mut rest) = args
         .split_first()
         .filter(|(id, _)| !id.starts_with('-'))
-        .ok_or("Usage: mooring connect ID [--no-viewer] [--idle-seconds N] [--wait-seconds N]")?;
+        .ok_or(
+            "Usage: mooring connect ID [--idle-seconds N] [--wait-seconds N] [--screen WxH@SCALE]",
+        )?;
     let mut options = ConnectOptions::default();
     let seconds = |flag: &str, value: Option<&String>| -> Result<u64, String> {
         value
@@ -351,6 +355,11 @@ fn parse_connect(args: &[String]) -> Result<(&str, ConnectOptions), String> {
             }
             "--wait-seconds" if options.wait_seconds.is_none() => {
                 options.wait_seconds = Some(seconds(flag, rest.first())?);
+                rest = &rest[1..];
+            }
+            "--screen" if options.screen.is_none() => {
+                let value = rest.first().ok_or("--screen requires WIDTHxHEIGHT@SCALE")?;
+                options.screen = Some(ssh_tunnel::ScreenSize::parse(value)?);
                 rest = &rest[1..];
             }
             other => return Err(format!("Unknown or repeated connect option '{other}'")),
@@ -653,6 +662,35 @@ fn connect_through_ssh(
                 );
             });
         }
+        if let (ServerKind::Vnc, Some(size)) = (server, options.screen) {
+            let (tunnel_done, desktop_ready, should_stop, config) =
+                (&tunnel_done, &desktop_ready, &should_stop, &config);
+            scope.spawn(move || {
+                let stop = || tunnel_done.load(Ordering::SeqCst) || should_stop();
+                while !desktop_ready.load(Ordering::SeqCst) {
+                    if stop() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                match ssh_tunnel::start_virtual_screen(&config.route, &config.ssh, size, &stop) {
+                    Ok(screen) => {
+                        emit(&json!({"event":"virtual_screen", "state":"ready", "name":screen.name,
+                                     "width":size.width, "height":size.height, "scale":size.scale,
+                                     "workspaces":screen.workspaces}));
+                        while !stop() {
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        let restored = screen.stop();
+                        emit(&json!({"event":"virtual_screen",
+                                     "state": if restored { "restored" } else { "restore_unconfirmed" }}));
+                    }
+                    Err(error) => {
+                        emit(&json!({"event":"virtual_screen", "state":"failed", "error":error}))
+                    }
+                }
+            });
+        }
         let outcome = run_tunnel_reporting(&config, connection, options, &should_stop, &|event| {
             if matches!(event, TunnelEvent::Ready(_)) {
                 desktop_ready.store(true, Ordering::SeqCst);
@@ -839,8 +877,20 @@ mod tests {
             ConnectOptions {
                 no_viewer: true,
                 idle_seconds: Some(5),
-                wait_seconds: Some(30)
+                wait_seconds: Some(30),
+                screen: None
             }
+        );
+        let with_screen = parse_connect(&args(&["abc", "--screen", "3024x1890@2"]))
+            .unwrap()
+            .1;
+        assert_eq!(
+            with_screen.screen,
+            Some(ssh_tunnel::ScreenSize {
+                width: 3024,
+                height: 1890,
+                scale: 2
+            })
         );
         assert_eq!(
             parse_connect(&args(&["abc"])).unwrap().1,
@@ -854,6 +904,9 @@ mod tests {
             vec!["abc", "--idle-seconds", "3601"],
             vec!["abc", "--wait-seconds", "-1"],
             vec!["abc", "--no-viewer", "--no-viewer"],
+            vec!["abc", "--screen"],
+            vec!["abc", "--screen", "3024x1890"],
+            vec!["abc", "--screen", "3024x1890@2", "--screen", "1920x1080@1"],
             vec!["abc", "extra"],
         ] {
             assert!(parse_connect(&args(&input)).is_err(), "{input:?}");

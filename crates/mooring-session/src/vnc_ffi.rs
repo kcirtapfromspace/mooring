@@ -7,8 +7,8 @@
 //!   every path. The password lives only in the session until it has been
 //!   sent once, and is never logged or stored.
 //! - Failed sign-ins are counted per saved connection, in memory, and a new
-//!   attempt is refused while the budget is spent, so the remote PAM lockout
-//!   is not reached.
+//!   attempt is refused while the budget is spent: a brake on guessing that
+//!   stays below common account lockouts.
 
 use crate::{Error, Result};
 use mooring_vnc::guard::{SignInDecision, SignInGuard, SignInLimits};

@@ -28,8 +28,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument("binary")
 parser.add_argument("target")
 parser.add_argument("--user-target")
-parser.add_argument("--expect-types", default="129,5,30")
+parser.add_argument("--expect-types", default="129,5")
 parser.add_argument("--expect-version", default="003.008")
+parser.add_argument("--virtual-screen", action="store_true",
+                    help="also add and remove a virtual screen on the desktop (changes it briefly)")
 options = parser.parse_args()
 binary = str(Path(options.binary).resolve())
 expected_types = [int(value) for value in options.expect_types.split(",")]
@@ -300,6 +302,37 @@ with tempfile.TemporaryDirectory(prefix="mooring-ssh-live-") as directory:
         assert result.returncode == 1 and refused["error"]["kind"] == "authentication_failed", refused
         assert elapsed < 8, f"desktop check with no key took {elapsed:.1f}s"
         record("desktop missing key", f"authentication_failed in {elapsed:.2f}s")
+
+    # 6. The virtual screen: in place while connected, restored afterwards,
+    #    including when Mooring is killed outright. It changes the desktop's
+    #    screens for a few seconds, then puts them back.
+    def screen_state():
+        script = ("uid=$(id -u alex); sig=$(ls -t /run/user/$uid/hypr | head -1); "
+                  "T() { runuser -u alex -- env XDG_RUNTIME_DIR=/run/user/$uid HYPRLAND_INSTANCE_SIGNATURE=$sig \"$@\"; }; "
+                  "T hyprctl monitors all | awk '/^Monitor /{print $2}' | tr '\\n' ' '; echo; "
+                  "T wayvncctl output-list | awk '$1 == \"*\" {print $2}'")
+        found = subprocess.run(["/usr/bin/ssh", "-o", "BatchMode=yes", "--", options.target, script],
+                               capture_output=True, text=True, timeout=30).stdout.split("\n")
+        return found[0].split(), found[1].strip().rstrip(":")
+    if options.virtual_screen:
+        before_monitors, before_capture = screen_state()
+        for kill in (False, True):
+            tunnel = Tunnel(directory, connection, "--wait-seconds", "8", "--screen", "1920x1200@1")
+            ready = tunnel.until("virtual_screen", timeout=30)
+            assert ready["state"] == "ready", ready
+            monitors, capture = screen_state()
+            assert "MOORING-1" in monitors and capture == "MOORING-1", (monitors, capture)
+            if kill:
+                tunnel.process.kill()
+                tunnel.process.wait(timeout=5)
+                time.sleep(3)
+            else:
+                final, code = tunnel.finish(timeout=30)
+                names = [event.get("state") for event in tunnel.events if event["event"] == "virtual_screen"]
+                assert names == ["ready", "restored"], tunnel.events
+            assert screen_state() == (before_monitors, before_capture), screen_state()
+        record("virtual screen", f"MOORING-1 1920x1200 captured while connected; {before_monitors} and "
+                                 f"{before_capture} restored after a clean stop and after SIGKILL")
 
     leftovers = [subprocess.run(["/usr/bin/pgrep", "-fl", "--", pattern], capture_output=True,
                                 text=True).stdout.strip()

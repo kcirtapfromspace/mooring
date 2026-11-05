@@ -1,6 +1,7 @@
-//! A budget for failed sign-ins, so Mooring never reaches a remote PAM
-//! lockout (on the motivating host, three failures lock the account for ten
-//! minutes). Pure policy: callers pass a monotonic clock in milliseconds.
+//! A budget for failed sign-ins: a brake on password guessing that also stays
+//! below the account lockouts many systems apply after a few failures. (wayvnc's
+//! own PAM service on the first test host has no lockout; others may.) Pure
+//! policy: callers pass a monotonic clock in milliseconds.
 
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -120,7 +121,7 @@ mod tests {
             }
         );
         guard.failed(host, 3_000);
-        // A third try could lock the account: wait until the first ages out.
+        // No third try until the first failure ages out.
         assert_eq!(
             guard.check(host, 4_000),
             SignInDecision::Wait {

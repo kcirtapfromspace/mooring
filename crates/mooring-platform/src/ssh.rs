@@ -14,10 +14,15 @@
 //! Arguments are always passed as an argv array, never through a shell.
 
 mod desktop;
+mod screen;
 
 pub use desktop::{
     DESKTOP_PROBE_SCRIPT, DESKTOP_PROBE_TIMEOUT, DesktopEvent, desktop_probe_args, probe_desktop,
     watch_desktop,
+};
+pub use screen::{
+    ScreenSize, VIRTUAL_SCREEN_READY_TIMEOUT, VIRTUAL_SCREEN_SCRIPT, VirtualScreen,
+    start_virtual_screen, virtual_screen_args,
 };
 
 use crate::parse_greeting;

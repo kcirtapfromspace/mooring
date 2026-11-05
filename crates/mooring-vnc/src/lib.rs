@@ -8,7 +8,8 @@
 //! - The password is used once, for the attempt the person started, and is
 //!   wiped from memory afterwards. It is never stored or logged, and a failed
 //!   attempt is never retried automatically. [`SignInGuard`] stops further
-//!   attempts after repeated failures, so a remote PAM lockout is not reached.
+//!   attempts after repeated failures: a brake on guessing that stays below
+//!   common account lockouts.
 //! - Picture: Raw, CopyRect and ZRLE into a 32-bit BGRX framebuffer, plus
 //!   desktop resizes. Input: X keysyms, pointer buttons and scrolling, with
 //!   every held key and button released when the session ends.

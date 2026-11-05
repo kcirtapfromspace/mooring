@@ -1267,7 +1267,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             desktopStates[mac.id] = nil
             // Mooring's own viewer connects; the tunnel waits up to 10 minutes
             // for sign-in and lingers 5 minutes between tries.
-            let extra = ["--no-viewer", "--wait-seconds", "600", "--idle-seconds", "300"]
+            let extra = ["--no-viewer", "--wait-seconds", "600", "--idle-seconds", "300"] + virtualScreenArguments()
             try tunnels.open(mac, executable: cli.executableURL(), extraArguments: extra)
         } catch {
             setStatus("Couldn’t start SSH", error.localizedDescription, error: true)
@@ -1300,6 +1300,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             if vncPending[mac.id] != nil { presentVNCSignIn(mac); return }
             lastMenuAction = "\(mac.name.prefix(40)): \(title)"
             setStatus("\(mac.name): \(title)", message, success: lock == "unlocked")
+        case "virtual_screen":
+            let width = event["width"] as? Int ?? 0, height = event["height"] as? Int ?? 0
+            switch event["state"] as? String {
+            case "ready":
+                lastMenuAction = "\(mac.name.prefix(40)): screen matched to this Mac"
+                if vncPending[mac.id] == nil {
+                    setStatus("\(mac.name): screen matched", "Showing \(mac.name) on a \(width)×\(height) virtual screen sized to this Mac. Its own screen comes back when you disconnect.", success: true)
+                }
+            case "failed":
+                setStatus("Showing \(mac.name)’s own screen", errorMessage ?? "Mooring couldn’t add a virtual screen there.")
+            case "restore_unconfirmed":
+                setStatus("Check \(mac.name)’s screen", "Mooring couldn’t confirm that \(mac.name)’s own screen was restored. It restores itself within about 20 seconds once the connection is gone.", error: true)
+            default:
+                return
+            }
         case "failed":
             tunnelEnded.insert(mac.id)
             vncPending[mac.id] = nil
@@ -1321,6 +1336,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         refreshStatusMenu()
     }
 
+    /// With Match this screen on, the Linux desktop shows on a virtual screen
+    /// the size of this Mac's full-screen area (below the camera housing), so
+    /// the viewer fills the screen. Rust checks the size.
+    private func virtualScreenArguments() -> [String] {
+        guard native.matchesScreen, let screen = NSScreen.main else { return [] }
+        let scale = screen.backingScaleFactor
+        guard scale == 1 || scale == 2 else { return [] }
+        let width = Int((screen.frame.width * scale).rounded()) & ~1
+        let height = Int(((screen.frame.height - screen.safeAreaInsets.top) * scale).rounded()) & ~1
+        return ["--screen", "\(width)x\(height)@\(Int(scale))"]
+    }
+
     /// Ask for the VNC server's sign-in, once the tunnel is ready. Rust decides
     /// whether another attempt is allowed; the password goes straight to Rust,
     /// which wipes the buffer before returning.
@@ -1331,14 +1358,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         if allowed == Int32(ML_SESSION_RATE_LIMITED) {
             let minutes = max(1, Int((wait + 59_999) / 60_000))
             tunnels.stop(mac.id)
-            setStatus("Waiting before another sign-in", "Two sign-ins to \(mac.name) failed in the last 10 minutes. So the account isn’t locked, Mooring waits about \(minutes) more minute\(minutes == 1 ? "" : "s"). You can also sign in at the computer.", error: true)
+            setStatus("Waiting before another sign-in", "Two sign-ins to \(mac.name) failed in the last 10 minutes, so Mooring waits about \(minutes) more minute\(minutes == 1 ? "" : "s") before another try. You can also sign in at the computer.", error: true)
             refreshStatusMenu()
             return
         }
         let desktop = desktopStates[mac.id]
         let sshUser = mac.ssh?.target.split(separator: "@", maxSplits: 1).count == 2 ? String(mac.ssh!.target.split(separator: "@")[0]) : nil
         var detail = "\(mac.name)’s VNC server asks for an account on that computer. Mooring sends it once, encrypted (RSA-AES) inside SSH, and doesn’t save it."
-        if remaining == 1 { detail += "\n\nOne more failed sign-in and Mooring waits 10 minutes, so the account isn’t locked." }
+        if remaining == 1 { detail += "\n\nAfter one more failed sign-in, Mooring waits 10 minutes before another try." }
         if let desktop { detail += "\n\n\(desktop.title): \(desktop.message)" }
         setStatus("Sign in to \(mac.name)", "Waiting for the account name and password.")
         VNCSignIn.prompt(name: mac.name, username: sshUser ?? desktop?.user ?? "", detail: detail) { [weak self] answer in
