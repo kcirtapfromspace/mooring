@@ -8,3 +8,6 @@ license.workspace = true
 mooring-core = { path = "../mooring-core" }
 libc = "0.2"
 serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -718,6 +718,37 @@ int32_t ml_telemetry_take_tuning(MLTuning *out);
 int32_t ml_tuning_defaults(MLTuning *out);
 int32_t ml_tuning_merge(const MLTuning *current, const MLTuning *update, MLTuning *out);
 
+/* VNC viewer for servers that are not Macs, such as wayvnc on Linux. It
+ * connects only to 127.0.0.1:port, the local end of Mooring's SSH tunnel, and
+ * signs in with RSA-AES (never Apple Diffie-Hellman). ml_vnc_open copies the
+ * password and overwrites the caller's buffer with zeros before returning, on
+ * every path; the password is sent once and never stored or logged. Failed
+ * sign-ins are counted per host_key (a saved connection's ID), in memory: after
+ * two within ten minutes, check and open return ML_SESSION_RATE_LIMITED. Events
+ * are JSON ("connecting", "negotiated", "credentials_requested", "connected",
+ * "resized", "bell", then "closed" with an optional error {kind, message}).
+ * Pixels are BGRA bytes with alpha always 255 (kCVPixelFormatType_32BGRA).
+ * Buttons: 1 left, 2 middle, 4 right. Scroll is in lines, positive right and
+ * down. Close releases held keys and buttons first. */
+enum { ML_VNC_EVENT_CAPACITY = 4096 };
+enum { ML_VNC_COPIED = 0, ML_VNC_UNCHANGED = 1, ML_VNC_RESIZED = 2, ML_VNC_NOT_READY = 3 };
+typedef struct { uint32_t x, y, width, height; } MLVncRect;
+/* Totals since the session started: updates, rectangles, bytes received. */
+typedef struct { uint64_t updates, rectangles, bytes; } MLVncStats;
+int32_t ml_vnc_stats(uint64_t id, MLVncStats *stats);
+int32_t ml_vnc_sign_in_check(const char *host_key, uint64_t *retry_after_ms, uint32_t *remaining);
+int32_t ml_vnc_open(const char *host_key, uint16_t port, const char *username,
+                    uint8_t *password, size_t password_length, uint64_t *id);
+int32_t ml_vnc_poll_event(uint64_t id, char *out, size_t capacity, size_t *length);
+int32_t ml_vnc_frame_size(uint64_t id, uint32_t *width, uint32_t *height);
+int32_t ml_vnc_copy_changes(uint64_t id, uint8_t *pixels, size_t stride, uint32_t width,
+                            uint32_t height, MLVncRect *region);
+int32_t ml_vnc_key(uint64_t id, uint16_t key_code, const char *characters, uint8_t down);
+int32_t ml_vnc_pointer(uint64_t id, double x, double y, uint8_t buttons);
+int32_t ml_vnc_scroll(uint64_t id, double dx, double dy);
+int32_t ml_vnc_release_all(uint64_t id);
+int32_t ml_vnc_close(uint64_t id);
+
 #ifdef __cplusplus
 }
 #endif

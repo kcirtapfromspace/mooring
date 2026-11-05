@@ -30,6 +30,7 @@ mod policy;
 mod telemetry;
 mod transport;
 mod video;
+pub mod vnc_ffi;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]

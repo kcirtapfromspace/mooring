@@ -3,18 +3,13 @@
 //! This crate does not capture, encode, transport, authenticate, or display video.
 //! The quality scenarios contain simulated measurements, not benchmarks.
 
+pub mod desktop;
 mod mailbox;
-pub mod network;
 mod quality;
 mod reconnect;
 pub mod tunnel;
 
 pub use mailbox::{LatestFrameMailbox, MailboxClosed, MailboxRead, MailboxStats};
-pub use network::{
-    NetworkAction, NetworkEvaluation, NetworkEvaluationRequest, NetworkPolicyState, NetworkReason,
-    NetworkTransport, ProbeEvidence, ProbeStatus, RemoteDesktopMode, TargetProbe, TransportContext,
-    VpnStatus, evaluate_network,
-};
 pub use quality::{
     DecisionReason, NetworkSample, QualityController, QualityDecision, QualityLevel,
     QualityPreference, QualityProfile, ScenarioResult, ScenarioStep, TelemetryStatus,

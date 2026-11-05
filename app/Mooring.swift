@@ -10,13 +10,15 @@ struct SavedMac: Decodable {
     /// With `ssh`, the VNC address as seen from the SSH host.
     let host: String
     let port: UInt16
-    /// "mac" for Apple Screen Sharing, "vnc" for any other VNC server. Older saves omit it.
+    /// "vnc" for a VNC server such as wayvnc on Linux. "mac", or no value in
+    /// older saves, marks an address saved for Apple Screen Sharing, which
+    /// Mooring no longer opens; it is kept so the person can pair or remove it.
     let server: String?
     let ssh: SSHHop?
 
     var isMac: Bool { (server ?? "mac") == "mac" }
-    /// Display modes and Accessibility supervision are only for direct Mac connections.
-    var usesAppleAutomation: Bool { isMac && ssh == nil }
+    /// Mooring's own viewer opens VNC servers that are not Macs, through SSH.
+    var opensInMooring: Bool { !isMac && ssh != nil }
 
     var endpoint: String {
         let address = host.contains(":") ? "[\(host)]" : host
@@ -32,6 +34,21 @@ private struct HostInspection: Decodable {
     let tcp_connect_ms: Double?
     let rfb_version: String?
     let note: String?
+    /// SSH connections to other VNC servers: whether the desktop is locked.
+    let desktop: DesktopReport?
+    let desktop_error: DesktopError?
+}
+
+/// Rust decides the wording; the app only shows it.
+private struct DesktopReport: Decodable {
+    let lock: String
+    let title: String
+    let message: String
+    let notes: [String]?
+}
+
+private struct DesktopError: Decodable {
+    let message: String
 }
 
 struct CLIError: LocalizedError {
@@ -155,34 +172,37 @@ func stack(_ views: [NSView], orientation: NSUserInterfaceLayoutOrientation = .v
     return view
 }
 
-/// One row of the Connections list: an Apple Screen Sharing Mac saved by the
-/// CLI store, or a Mac paired for a Mooring session.
+/// One row of the Connections list: a Mac paired for a Mooring session, or a
+/// connection saved by the CLI store (a Linux desktop reached through SSH, or
+/// an address left from Apple Screen Sharing, which now needs pairing).
 private enum ConnectionRow {
-    case screenSharing(SavedMac)
+    case saved(SavedMac)
     case mooring(NativePeer)
 
-    static func screenSharingID(_ id: String) -> String { "screen-sharing:" + id }
+    static func savedID(_ id: String) -> String { "saved:" + id }
     var id: String {
         switch self {
-        case .screenSharing(let mac): return Self.screenSharingID(mac.id)
+        case .saved(let mac): return Self.savedID(mac.id)
         case .mooring(let peer): return "mooring:" + peer.id
         }
     }
     var name: String {
         switch self {
-        case .screenSharing(let mac): return mac.name
+        case .saved(let mac): return mac.name
         case .mooring(let peer): return peer.name
         }
     }
     var detail: String {
         switch self {
-        case .screenSharing(let mac): return "Screen Sharing · " + mac.endpoint
+        case .saved(let mac) where mac.opensInMooring: return "Linux · " + mac.endpoint
+        case .saved(let mac) where mac.isMac: return "Needs pairing · " + mac.endpoint
+        case .saved(let mac): return "Needs SSH · " + mac.endpoint
         case .mooring(let peer): return "Paired · " + peer.address
         }
     }
     var symbol: String {
         switch self {
-        case .screenSharing: return "desktopcomputer"
+        case .saved(let mac): return mac.opensInMooring ? "display" : "exclamationmark.triangle"
         case .mooring: return "bolt.horizontal.circle"
         }
     }
@@ -221,13 +241,12 @@ private final class AddMacController: NSWindowController, NSTextFieldDelegate {
     let hostField: NSTextField = MooringPrivacy.isEnabled ? NSSecureTextField(string: "") : NSTextField(string: "")
     let portField = NSTextField(string: "5900")
     let sshField: NSTextField = MooringPrivacy.isEnabled ? NSSecureTextField(string: "") : NSTextField(string: "")
-    let serverPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     let errorLabel = label("", size: 12, color: .systemRed)
     let saveButton = NSButton(title: "Connect", target: nil, action: nil)
     let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let optionsButton = NSButton(title: "Options", target: nil, action: nil)
     private var optionsForm: NSGridView!
-    /// Name, address, port, SSH target (may be empty), server ("mac" or "vnc").
+    /// Name, VNC address on the SSH host (may be empty), port, SSH target, server ("vnc").
     var onSave: ((String, String, String, String, String) -> Void)?
     var onCancel: (() -> Void)?
 
@@ -235,33 +254,29 @@ private final class AddMacController: NSWindowController, NSTextFieldDelegate {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 330),
                               styleMask: [.titled], backing: .buffered, defer: false)
         super.init(window: window)
-        window.title = "Add a Mac"
+        window.title = "Add a Linux Desktop"
         MooringAppearance.prepare(window)
-        let heading = MooringAppearance.header("Add a Mac", subtitle: "Connect using Apple Screen Sharing.")
-        let subtitle = label("Enable Screen Sharing there. Enter its address here.", color: .secondaryLabelColor)
+        let heading = MooringAppearance.header("Add a Linux Desktop", subtitle: "Opens in Mooring through SSH.")
+        let subtitle = label("Run a VNC server such as wayvnc there. Enter how you reach it with SSH. Macs pair instead: Pair a Mac.", color: .secondaryLabelColor)
         for field in [nameField, hostField, portField, sshField] {
             field.delegate = self
             field.controlSize = .large
         }
         nameField.placeholderString = "Optional"
-        hostField.placeholderString = "Mac-Studio.local or 192.168.1.20"
-        nameField.setAccessibilityLabel("Mac name")
-        hostField.setAccessibilityLabel("Hostname or IP address")
-        portField.setAccessibilityLabel("Screen Sharing port")
-        sshField.placeholderString = "Optional: an ~/.ssh/config alias or user@host"
-        sshField.setAccessibilityLabel("Reach the server through SSH")
-        sshField.toolTip = "Mooring uses your SSH keys and agent and never asks for a password. With SSH, the address is as seen from the SSH host; leave it empty for 127.0.0.1."
-        serverPopup.addItems(withTitles: ["Mac (Apple Screen Sharing)", "Other VNC server"])
-        serverPopup.setAccessibilityLabel("Server type")
-        serverPopup.toolTip = "Choose Other VNC server for Linux or Windows. Mac display modes are never requested from it."
+        hostField.placeholderString = "127.0.0.1 on the SSH host"
+        nameField.setAccessibilityLabel("Desktop name")
+        hostField.setAccessibilityLabel("VNC address as seen from the SSH host")
+        portField.setAccessibilityLabel("VNC port")
+        sshField.placeholderString = "An ~/.ssh/config alias or user@host"
+        sshField.setAccessibilityLabel("SSH target")
+        sshField.toolTip = "SSH uses your keys and agent and never asks for a password. You sign in to the desktop itself when you connect."
         errorLabel.maximumNumberOfLines = 3
         errorLabel.lineBreakMode = .byTruncatingTail
-        let form = NSGridView(views: [[label("Address"), hostField]])
+        let form = NSGridView(views: [[label("SSH"), sshField]])
         optionsForm = NSGridView(views: [
             [label("Name"), nameField],
-            [label("Port"), portField],
-            [label("SSH"), sshField],
-            [label("Server"), serverPopup]
+            [label("Address"), hostField],
+            [label("Port"), portField]
         ])
         for grid in [form, optionsForm!] {
             grid.translatesAutoresizingMaskIntoConstraints = false
@@ -279,7 +294,7 @@ private final class AddMacController: NSWindowController, NSTextFieldDelegate {
         optionsButton.imagePosition = .imageLeading
         optionsButton.target = self
         optionsButton.action = #selector(toggleOptions)
-        optionsButton.setAccessibilityLabel("More Options: optional name and port")
+        optionsButton.setAccessibilityLabel("More Options: optional name, VNC address and port")
         MooringAppearance.primary(saveButton)
         saveButton.keyEquivalent = "\r"
         saveButton.target = self
@@ -306,20 +321,17 @@ private final class AddMacController: NSWindowController, NSTextFieldDelegate {
             errorLabel.widthAnchor.constraint(equalTo: content.widthAnchor),
             actions.widthAnchor.constraint(equalTo: content.widthAnchor)
         ])
-        window.initialFirstResponder = hostField
+        window.initialFirstResponder = sshField
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     func controlTextDidChange(_ obj: Notification) { validate() }
     private func validate() {
-        let host = hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let ssh = sshField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        saveButton.isEnabled = !host.isEmpty || !ssh.isEmpty
-        hostField.placeholderString = ssh.isEmpty ? "Mac-Studio.local or 192.168.1.20" : "127.0.0.1 on the SSH host"
+        saveButton.isEnabled = !ssh.isEmpty
     }
     func setBusy(_ busy: Bool) {
         [nameField, hostField, portField, sshField].forEach { $0.isEnabled = !busy }
-        serverPopup.isEnabled = !busy
         optionsButton.isEnabled = !busy
         cancelButton.isEnabled = !busy
         saveButton.isEnabled = !busy
@@ -332,54 +344,31 @@ private final class AddMacController: NSWindowController, NSTextFieldDelegate {
         let address = hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let ssh = sshField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fallback = address.isEmpty ? ssh : address
-        onSave?(name.isEmpty ? String(fallback.prefix(80)) : name, address, portField.stringValue,
-                ssh, serverPopup.indexOfSelectedItem == 1 ? "vnc" : "mac")
+        onSave?(name.isEmpty ? String(ssh.prefix(80)) : name, address, portField.stringValue, ssh, "vnc")
     }
     @objc private func toggleOptions() {
         let expanded = optionsButton.state == .on
         optionsForm.isHidden = !expanded
         optionsButton.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
-        window?.setContentSize(NSSize(width: 460, height: expanded ? 500 : 330))
+        window?.setContentSize(NSSize(width: 460, height: expanded ? 450 : 330))
     }
     @objc private func cancel() { onCancel?() }
-}
-
-/// Automation owns policy and session actions; the shell only renders this state.
-/// Coordinator callbacks and completions must be delivered on the main thread.
-struct AutomationMenuState {
-    var title: String = "Ready to connect"
-    var detail: String = "Add a Mac to get started. Auto mode and full screen are the defaults."
-    var isConfigured: Bool = false
-    var isPaused: Bool = false
-    var isBusy: Bool = false
-}
-
-protocol MooringAutomationService: AnyObject {
-    var state: AutomationMenuState { get }
-    var onStateChange: ((AutomationMenuState) -> Void)? { get set }
-    var selectedPreference: String { get }
-    func setPreference(_ preference: String)
-    func start(connections: [SavedMac])
-    func updateConnections(_ connections: [SavedMac])
-    func togglePause()
-    func showSettings(connections: [SavedMac], parentWindow: NSWindow?)
-    func connect(_ connection: SavedMac, completion: @escaping (Result<Data, CLIError>) -> Void)
-    func stop()
-    func refreshPrivacy()
 }
 
 private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation, NSMenuDelegate {
     private var window: NSWindow!
     private let cli = CLIClient()
     private let tunnels = SSHTunnels()
+    /// Mooring's own viewers for VNC servers that are not Macs, by connection ID.
+    private var vncViewers: [String: VNCViewerWindow] = [:]
+    /// Tunnels that are ready and waiting for the sign-in prompt: local port.
+    private var vncPending: [String: UInt16] = [:]
+    /// The latest read-only desktop check per connection: user, title, message.
+    private var desktopStates: [String: (user: String?, title: String, message: String)] = [:]
     private var tunnelEnded = Set<String>()
-    private lazy var automation: MooringAutomationService = AutomationCoordinator(cli: cli)
     private lazy var native = NativeSessionCoordinator()
     private let updater = MooringUpdater()
     private var settingsWindow: MooringSettingsWindow?
-    private var automationState = AutomationMenuState()
-    private var automationStarted = false
     private var initialLoad = true
     private var statusItem: NSStatusItem!
     private var statusShowsScreenSharing: Bool?
@@ -387,7 +376,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     private let statusMenu = NSMenu()
     private var lastMenuAction: String?
     private let table = NSTableView()
-    /// Apple Screen Sharing Macs; automation uses only these.
+    /// Connections saved by the CLI store: Linux desktops through SSH, and
+    /// addresses left from Apple Screen Sharing.
     private var connections: [SavedMac] = []
     private var rows: [ConnectionRow] = []
     private var busy = false
@@ -418,7 +408,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         rows.indices.contains(table.selectedRow) ? rows[table.selectedRow] : nil
     }
     private var selectedMac: SavedMac? {
-        if case .screenSharing(let mac) = selectedRow { return mac }
+        if case .saved(let mac) = selectedRow { return mac }
         return nil
     }
     private var selectedPeer: NativePeer? {
@@ -432,12 +422,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         buildMenu()
         buildWindow()
         buildStatusItem()
-        automation.onStateChange = { [weak self] state in
-            guard let self else { return }
-            self.automationState = state
-            self.updateControls()
-        }
-        automationState = automation.state
         native.onChange = { [weak self] in
             self?.updateControls()
             self?.refreshSettings()
@@ -469,7 +453,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         return true
     }
 
-    func applicationWillTerminate(_ notification: Notification) { automation.stop(); native.stop(); tunnels.stopAll() }
+    func applicationWillTerminate(_ notification: Notification) {
+        native.stop()
+        // Release held keys on the remote desktops before the tunnels close.
+        for viewer in vncViewers.values where viewer.view.sessionID != 0 { _ = ml_vnc_close(viewer.view.sessionID) }
+        tunnels.stopAll()
+    }
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         let menu = NSMenu()
@@ -505,11 +494,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         let heading = NSMenuItem(title: "Mooring", action: nil, keyEquivalent: "")
         heading.isEnabled = false
         statusMenu.addItem(heading)
-        let status = NSMenuItem(title: MooringPrivacy.redact(native.status ?? automationState.title), action: nil, keyEquivalent: "")
+        let idle = connections.isEmpty && native.peers.isEmpty ? "Ready to pair" : "Ready to connect"
+        let status = NSMenuItem(title: MooringPrivacy.redact(native.status ?? idle), action: nil, keyEquivalent: "")
         status.isEnabled = false
-        status.toolTip = MooringPrivacy.redact(automationState.detail)
         statusMenu.addItem(status)
-        let statusDescription = MooringPrivacy.redact("Mooring — \(native.status ?? automationState.title)")
+        let statusDescription = MooringPrivacy.redact("Mooring — \(native.status ?? idle)")
         statusItem.button?.toolTip = statusDescription
         statusItem.button?.setAccessibilityLabel(statusDescription)
         if statusShowsScreenSharing != native.isSharingScreen {
@@ -522,7 +511,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             statusMenu.addItem(recent)
         }
         statusMenu.addItem(.separator())
-        let available = !busy && !automationState.isBusy && addController == nil && window?.attachedSheet == nil
+        let available = !busy && addController == nil && window?.attachedSheet == nil
         MooringStatusMenu.addRecentMacs(native.peers, connectedPeerID: native.connectedPeerID,
                                        to: statusMenu, target: self, action: #selector(connectNativePeer(_:)),
                                        enabled: available)
@@ -536,15 +525,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             stop.target = self; statusMenu.addItem(stop)
         }
         statusMenu.addItem(.separator())
-        let connectMenuItem = NSMenuItem(title: "Apple Screen Sharing", action: nil, keyEquivalent: "")
-        let connectMenu = NSMenu()
-        connectMenu.autoenablesItems = false
-        if connections.isEmpty {
-            let empty = NSMenuItem(title: "No saved Macs", action: nil, keyEquivalent: "")
-            empty.isEnabled = false
-            connectMenu.addItem(empty)
-        } else {
-            for mac in connections {
+        // Linux desktops open in Mooring's own viewer, like paired Macs.
+        let desktops = connections.filter(\.opensInMooring)
+        if !desktops.isEmpty {
+            let heading = NSMenuItem(title: "Linux Desktops", action: nil, keyEquivalent: "")
+            heading.isEnabled = false
+            statusMenu.addItem(heading)
+            for mac in desktops {
                 let name = MooringPrivacy.name(mac.name, id: mac.id)
                 let title = name.count > 50 ? String(name.prefix(49)) + "…" : name
                 let item = NSMenuItem(title: title, action: #selector(connectFromMenu(_:)), keyEquivalent: "")
@@ -552,31 +539,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
                 item.representedObject = mac.id
                 item.toolTip = MooringPrivacy.redact("\(mac.name) — \(mac.endpoint)")
                 item.isEnabled = available
-                connectMenu.addItem(item)
+                if let viewer = vncViewers[mac.id], !viewer.isClosed { item.state = .on }
+                statusMenu.addItem(item)
             }
+            statusMenu.addItem(.separator())
         }
-        connectMenuItem.submenu = connectMenu
-        connectMenuItem.isEnabled = !connections.isEmpty && available
-        statusMenu.addItem(connectMenuItem)
         let openItem = NSMenuItem(title: "Your Macs…", action: #selector(showConnections), keyEquivalent: "o")
         openItem.target = self
         statusMenu.addItem(openItem)
-        let addItem = NSMenuItem(title: "Add Mac…", action: #selector(addMac), keyEquivalent: "n")
+        let addItem = NSMenuItem(title: "Add Linux Desktop…", action: #selector(addMac), keyEquivalent: "n")
         addItem.target = self
         addItem.isEnabled = available
         statusMenu.addItem(addItem)
         statusMenu.addItem(.separator())
-        if automationState.isConfigured && !AppleSession.isTrusted {
-            let permission = NSMenuItem(title: "Enable Full Screen & Auto Switching…", action: #selector(enableSessionControl), keyEquivalent: "")
-            permission.target = self
-            permission.isEnabled = available
-            statusMenu.addItem(permission)
-        }
-        let pauseItem = NSMenuItem(title: automationState.isPaused ? "Resume Automation" : "Pause Automation",
-                                   action: #selector(toggleAutomation), keyEquivalent: "")
-        pauseItem.target = self
-        pauseItem.isEnabled = automationState.isConfigured
-        statusMenu.addItem(pauseItem)
         let settings = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         settings.target = self
         settings.toolTip = "Sharing, viewing, paired Macs and updates."
@@ -618,18 +593,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
 
     @objc private func connectFromMenu(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String,
-              let row = rows.firstIndex(where: { $0.id == ConnectionRow.screenSharingID(id) }),
-              !busy, !automationState.isBusy, window.attachedSheet == nil else { return }
+              let row = rows.firstIndex(where: { $0.id == ConnectionRow.savedID(id) }),
+              !busy, window.attachedSheet == nil else { return }
         table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         connect()
     }
-
-    @objc private func toggleAutomation() {
-        guard automationState.isConfigured else { return }
-        automation.togglePause()
-    }
-
-    @objc private func enableSessionControl() { AppleSession.requestPermission() }
 
     private func buildMenu() {
         let menu = NSMenu()
@@ -905,12 +873,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         connectButton.keyEquivalent = "\r"
         connectButton.target = self
         connectButton.action = #selector(connect)
-        connectButton.setAccessibilityLabel("Connect to selected Mac using Apple Screen Sharing")
+        connectButton.setAccessibilityLabel("Connect to the selected Mac or Linux desktop")
         checkButton.bezelStyle = .rounded
         checkButton.controlSize = .large
         checkButton.target = self
         checkButton.action = #selector(checkConnection)
-        checkButton.toolTip = "Check the network connection and Screen Sharing protocol without signing in"
+        checkButton.toolTip = "Check the SSH route, the VNC server and whether the desktop is locked, without signing in"
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
@@ -964,14 +932,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         return cell
     }
 
-    /// Mooring pairings first, then Apple Screen Sharing Macs. Keeps the
+    /// Mooring pairings first, then saved desktops. Keeps the
     /// selection when the same entry is still present.
     private func rebuildRows(select id: String? = nil) {
         let selection = id ?? selectedRow?.id
-        rows = native.peers.map(ConnectionRow.mooring) + connections.map(ConnectionRow.screenSharing)
+        rows = native.peers.map(ConnectionRow.mooring) + connections.map(ConnectionRow.saved)
         for row in rows {
             let addresses: [String]
-            switch row { case .mooring(let peer): addresses = peer.addresses; case .screenSharing(let mac): addresses = [mac.host, mac.endpoint] + (mac.ssh.map { [$0.target] } ?? []) }
+            switch row { case .mooring(let peer): addresses = peer.addresses; case .saved(let mac): addresses = [mac.host, mac.endpoint] + (mac.ssh.map { [$0.target] } ?? []) }
             MooringPrivacy.register(name: row.name, id: row.id, addresses: addresses)
         }
         countLabel.stringValue = String(rows.count)
@@ -984,7 +952,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         }
         updateSelection()
     }
-    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { !busy && !automationState.isBusy && addController == nil }
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { !busy && addController == nil }
     func tableViewSelectionDidChange(_ notification: Notification) { updateSelection() }
 
     private func updateSelection() {
@@ -999,14 +967,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             addressLabel.toolTip = MooringPrivacy.isEnabled ? "There’s no route like home." : peer.addresses.joined(separator: "\n")
             setStatus("Ready", "On \(peer.name), open Mooring → Share this Mac → Start sharing.")
         } else if let mac = selectedMac {
-            connectionKind.stringValue = "Screen Sharing"
-            connectionIcon.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: nil)
-            connectionIcon.contentTintColor = MooringBrand.accent
+            connectionKind.stringValue = mac.opensInMooring ? "Linux desktop" : mac.isMac ? "Needs pairing" : "Needs SSH"
+            connectionIcon.image = NSImage(systemSymbolName: mac.opensInMooring ? "display" : "exclamationmark.triangle", accessibilityDescription: nil)
+            connectionIcon.contentTintColor = mac.opensInMooring ? MooringBrand.accent : .systemOrange
             titleLabel.stringValue = MooringPrivacy.name(mac.name, id: mac.id)
             titleLabel.toolTip = mac.name
             addressLabel.stringValue = MooringPrivacy.isEnabled ? MooringPrivacy.demoHostname(id: mac.id) : mac.endpoint
             addressLabel.toolTip = MooringPrivacy.isEnabled ? "There’s no route like home." : mac.endpoint
-            setStatus("Ready", "Sign in with this Mac’s account after connecting.")
+            if mac.opensInMooring {
+                setStatus("Ready", "Opens in Mooring through SSH. You sign in with that computer’s account.")
+            } else if mac.isMac {
+                setStatus("Pair this Mac", "Mooring no longer uses Apple Screen Sharing. On \(mac.name), open Mooring → Share this Mac, then choose Pair a Mac here. You can remove this saved address.")
+            } else {
+                setStatus("Needs SSH", "Mooring’s viewer reaches VNC servers only through SSH. Remove this entry and add it again with an SSH target.")
+            }
         } else {
             connectionKind.stringValue = "Within reach"
             connectionIcon.image = MooringBrand.image(size: 64)
@@ -1015,7 +989,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             titleLabel.toolTip = nil
             addressLabel.stringValue = "Connect there. Work here."
             addressLabel.toolTip = nil
-            setStatus("Pair once. Return anytime.", "On your other Mac, open Mooring → Share this Mac. Start sharing and copy its code.\n\nFor Apple Screen Sharing, use an address.")
+            setStatus("Pair once. Return anytime.", "On your other Mac, open Mooring → Share this Mac. Start sharing and copy its code.\n\nFor a Linux desktop, add it with its SSH target.")
         }
         computerInfo.arrangedSubviews.forEach { $0.removeFromSuperview() }
         computerInfoScroll.isHidden = selectedRow == nil
@@ -1033,7 +1007,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
                     info.widthAnchor.constraint(equalTo: computerInfo.widthAnchor).isActive = true
                 }
             } else if let mac = selectedMac {
-                computerInfo.addArrangedSubview(label("\(NativeNetworkInfo.describe(mac.host)) · \(mac.host)\nScreen Sharing · TCP port \(mac.port)", size: 12, color: .secondaryLabelColor))
+                let route = mac.ssh.map { "Through SSH \($0.target)\nVNC \(mac.host):\(mac.port) on that host" }
+                    ?? "\(NativeNetworkInfo.describe(mac.host)) · \(mac.host)\nTCP port \(mac.port)"
+                computerInfo.addArrangedSubview(label(route, size: 12, color: .secondaryLabelColor))
             }
         }
         updateControls()
@@ -1071,16 +1047,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     private func updateControls() {
-        let available = !busy && !automationState.isBusy && addController == nil && window?.attachedSheet == nil
+        let available = !busy && addController == nil && window?.attachedSheet == nil
         connectButton.isEnabled = available
         connectButton.action = selectedRow == nil ? #selector(connectNative) : #selector(connect)
         connectButton.title = busy ? "Connecting…" : selectedRow == nil ? "Pair a Mac…" : (selectedPeer.map { $0.id == native.connectedPeerID } ?? false) ? "Return" : "Connect"
         connectButton.setAccessibilityLabel(selectedRow == nil ? "Pair a Mac using a Mooring code" : MooringPrivacy.redact("Connect to \(selectedRow?.name ?? "Mac")"))
         checkButton.isHidden = selectedPeer != nil
-        checkButton.title = selectedRow == nil ? "Use an address…" : "Check"
+        checkButton.title = selectedRow == nil ? "Add Linux Desktop…" : "Check"
         checkButton.action = selectedRow == nil ? #selector(addMac) : #selector(checkConnection)
-        checkButton.toolTip = selectedRow == nil ? "Add a hostname or IP address for Apple Screen Sharing." : "Check TCP reachability and the Screen Sharing greeting without signing in."
-        checkButton.isEnabled = available && (selectedRow == nil || selectedMac != nil)
+        checkButton.toolTip = selectedRow == nil ? "Add a Linux desktop that you reach with SSH." : "Check the SSH route, the VNC server and the desktop’s lock state without signing in."
+        checkButton.isEnabled = available && (selectedRow == nil || selectedMac?.opensInMooring == true)
         pairButton.isHidden = selectedRow == nil
         pairButton.isEnabled = available
         shareButton.isEnabled = available
@@ -1094,23 +1070,23 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         if menuItem.action == #selector(showConnections) { return true }
         if menuItem.action == #selector(showSettings) { return true }
         if [#selector(connectNative), #selector(shareNative)].contains(menuItem.action) {
-            return !busy && !automationState.isBusy && addController == nil && window.attachedSheet == nil
+            return !busy && addController == nil && window.attachedSheet == nil
         }
         if menuItem.action == #selector(addMac) {
-            return !busy && !automationState.isBusy && addController == nil && window.attachedSheet == nil
+            return !busy && addController == nil && window.attachedSheet == nil
         }
         if [#selector(connect), #selector(removeMac)].contains(menuItem.action) {
-            return !busy && !automationState.isBusy && selectedRow != nil && window.attachedSheet == nil
+            return !busy && selectedRow != nil && window.attachedSheet == nil
         }
         if menuItem.action == #selector(checkConnection) {
-            return !busy && !automationState.isBusy && selectedMac != nil && window.attachedSheet == nil
+            return !busy && selectedMac != nil && window.attachedSheet == nil
         }
         return window?.attachedSheet == nil
     }
 
-    /// `id` selects a saved Screen Sharing Mac by its store ID.
+    /// `id` selects a saved connection by its store ID.
     private func reloadConnections(select id: String? = nil, onLoaded: (() -> Void)? = nil) {
-        let selection = id.map(ConnectionRow.screenSharingID) ?? selectedRow?.id
+        let selection = id.map(ConnectionRow.savedID) ?? selectedRow?.id
         setBusy(true)
         cli.run(["list"]) { [weak self] result in
             guard let self else { return }
@@ -1126,14 +1102,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
                 do {
                     self.connections = try JSONDecoder().decode([SavedMac].self, from: data)
                     self.rebuildRows(select: selection)
-                    // SSH and non-Mac connections never enter Mac mode automation.
-                    let automated = self.connections.filter(\.usesAppleAutomation)
-                    if self.automationStarted {
-                        self.automation.updateConnections(automated)
-                    } else {
-                        self.automationStarted = true
-                        self.automation.start(connections: automated)
-                    }
                     if self.initialLoad && self.rows.isEmpty { self.showConnections() }
                     self.initialLoad = false
                     onLoaded?()
@@ -1148,12 +1116,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     @objc private func addMac() {
-        guard !busy, !automationState.isBusy, addController == nil, window.attachedSheet == nil else { return }
+        guard !busy, addController == nil, window.attachedSheet == nil else { return }
         showConnections()
         let controller = AddMacController()
         addController = controller
         controller.onCancel = { [weak self] in self?.closeAddSheet() }
-        controller.onSave = { [weak self, weak controller] name, host, port, ssh, server in
+        controller.onSave = { [weak self, weak controller] name, host, port, ssh, _ in
             guard let self, let controller, !self.busy else { return }
             let portText = port.trimmingCharacters(in: .whitespacesAndNewlines)
             guard portText.isEmpty || (UInt16(portText).map { $0 > 0 } ?? false) else {
@@ -1163,10 +1131,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             self.setBusy(true)
             controller.setBusy(true)
             var arguments = ["add", "--name", name.trimmingCharacters(in: .whitespacesAndNewlines),
-                             "--port", portText.isEmpty ? "5900" : portText, "--server", server]
+                             "--port", portText.isEmpty ? "5900" : portText, "--server", "vnc", "--ssh", ssh]
             let address = host.trimmingCharacters(in: .whitespacesAndNewlines)
             if !address.isEmpty { arguments += ["--host", address] }
-            if !ssh.isEmpty { arguments += ["--ssh", ssh] }
             self.cli.run(arguments) { [weak self, weak controller] result in
                 guard let self, let controller else { return }
                 self.setBusy(false)
@@ -1203,7 +1170,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     @objc private func removeMac() {
-        guard !busy, !automationState.isBusy, window.attachedSheet == nil else { return }
+        guard !busy, window.attachedSheet == nil else { return }
         if let peer = selectedPeer { forgetPairing(peer); return }
         guard let mac = selectedMac else { return }
         let alert = NSAlert()
@@ -1245,7 +1212,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     @objc private func connect() {
-        guard !busy, !automationState.isBusy, window.attachedSheet == nil else { return }
+        guard !busy, window.attachedSheet == nil else { return }
         if let peer = selectedPeer {
             lastMenuAction = "Connecting to \(peer.name.prefix(40))…"
             setStatus("Connecting…", "Connecting to \(peer.name). If it does not open, make sure \(peer.name) is sharing.")
@@ -1254,56 +1221,54 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             return
         }
         guard let mac = selectedMac else { return }
-        if mac.ssh != nil { connectThroughSSH(mac); return }
-        if !mac.isMac { connectWithoutAutomation(mac); return }
-        lastMenuAction = "Opening \(mac.name.prefix(40))…"
-        setBusy(true)
-        setStatus("Opening Screen Sharing…", "Preparing a connection to \(mac.name).")
-        automation.connect(mac) { [weak self] result in
-            guard let self else { return }
-            self.setBusy(false)
-            switch result {
-            case .failure(let error):
-                self.lastMenuAction = "Couldn’t open Screen Sharing"
-                self.setStatus("Couldn’t open Screen Sharing", error.message, error: true)
-                self.showConnections()
-            case .success:
-                self.lastMenuAction = "Screen Sharing opened"
-                self.setStatus("Screen Sharing opened", "Sign in with your remote Mac’s account if asked. Connection status and Pause are in the Mooring menu.", success: true)
-            }
-            self.refreshStatusMenu()
-        }
+        guard mac.opensInMooring else { explainNotConnectable(mac); return }
+        connectThroughSSH(mac)
     }
 
-    /// A VNC server that is not a Mac: a plain URL, no display modes, no Accessibility.
-    private func connectWithoutAutomation(_ mac: SavedMac) {
-        lastMenuAction = "Opening \(mac.name.prefix(40))…"
-        setBusy(true)
-        setStatus("Opening Screen Sharing…", "Preparing a connection to \(mac.name).")
-        cli.run(["connect", mac.id]) { [weak self] result in
-            guard let self else { return }
-            self.setBusy(false)
-            switch result {
-            case .failure(let error):
-                self.lastMenuAction = "Couldn’t open Screen Sharing"
-                self.setStatus("Couldn’t open Screen Sharing", error.message, error: true)
-            case .success:
-                self.lastMenuAction = "Screen Sharing opened"
-                self.setStatus("Screen Sharing opened", "Sign in with the VNC server’s account if asked.", success: true)
-            }
-            self.refreshStatusMenu()
+    /// Saved addresses that Mooring can no longer open: offer the way forward.
+    private func explainNotConnectable(_ mac: SavedMac) {
+        let alert = NSAlert()
+        let name = MooringPrivacy.name(mac.name, id: mac.id)
+        if mac.isMac {
+            alert.messageText = "Pair \(name) with Mooring"
+            alert.informativeText = "This address was saved for Apple Screen Sharing, which Mooring no longer uses. On \(name), open Mooring → Share this Mac and copy its code, then choose Pair a Mac here. You can then remove this saved address."
+            alert.addButton(withTitle: "Pair a Mac…")
+        } else {
+            alert.messageText = "\(name) needs SSH"
+            alert.informativeText = "Mooring’s viewer reaches VNC servers only through SSH, which checks the host and encrypts the connection. Remove this entry and add it again with its SSH target."
+            alert.addButton(withTitle: "Add Linux Desktop…")
         }
+        alert.addButton(withTitle: "Remove…")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            self.updateControls()
+            switch response {
+            case .alertFirstButtonReturn: if mac.isMac { self.connectNative() } else { self.addMac() }
+            case .alertSecondButtonReturn: DispatchQueue.main.async { self.removeMac() }
+            default: break
+            }
+        }
+        updateControls()
     }
 
     private func connectThroughSSH(_ mac: SavedMac) {
         guard let target = mac.ssh?.target else { return }
         if tunnels.isRunning(mac.id) {
-            setStatus("Already connected through SSH", "\(mac.name)’s SSH tunnel is open. Close its Screen Sharing window to end it.", success: true)
+            setStatus("Already connected through SSH", "\(mac.name)’s SSH tunnel is open. Close its viewer window to end it.", success: true)
+            return
+        }
+        if let viewer = vncViewers[mac.id], !viewer.isClosed {
+            viewer.showWindow(nil)
             return
         }
         do {
             tunnelEnded.remove(mac.id)
-            try tunnels.open(mac, executable: cli.executableURL())
+            desktopStates[mac.id] = nil
+            // Mooring's own viewer connects; the tunnel waits up to 10 minutes
+            // for sign-in and lingers 5 minutes between tries.
+            let extra = ["--no-viewer", "--wait-seconds", "600", "--idle-seconds", "300"]
+            try tunnels.open(mac, executable: cli.executableURL(), extraArguments: extra)
         } catch {
             setStatus("Couldn’t start SSH", error.localizedDescription, error: true)
             return
@@ -1319,24 +1284,125 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         case "check_retry":
             setStatus("Retrying SSH…", errorMessage ?? "The SSH connection dropped during setup.")
         case "ready":
-            setStatus("Opening Screen Sharing…", "SSH reached the VNC server for \(mac.name).")
-        case "viewer_opened":
-            lastMenuAction = "Screen Sharing opened through SSH"
-            setStatus("Screen Sharing opened through SSH", "Sign in with \(mac.name)’s account if asked. The tunnel closes a minute after its window closes.", success: true)
+            guard let port = (event["local_port"] as? NSNumber)?.uint16Value else { break }
+            vncPending[mac.id] = port
+            setStatus("Reached \(mac.name) through SSH", "Checking whether its desktop is locked before signing in…")
+            // Wait briefly for the desktop check, so the prompt can say whether
+            // the screen is locked and suggest the desktop's user name.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in self?.presentVNCSignIn(mac) }
+        case "desktop":
+            // Read-only lock and display state. Mooring never unlocks the
+            // desktop or types a password; the person signs in in the viewer.
+            guard let title = event["title"] as? String, let message = event["message"] as? String else { return }
+            let lock = event["lock"] as? String
+            desktopStates[mac.id] = (event["session_user"] as? String, title, message)
+            vncViewers[mac.id]?.showDesktop(title)
+            if vncPending[mac.id] != nil { presentVNCSignIn(mac); return }
+            lastMenuAction = "\(mac.name.prefix(40)): \(title)"
+            setStatus("\(mac.name): \(title)", message, success: lock == "unlocked")
         case "failed":
             tunnelEnded.insert(mac.id)
+            vncPending[mac.id] = nil
+            vncViewers[mac.id]?.end("The SSH tunnel closed.")
             lastMenuAction = "SSH connection failed"
             setStatus("Couldn’t connect through SSH", errorMessage ?? "The SSH tunnel closed.", error: true)
             showConnections()
         case "closed":
             tunnelEnded.insert(mac.id)
+            vncPending[mac.id] = nil
+            if let viewer = vncViewers[mac.id], !viewer.isClosed, viewer.view.sessionID != 0 { viewer.end("The SSH tunnel closed.") }
             lastMenuAction = "SSH tunnel closed"
             let detail = event["reason"] as? String == "no_viewer"
-                ? "Screen Sharing did not connect in time, so the tunnel closed."
+                ? "No sign-in started in time, so the tunnel closed."
                 : "The SSH tunnel to \(mac.name) has closed."
             setStatus("SSH tunnel closed", detail)
         default: return
         }
+        refreshStatusMenu()
+    }
+
+    /// Ask for the VNC server's sign-in, once the tunnel is ready. Rust decides
+    /// whether another attempt is allowed; the password goes straight to Rust,
+    /// which wipes the buffer before returning.
+    private func presentVNCSignIn(_ mac: SavedMac) {
+        guard let port = vncPending.removeValue(forKey: mac.id), tunnels.isRunning(mac.id) else { return }
+        var wait: UInt64 = 0, remaining: UInt32 = 0
+        let allowed = mac.id.withCString { ml_vnc_sign_in_check($0, &wait, &remaining) }
+        if allowed == Int32(ML_SESSION_RATE_LIMITED) {
+            let minutes = max(1, Int((wait + 59_999) / 60_000))
+            tunnels.stop(mac.id)
+            setStatus("Waiting before another sign-in", "Two sign-ins to \(mac.name) failed in the last 10 minutes. So the account isn’t locked, Mooring waits about \(minutes) more minute\(minutes == 1 ? "" : "s"). You can also sign in at the computer.", error: true)
+            refreshStatusMenu()
+            return
+        }
+        let desktop = desktopStates[mac.id]
+        let sshUser = mac.ssh?.target.split(separator: "@", maxSplits: 1).count == 2 ? String(mac.ssh!.target.split(separator: "@")[0]) : nil
+        var detail = "\(mac.name)’s VNC server asks for an account on that computer. Mooring sends it once, encrypted (RSA-AES) inside SSH, and doesn’t save it."
+        if remaining == 1 { detail += "\n\nOne more failed sign-in and Mooring waits 10 minutes, so the account isn’t locked." }
+        if let desktop { detail += "\n\n\(desktop.title): \(desktop.message)" }
+        setStatus("Sign in to \(mac.name)", "Waiting for the account name and password.")
+        VNCSignIn.prompt(name: mac.name, username: sshUser ?? desktop?.user ?? "", detail: detail) { [weak self] answer in
+            guard let self else { return }
+            guard let answer, self.tunnels.isRunning(mac.id) else {
+                self.tunnels.stop(mac.id)
+                self.setStatus("Sign-in cancelled", "The SSH tunnel to \(mac.name) has been closed.")
+                self.refreshStatusMenu()
+                return
+            }
+            var password = answer.password
+            var session: UInt64 = 0
+            let status = mac.id.withCString { key in
+                answer.username.withCString { user in
+                    ml_vnc_open(key, port, user, &password, password.count, &session)
+                }
+            }
+            guard status == 0, session != 0 else {
+                self.tunnels.stop(mac.id)
+                self.setStatus("Couldn’t start the viewer", String(cString: ml_session_error_string(status)), error: true)
+                return
+            }
+            self.openVNCViewer(mac, session: session, port: port)
+        }
+    }
+
+    private func openVNCViewer(_ mac: SavedMac, session: UInt64, port: UInt16) {
+        if let old = vncViewers[mac.id] { old.onClose = nil; old.close() }
+        let viewer = VNCViewerWindow(name: mac.name, connectionID: mac.id, sessionID: session)
+        if let desktop = desktopStates[mac.id] { viewer.showDesktop(desktop.title) }
+        viewer.onClose = { [weak self] in
+            self?.vncViewers[mac.id] = nil
+            self?.tunnels.stop(mac.id)
+        }
+        viewer.onSignInRejected = { [weak self, weak viewer] message in
+            guard let self else { return }
+            viewer?.onClose = nil
+            viewer?.close()
+            self.vncViewers[mac.id] = nil
+            self.setStatus("Sign-in not accepted", message, error: true)
+            guard self.tunnels.isRunning(mac.id) else { return }
+            self.vncPending[mac.id] = port
+            self.presentVNCSignIn(mac)
+        }
+        viewer.onEnded = { [weak self] message in
+            self?.setStatus("\(mac.name): session ended", message ?? "The VNC session has ended.")
+        }
+        viewer.onReconnect = { [weak self] in
+            guard let self else { return }
+            if self.tunnels.isRunning(mac.id) {
+                self.vncPending[mac.id] = port
+                self.presentVNCSignIn(mac)
+            } else {
+                self.vncViewers[mac.id]?.onClose = nil
+                self.vncViewers[mac.id]?.close()
+                self.vncViewers[mac.id] = nil
+                self.connectThroughSSH(mac)
+            }
+        }
+        vncViewers[mac.id] = viewer
+        lastMenuAction = "Viewing \(mac.name.prefix(40))"
+        setStatus("Connecting to \(mac.name)…", "Signing in through SSH. Closing the viewer closes the tunnel.", success: true)
+        viewer.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
         refreshStatusMenu()
     }
 
@@ -1349,9 +1415,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     }
 
     @objc private func checkConnection() {
-        guard !busy, !automationState.isBusy, window.attachedSheet == nil, let mac = selectedMac else { return }
+        guard !busy, window.attachedSheet == nil, let mac = selectedMac else { return }
         setBusy(true)
-        setStatus("Checking \(mac.name)…", "Testing the address and Screen Sharing service. This does not sign in.")
+        setStatus("Checking \(mac.name)…", "Testing SSH, the VNC server and the desktop. This does not sign in.")
         cli.run(["inspect", mac.id], timeout: mac.ssh == nil ? 20 : 30) { [weak self] result in
             guard let self else { return }
             self.setBusy(false)
@@ -1364,9 +1430,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
                     if let milliseconds = inspection.tcp_connect_ms {
                         lines.append("TCP connection established in \(String(format: "%.1f", milliseconds)) ms. This is not display latency.")
                     }
-                    if let version = inspection.rfb_version { lines.append("Screen Sharing banner: \(version.trimmingCharacters(in: .whitespacesAndNewlines)).") }
+                    if let version = inspection.rfb_version { lines.append("VNC server: RFB \(version.trimmingCharacters(in: .whitespacesAndNewlines)).") }
                     if let note = inspection.note, !note.isEmpty { lines.append(note) }
-                    self.setStatus("Connection check complete", lines.isEmpty ? "The host check completed. Connect to sign in with Apple Screen Sharing." : lines.joined(separator: "\n"), success: true)
+                    if let desktop = inspection.desktop {
+                        lines.append("Desktop: \(desktop.title). \(desktop.message)")
+                        lines.append(contentsOf: desktop.notes ?? [])
+                    } else if let failure = inspection.desktop_error {
+                        lines.append("Mooring couldn’t read whether the desktop is locked: \(failure.message)")
+                    }
+                    self.setStatus("Connection check complete", lines.isEmpty ? "The host check completed. Connect to sign in." : lines.joined(separator: "\n"), success: true)
                 } catch {
                     self.setStatus("Unexpected check response", "The Mooring command-line tool returned data this app could not read. \(error.localizedDescription)", error: true)
                 }
@@ -1402,7 +1474,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             controller.onAllowKeyboardAndMouse = { [weak self] in self?.native.allowKeyboardAndMouse() }
             controller.onCheckForUpdates = { [weak self] in self?.updater.checkForUpdates() }
             controller.onInstallUpdate = { [weak self] in self?.updater.install() }
-            controller.onAutomationSettings = { [weak self] in self?.showAutomationSettings() }
             // Permissions and login approval change in System Settings.
             controller.onAppear = { [weak self] in self?.refreshSettings() }
             settingsWindow = controller
@@ -1411,14 +1482,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         refreshSettings()
         settingsWindow?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
-    }
-
-    /// Apple Screen Sharing automation keeps its own Save and Cancel window.
-    private func showAutomationSettings() {
-        guard !busy, !automationState.isBusy, window.attachedSheet == nil else { return }
-        NSApp.activate(ignoringOtherApps: true)
-        automation.showSettings(connections: connections, parentWindow: window.isVisible ? window : nil)
-        updateControls()
     }
 
     private func refreshSettings() {
@@ -1465,7 +1528,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             rebuildRows()
             statusDetail.string = MooringPrivacy.redact(statusDetail.string)
             if let addController { addController.close(); self.addController = nil }
-            automation.refreshPrivacy()
         case .launchesAtLogin:
             do {
                 let status = SMAppService.mainApp.status
@@ -1486,7 +1548,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         showConnections()
         let alert = NSAlert()
         alert.messageText = "Connecting to a Mac"
-        alert.informativeText = "Pair: on your other Mac, open Mooring → Share this Mac. Start sharing, copy a code, then paste it into Pair a Mac here.\n\nScreen Sharing: enable it in System Settings → General → Sharing on the other Mac. Use an address here. Apple handles your password.\n\nMooring stays in the menu bar when you close this window. Display and automation options are in Settings."
+        alert.informativeText = "Pair: on your other Mac, open Mooring → Share this Mac. Start sharing, copy a code, then paste it into Pair a Mac here.\n\nLinux: run a VNC server such as wayvnc, then add the desktop with its SSH target. You sign in to it in Mooring each time; the password is never saved.\n\nMooring stays in the menu bar when you close this window."
         alert.addButton(withTitle: "Done")
         alert.beginSheetModal(for: window) { [weak self] _ in self?.updateControls() }
         updateControls()

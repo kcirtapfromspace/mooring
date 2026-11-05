@@ -400,7 +400,7 @@ final class NativeSessionCoordinator {
     /// Keyboard and mouse control needs Accessibility on this, the sharing, Mac.
     var keyboardAndMouseAllowed: Bool { NativeInputInjector.isTrusted }
     func allowKeyboardAndMouse() {
-        AppleSession.requestPermission()
+        AccessibilityPermission.request()
         shareWindow?.detail.stringValue = "Allow Mooring in Accessibility to control this Mac. Viewing needs no permission."
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
     }
@@ -1403,7 +1403,7 @@ final class NativeSessionCoordinator {
             self.endReconnecting(reason: self.lastViewerEnd.isEmpty ? "Reconnecting was cancelled." : self.lastViewerEnd)
         }
         window.onAllowSystemKeys = {
-            AppleSession.requestPermission()
+            AccessibilityPermission.request()
             if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
         }
         window.onClose = { [weak self, weak window] in

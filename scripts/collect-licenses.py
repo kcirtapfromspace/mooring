@@ -34,6 +34,10 @@ LICENSE_TEXT = {
         and "redistributions in binary form" in text and "this software is provided" in text,
     "BSD-1-Clause": lambda text: "redistribution and use in source and binary forms" in text
         and "redistributions of source code" in text and "this software is provided" in text,
+    "0BSD": lambda text: "permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted" in " ".join(text.split())
+        and "the software is provided" in text,
+    "Zlib": lambda text: "permission is granted to anyone to use this software for any purpose" in " ".join(text.split())
+        and "provided 'as-is', without any express or implied warranty" in " ".join(text.split()),
     "ISC": lambda text: "permission to use, copy, modify, and/or distribute" in text
         and "for any purpose with or without fee" in text and "the software is provided" in text,
     "Unicode-3.0": lambda text: "unicode license v3" in text

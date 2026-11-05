@@ -5,7 +5,8 @@ Usage: python3 scripts/test-ssh-tunnel-live.py MOORING_BINARY SSH_TARGET \
 
 This is a live check against a real SSH host and VNC server, separate from the
 local CI tests. It never signs in: it reads the RFB greeting and the offered
-security types, then disconnects without choosing one. SSH uses this Mac's own
+security types, then disconnects without choosing one. The desktop cases run
+Mooring's read-only lock check; they never lock, unlock or wake the desktop. SSH uses this Mac's own
 keys and agent. The missing-key case uses an isolated ssh config that offers no
 key at all, and Mooring disables password and keyboard-interactive sign-in, so
 the remote PAM stack is never asked to check a password.
@@ -141,14 +142,55 @@ with tempfile.TemporaryDirectory(prefix="mooring-ssh-live-") as directory:
     check = json.loads(result.stdout)
     assert check["rfb_version"] == options.expect_version, check
     assert check["security_types"] == expected_types, check
-    assert check["apple_viewer_compatible"] is True
+    # macOS 27 Screen Sharing signs in to non-Mac servers only with type 2.
+    assert check["apple_viewer_compatible"] is (2 in expected_types or
+                                                options.expect_version == "003.889"), check
     record("inspect", f"RFB {check['rfb_version']} types {check['security_types']} "
                       f"{check['security_type_names']} in {elapsed:.2f}s")
+    assert check["desktop"]["lock"] in ("locked", "unlocked"), check.get("desktop", check)
+    record("inspect desktop", f"{check['desktop']['title']}")
     if options.user_target:
         other = add(directory, "--ssh", options.user_target, "--server", "vnc")
         result, elapsed = run(directory, "inspect", other)
         assert json.loads(result.stdout)["security_types"] == expected_types
         record("inspect user@host", f"{options.user_target} in {elapsed:.2f}s")
+
+    # 1b. The read-only desktop check: locked or not, display on or off.
+    def desktop_status(saved, label):
+        result, elapsed = run(directory, "desktop-status", saved)
+        status = json.loads(result.stdout)
+        assert status["session"] == "found", status
+        assert status["lock"] in ("locked", "unlocked"), status
+        assert status["evidence"] != "none", status
+        assert status["display"] in ("on", "off"), status
+        assert elapsed < 5, f"desktop-status took {elapsed:.1f}s"
+        record(label, f"{status['lock']}, display {status['display']} by {status['evidence']} "
+                      f"(user {status.get('session_user')}) in {elapsed:.2f}s: {status['message']}")
+        return status
+    first_desktop = desktop_status(connection, "desktop-status")
+
+    # 1c. Mooring's own VNC sign-in handshake, stopped at the credential
+    # request: RSA-AES keys, hashes and the AES-EAX layer all match the
+    # server's, and no credentials are sent, so no password is checked.
+    def wayvnc_pid():
+        found = subprocess.run(["/usr/bin/ssh", "-o", "BatchMode=yes", "--", options.target,
+                                "pgrep -x wayvnc"], capture_output=True, text=True, timeout=30)
+        return found.stdout.strip()
+    pid_before = wayvnc_pid()
+    result, elapsed = run(directory, "vnc-check", connection)
+    vnc = json.loads(result.stdout)
+    assert vnc["status"] == "ok" and vnc["credentials_sent"] is False, vnc
+    assert vnc["negotiated"]["security"] == "rsa_aes256", vnc
+    assert vnc["credentials_requested"]["username_needed"] is True, vnc
+    assert vnc["credentials_requested"]["server_key_bits"] >= 2048, vnc
+    pid_after = wayvnc_pid()
+    assert pid_before and pid_before == pid_after, f"wayvnc restarted: {pid_before} -> {pid_after}"
+    record("vnc-check", f"{vnc['negotiated']['security']} with a {vnc['credentials_requested']['server_key_bits']}-bit "
+                        f"server key reached the credential request in {elapsed:.2f}s; none sent; wayvnc pid "
+                        f"{pid_after} unchanged")
+    if options.user_target:
+        same = desktop_status(other, "desktop-status user@host")
+        assert same["session_user"] == first_desktop["session_user"]
 
     # 2. A full session: tunnel, viewer handshake through 127.0.0.1, idle close.
     tunnel = Tunnel(directory, connection, "--idle-seconds", "2", "--wait-seconds", "30")
@@ -159,8 +201,10 @@ with tempfile.TemporaryDirectory(prefix="mooring-ssh-live-") as directory:
     assert greeting == f"RFB {options.expect_version}\n".encode(), greeting
     assert types == expected_types, types
     tunnel.until("connection_opened")
-    children = ssh_children(tunnel.process.pid)
-    assert len(children) == 1, f"expected one ssh, found {children}"
+    children = [pid for pid in ssh_children(tunnel.process.pid) if "-W" in
+                subprocess.run(["/bin/ps", "-o", "args=", "-p", str(pid)], capture_output=True,
+                               text=True).stdout]
+    assert len(children) == 1, f"expected one ssh -W, found {children}"
     try:
         socket.create_connection((lan_address(), port), timeout=2).close()
         raise AssertionError("the tunnel accepted a connection on the LAN address")
@@ -171,10 +215,15 @@ with tempfile.TemporaryDirectory(prefix="mooring-ssh-live-") as directory:
     assert closed["failed"] is False, closed
     final, code = tunnel.finish()
     assert code == 0 and final["event"] == "closed" and final["reason"] == "session_ended", final
+    names = [event["event"] for event in tunnel.events]
+    assert "desktop" in names and names.index("desktop") > names.index("ready"), names
+    desktop_event = tunnel.events[names.index("desktop")]
+    assert desktop_event["lock"] in ("locked", "unlocked"), desktop_event
     assert wait_gone(children, 1), f"ssh {children} outlived the session"
     record("session", f"127.0.0.1:{port} relayed {greeting.decode().strip()} and types {types}; "
                       f"{closed['bytes_to_viewer']} bytes to viewer; closed {final['reason']} after "
-                      f"{final['duration_ms']} ms; ssh {children} reaped; LAN address refused")
+                      f"{final['duration_ms']} ms; ssh {children} reaped; LAN address refused; "
+                      f"desktop event {desktop_event['lock']}")
 
     # 3. Ctrl-C while a viewer is connected.
     tunnel = Tunnel(directory, connection, "--idle-seconds", "30")
@@ -246,10 +295,17 @@ with tempfile.TemporaryDirectory(prefix="mooring-ssh-live-") as directory:
             f"  UserKnownHostsFile {known_hosts}\n")
         env = dict(os.environ, MOORING_SSH_CONFIG=str(config))
         expect_failure("missing key", "authentication_failed", 8, env=env, saved=connection)
+        result, elapsed = run(directory, "desktop-status", connection, env=env, expect_ok=False)
+        refused = json.loads(result.stdout)
+        assert result.returncode == 1 and refused["error"]["kind"] == "authentication_failed", refused
+        assert elapsed < 8, f"desktop check with no key took {elapsed:.1f}s"
+        record("desktop missing key", f"authentication_failed in {elapsed:.2f}s")
 
-    leftovers = subprocess.run(["/usr/bin/pgrep", "-fl", "--", f"-W 127.0.0.1:5900 -- {options.target}"],
-                               capture_output=True, text=True).stdout.strip()
-    assert not leftovers, f"ssh processes left behind: {leftovers}"
-    record("no orphans", "no Mooring ssh -W processes remain")
+    leftovers = [subprocess.run(["/usr/bin/pgrep", "-fl", "--", pattern], capture_output=True,
+                                text=True).stdout.strip()
+                 for pattern in (f"-W 127.0.0.1:5900 -- {options.target}",
+                                 f"-T -- {options.target} /bin/sh -s")]
+    assert not any(leftovers), f"ssh processes left behind: {leftovers}"
+    record("no orphans", "no Mooring ssh -W or desktop-check processes remain")
 
 print(f"Live SSH tunnel check passed: {len(results)} cases.")

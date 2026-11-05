@@ -9,6 +9,7 @@ crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 mooring-platform = { path = "../mooring-platform" }
+mooring-vnc = { path = "../mooring-vnc" }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = { version = "0.10", default-features = false }

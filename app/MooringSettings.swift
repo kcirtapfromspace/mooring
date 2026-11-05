@@ -35,8 +35,7 @@ enum MooringSetting {
 }
 
 /// One window for everything a person may want to change, in three parts:
-/// sharing this Mac, viewing another, and Mooring itself. Apple Screen
-/// Sharing automation keeps its own window, opened from here.
+/// sharing this Mac, viewing another, and Mooring itself.
 final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
     var onChange: ((MooringSetting, Bool) -> Void)?
     var onRemovePeer: ((NativePeer) -> Void)?
@@ -47,7 +46,6 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
     var onAllowKeyboardAndMouse: (() -> Void)?
     var onCheckForUpdates: (() -> Void)?
     var onInstallUpdate: (() -> Void)?
-    var onAutomationSettings: (() -> Void)?
     /// The window came forward, perhaps after a change in System Settings.
     var onAppear: (() -> Void)?
 
@@ -134,8 +132,7 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
     private func layout() {
         guard let root = window?.contentView else { return }
         let share = NSButton(title: "Share this Mac…", target: self, action: #selector(shareThisMac))
-        let automation = NSButton(title: "Screen Sharing…", target: self, action: #selector(automationSettings))
-        for button in [share, automation] { button.bezelStyle = .rounded }
+        share.bezelStyle = .rounded
         let sharing = section("Sharing this Mac", nil, [
             option(sharesAutomatically, "Starts when Mooring opens and resumes after sleep or lock."),
             option(sharesClipboard, "Items that password managers mark as private are never shared."),
@@ -155,13 +152,12 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
             peerList
         ])
         let general = section("Mooring", nil, [
-            option(hidesComputerInformation, "There’s no route like home. Use fictional Mac names and reserved example addresses in Mooring windows and menus. Remote desktops and Apple Screen Sharing have their own content."),
+            option(hidesComputerInformation, "There’s no route like home. Use fictional Mac names and reserved example addresses in Mooring windows and menus. Remote desktops have their own content."),
             label("This Mac’s network addresses", size: 12, weight: .medium),
             localNetworkList,
             stack([launchesAtLogin, loginNote], spacing: 3),
             version,
-            stack([updateNote, updateButton], spacing: 6),
-            automation
+            stack([updateNote, updateButton], spacing: 6)
         ])
         let heading = MooringAppearance.header("Settings", subtitle: "Changes apply as you go.")
         sectionSelector.segmentCount = 3
@@ -370,7 +366,6 @@ final class MooringSettingsWindow: NSWindowController, NSWindowDelegate {
     func windowDidBecomeKey(_ notification: Notification) { onAppear?() }
     @objc private func allowKeys() { onAllowKeyboardAndMouse?() }
     @objc private func shareThisMac() { onShareThisMac?() }
-    @objc private func automationSettings() { onAutomationSettings?() }
     @objc private func updates() {
         if case .ready = state.updates { onInstallUpdate?() } else { onCheckForUpdates?() }
     }

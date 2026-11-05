@@ -15,11 +15,13 @@ final class SSHTunnels {
 
     func isRunning(_ id: String) -> Bool { running[id] != nil }
 
-    func open(_ mac: SavedMac, executable: URL) throws {
+    /// `extraArguments` follow `connect ID`, for example `--no-viewer` when
+    /// Mooring's own viewer connects instead of Screen Sharing.
+    func open(_ mac: SavedMac, executable: URL, extraArguments: [String] = []) throws {
         guard running[mac.id] == nil else { return }
         let process = Process()
         process.executableURL = executable
-        process.arguments = ["connect", mac.id]
+        process.arguments = ["connect", mac.id] + extraArguments
         let output = Pipe(), errors = Pipe()
         process.standardOutput = output
         process.standardError = errors

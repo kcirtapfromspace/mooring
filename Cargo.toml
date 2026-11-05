@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mooring-core", "crates/mooring-platform", "crates/mooring-cli", "crates/mooring-session"]
+members = ["crates/mooring-core", "crates/mooring-platform", "crates/mooring-cli", "crates/mooring-session", "crates/mooring-vnc"]
 resolver = "2"
 
 [workspace.package]
@@ -10,3 +10,11 @@ license = "MIT"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# RSA key generation for the VNC client is far too slow unoptimized; these
+# crates are built optimized even in debug and test builds.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3

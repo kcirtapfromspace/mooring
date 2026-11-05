@@ -8,15 +8,6 @@ swiftc -swift-version 5 -warnings-as-errors -parse-as-library \
   app/MooringBrand.swift app/MooringPrivacy.swift app/MooringStatusMenu.swift scripts/test-status-menu.swift \
   -o target/mooring-status-menu-tests
 target/mooring-status-menu-tests
-swiftc -swift-version 5 -warnings-as-errors -parse-as-library \
-  -target arm64-apple-macosx14.0 -framework AppKit -framework ApplicationServices \
-  app/AppleSession.swift scripts/test-apple-session.swift \
-  -o target/mooring-apple-session-tests
-target/mooring-apple-session-tests
-swiftc -swift-version 5 -warnings-as-errors -parse-as-library \
-  -target arm64-apple-macosx14.0 app/HomeNetworkCheck.swift scripts/test-home-network.swift \
-  -o target/mooring-home-network-tests
-target/mooring-home-network-tests
 swiftc -swift-version 5 -warnings-as-errors -parse-as-library -target arm64-apple-macosx14.0 \
   -framework CoreGraphics -framework AppKit app/NativeDisplayTopology.swift app/NativeSharedDisplay.swift scripts/test-native-display.swift \
   -o target/mooring-native-display-topology-tests
@@ -43,6 +34,12 @@ swiftc -swift-version 5 -warnings-as-errors -parse-as-library \
   app/NativeInput.swift scripts/test-native-input.swift \
   -o target/mooring-native-input-tests
 target/mooring-native-input-tests
+# Mooring's VNC viewer against a loopback server with no sign-in.
+swiftc -swift-version 5 -warnings-as-errors -parse-as-library -target arm64-apple-macosx14.0 \
+  -framework AppKit -framework IOSurface -framework QuartzCore "${bridge[@]}" \
+  app/VNCViewer.swift app/MooringPrivacy.swift app/MooringAppearance.swift app/MooringBrand.swift scripts/test-vnc-viewer.swift \
+  -o target/mooring-vnc-viewer-tests
+target/mooring-vnc-viewer-tests "$project_root"
 swiftc -O -swift-version 5 -warnings-as-errors -parse-as-library -target arm64-apple-macosx14.0 \
   "${media_frameworks[@]}" "${bridge[@]}" app/NativeMedia.swift app/NativeAudio.swift app/NativePrivacyGuard.swift scripts/test-native-media.swift \
   -o target/mooring-native-media-tests

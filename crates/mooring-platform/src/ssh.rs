@@ -13,6 +13,13 @@
 //! whose supervisor dies gets end-of-file and exits instead of lingering.
 //! Arguments are always passed as an argv array, never through a shell.
 
+mod desktop;
+
+pub use desktop::{
+    DESKTOP_PROBE_SCRIPT, DESKTOP_PROBE_TIMEOUT, DesktopEvent, desktop_probe_args, probe_desktop,
+    watch_desktop,
+};
+
 use crate::parse_greeting;
 use mooring_core::tunnel::{
     Admission, CheckDecision, CloseReason, TunnelLifecycle, TunnelLimits, TunnelPhase,
@@ -171,10 +178,10 @@ fn fixed_options(connect_timeout_secs: u32) -> [(&'static str, String); 15] {
     ]
 }
 
-/// The complete argv after the program name. The destination always follows
-/// `--`, so even a value that slipped past validation cannot become an option.
-pub fn ssh_forward_args(route: &SshRoute, options: &SshOptions) -> Vec<OsString> {
-    let mut args: Vec<OsString> = Vec::with_capacity(36);
+/// The options every Mooring ssh starts with: an optional `-F` and the fixed
+/// `-o` settings.
+fn base_args(options: &SshOptions) -> Vec<OsString> {
+    let mut args: Vec<OsString> = Vec::with_capacity(40);
     if let Some(config) = &options.config_file {
         args.push("-F".into());
         args.push(config.clone().into_os_string());
@@ -183,6 +190,13 @@ pub fn ssh_forward_args(route: &SshRoute, options: &SshOptions) -> Vec<OsString>
         args.push("-o".into());
         args.push(format!("{key}={value}").into());
     }
+    args
+}
+
+/// The complete argv after the program name. The destination always follows
+/// `--`, so even a value that slipped past validation cannot become an option.
+pub fn ssh_forward_args(route: &SshRoute, options: &SshOptions) -> Vec<OsString> {
+    let mut args = base_args(options);
     args.push("-W".into());
     args.push(route.remote_spec().into());
     args.push("--".into());
@@ -495,10 +509,10 @@ struct SpawnedSsh {
     stderr: StderrLog,
 }
 
-fn spawn_ssh(route: &SshRoute, options: &SshOptions) -> Result<SpawnedSsh, SshFailure> {
+fn spawn_ssh(args: Vec<OsString>, options: &SshOptions) -> Result<SpawnedSsh, SshFailure> {
     let mut command = Command::new(&options.program);
     command
-        .args(ssh_forward_args(route, options))
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -553,9 +567,11 @@ pub fn security_type_name(id: u8) -> &'static str {
     }
 }
 
-/// Security types macOS Screen Sharing can use with a server that is not a
-/// Mac: a VNC password, or Apple's Diffie-Hellman user sign-in.
-const APPLE_VIEWER_TYPES: [u8; 2] = [2, 30];
+/// The security type macOS Screen Sharing signs in with to a server that is
+/// not a Mac: a VNC password. On macOS 27.0.1 it chose type 2 for an RFB 3.8
+/// server that offered only [129, 5, 30], and failed; it did not use Apple
+/// Diffie-Hellman (30) there, though that type is offered.
+const APPLE_VIEWER_TYPES: [u8; 1] = [2];
 
 /// What the pre-flight check learned through SSH, before any sign-in.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -570,6 +586,8 @@ pub struct RouteCheck {
     /// SSH setup plus the server's greeting, measured from starting ssh.
     pub greeting_ms: f64,
     pub looks_like_mac: bool,
+    /// Whether macOS Screen Sharing is expected to be able to sign in: the
+    /// server is a Mac, or offers a VNC password (type 2).
     pub apple_viewer_compatible: bool,
     pub note: String,
 }
@@ -678,7 +696,7 @@ fn describe_check(rfb_version: &str, types: &[u8]) -> (bool, bool, String) {
         "Reached the VNC server through SSH and read its offered security types without signing in. This does not measure bandwidth or video latency.",
     );
     if !compatible {
-        note.push_str(" None of the offered types is one macOS Screen Sharing is known to use with other VNC servers (VNC password 2 or Apple Diffie-Hellman 30). For wayvnc, set relax_encryption=true.");
+        note.push_str(" macOS Screen Sharing signs in to servers that are not Macs only with a VNC password (type 2), which this server does not offer, so it will likely fail to sign in. On macOS 27 it did not use Apple Diffie-Hellman (30) with such a server. Another viewer can use the tunnel with connect --no-viewer.");
     }
     (looks_like_mac, compatible, note)
 }
@@ -718,7 +736,7 @@ fn check_route_until(
         stdin,
         stdout,
         stderr,
-    } = spawn_ssh(route, options)?;
+    } = spawn_ssh(ssh_forward_args(route, options), options)?;
     let (sender, receiver) = mpsc::sync_channel(1);
     let conversation = thread::Builder::new()
         .name("mooring-ssh-check".into())
@@ -1143,8 +1161,10 @@ pub fn run_tunnel(
                     let _ = viewer.set_nonblocking(false);
                     let _ = viewer.set_nodelay(true);
                     let index = workers.len();
-                    let started = match (viewer.try_clone(), spawn_ssh(&config.route, &config.ssh))
-                    {
+                    let started = match (
+                        viewer.try_clone(),
+                        spawn_ssh(ssh_forward_args(&config.route, &config.ssh), &config.ssh),
+                    ) {
                         (Ok(handle), Ok(ssh)) => {
                             let process = Arc::clone(&ssh.process);
                             let route = config.route.clone();
@@ -1261,10 +1281,10 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
-    struct Fixture(PathBuf);
+    pub(super) struct Fixture(pub(super) PathBuf);
 
     impl Fixture {
-        fn new(name: &str) -> Self {
+        pub(super) fn new(name: &str) -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let path = std::env::temp_dir().join(format!(
                 "mooring-ssh-{name}-{}-{}",
@@ -1276,7 +1296,7 @@ mod tests {
         }
 
         /// A fake ssh: records its argv and pid, then runs `body` in sh.
-        fn fake_ssh(&self, body: &str) -> SshOptions {
+        pub(super) fn fake_ssh(&self, body: &str) -> SshOptions {
             let script = self.0.join("ssh");
             let dir = self.0.display();
             fs::write(
@@ -1294,7 +1314,7 @@ mod tests {
             }
         }
 
-        fn pids(&self) -> Vec<i32> {
+        pub(super) fn pids(&self) -> Vec<i32> {
             fs::read_to_string(self.0.join("pids"))
                 .unwrap_or_default()
                 .lines()
@@ -1302,7 +1322,7 @@ mod tests {
                 .collect()
         }
 
-        fn assert_no_survivors(&self) {
+        pub(super) fn assert_no_survivors(&self) {
             for pid in self.pids() {
                 // SAFETY: signal 0 only checks whether the process exists.
                 let alive = unsafe { libc::kill(pid, 0) } == 0;
@@ -1563,11 +1583,15 @@ mod tests {
 
     #[test]
     fn notes_servers_screen_sharing_cannot_sign_in_to() {
+        // wayvnc with relax_encryption: Screen Sharing on macOS 27 tried only
+        // a VNC password here and failed, so this is not compatible.
         let (mac, compatible, note) = describe_check("003.008", &[129, 5, 30]);
-        assert!(!mac && compatible && !note.contains("relax_encryption"));
-        let (_, compatible, note) = describe_check("003.008", &[129, 5]);
-        assert!(!compatible && note.contains("relax_encryption"));
-        assert!(describe_check("003.889", &[35]).0);
+        assert!(!mac && !compatible && note.contains("VNC password (type 2)"));
+        assert!(note.contains("--no-viewer"));
+        let (_, compatible, note) = describe_check("003.008", &[2, 129]);
+        assert!(compatible && !note.contains("type 2"));
+        let (mac, compatible, _) = describe_check("003.889", &[35]);
+        assert!(mac && compatible);
     }
 
     #[test]
@@ -1581,7 +1605,7 @@ mod tests {
             check.security_type_names,
             ["RSA-AES-256", "RA2", "Apple Diffie-Hellman"]
         );
-        assert!(check.apple_viewer_compatible && !check.looks_like_mac);
+        assert!(!check.apple_viewer_compatible && !check.looks_like_mac);
         let args = fs::read_to_string(fixture.0.join("args")).unwrap();
         let expected: Vec<String> = ssh_forward_args(&route(), &options)
             .into_iter()

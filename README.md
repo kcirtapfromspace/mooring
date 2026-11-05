@@ -8,13 +8,13 @@ Source, downloads, and the signed update feed live together in the public [Moori
 
 **Your Macs, within reach.** A native Mac connection app with a Rust core. The product goal is reliable, responsive Mac-to-Mac remote control that chooses sensible quality automatically.
 
-**Current milestone:** enter a Mac's address and connect. Auto mode, full screen and reconnection on learned networks are the defaults. Mooring can request Standard or High Performance and supervise a uniquely identified Apple Screen Sharing session. Apple supplies authentication and video. Its mode URL options are undocumented; actual negotiation, full screen, and switching still need two-Mac validation. There is no claim of performance parity or measured video bandwidth.
+**Current milestone:** Macs connect through Mooring's own encrypted session (below), and Linux desktops open in Mooring's own viewer through SSH. Mooring no longer uses Apple Screen Sharing; addresses saved for it stay listed, marked **Needs pairing**, until you pair that Mac or remove them. There is no claim of performance parity or measured video bandwidth.
 
 **Experimental:** a direct native session. **Share This Mac** captures the main display with ScreenCaptureKit and hardware H.264; **Connect with Mooring** pairs with a one-time code and views or controls it over an encrypted, authenticated connection: at home, or away through a VPN such as Tailscale, trying every address the code lists. Each viewing Mac has its own key, and the sharing Mac can remove any one of them. Sharing can start automatically and continues without its window. A dropped viewer reconnects on its own, including after its lid was closed, and a sharing Mac whose display has turned off wakes for it. The clipboard is shared both ways while connected. Trackpad pinch, rotate and smart zoom reach the remote Mac, and its sound plays on the viewing Mac. With Accessibility on the viewing Mac, ⌘-Tab and other system shortcuts go to the remote Mac; until it's allowed, the viewer says so when control starts. The pointer reaches every edge of the remote screen, so a Dock or menu bar that hides automatically appears there. In full screen on a Mac with a camera notch, the remote Mac's menu bar moves up beside the notch and its menus leave room for it (**Settings → Viewing → Use the space beside the camera**; needs this preview on both Macs). Early two-Mac testing is in progress. Live telemetry and tuning (`mooring telemetry`, `mooring tune`) are described in [TELEMETRY.md](docs/TELEMETRY.md). Mooring updates itself in place from [Mooring releases](https://github.com/kcirtapfromspace/mooring) when no session is connected. See the [release notes](docs/release-notes-v0.3.0-preview.37.md) for limits.
 
 ## Run
 
-Requires macOS 14 or newer, Xcode Command Line Tools, and Rust 1.89 or newer. Apple High Performance additionally requires compatible Apple silicon Macs at both ends.
+Requires macOS 14 or newer, Xcode Command Line Tools, and Rust 1.89 or newer.
 
 ```sh
 ./scripts/build-app.sh
@@ -23,11 +23,11 @@ open dist/Mooring.app
 
 Mooring appears in the Dock, Cmd+Tab, and the menu bar with its Threshold icon. Closing its windows keeps it running; open Connections from the Dock or menu bar. Choose **Pair a Mac** to use a Mooring pairing code, or **Share this Mac** to make this Mac available to another Mac. Settings groups preferences into **Sharing**, **Viewing**, and **General**. The visual identity and icon source are described in [BRANDING.md](docs/BRANDING.md).
 
-For recording a demo, turn on **Settings → General → Hide computer information for demos**. Mooring substitutes anonymous Mac labels and fictional endpoints in its windows, menus and tooltips: `mac-1.no-route-home.invalid`, “NXDOMAIN sweet NXDOMAIN,” and reserved documentation addresses `192.0.2.1` and `2001:db8::dead:beef`. These examples are presentation only; connections still use their real saved endpoints. The choice persists and updates open Mooring windows immediately. It does not hide content inside a remote desktop or Apple's Screen Sharing app. With it off, Connections and Settings → Viewing show every saved address for each paired Mac, with readable scope labels and the last connected address first. Settings → General lists this Mac's Bonjour hostname and assigned IPv4 and IPv6 addresses by interface, including VPN, link-local and inactive interfaces. Saved remote addresses are the ones Mooring learned when pairing; the list is not a live network discovery scan.
+For recording a demo, turn on **Settings → General → Hide computer information for demos**. Mooring substitutes anonymous Mac labels and fictional endpoints in its windows, menus and tooltips: `mac-1.no-route-home.invalid`, “NXDOMAIN sweet NXDOMAIN,” and reserved documentation addresses `192.0.2.1` and `2001:db8::dead:beef`. These examples are presentation only; connections still use their real saved endpoints. The choice persists and updates open Mooring windows immediately. It does not hide content inside a remote desktop. With it off, Connections and Settings → Viewing show every saved address for each paired Mac, with readable scope labels and the last connected address first. Settings → General lists this Mac's Bonjour hostname and assigned IPv4 and IPv6 addresses by interface, including VPN, link-local and inactive interfaces. Saved remote addresses are the ones Mooring learned when pairing; the list is not a live network discovery scan.
 
 Either Mac can remove a native pairing without the other's approval. Removal on the sharing Mac rejects that viewer's key; removing a connected Mac on the viewing side sends an authenticated revocation notice and erases its local credential. Offline removal takes effect locally immediately and requires a fresh code to connect again; it cannot update an unreachable Mac's Allowed Macs list. New pairings use a separate device key for each sharing Mac, while existing pairings retain their keys until paired again. Removing one never rotates other pairings. If an existing Keychain item refuses deletion with ownership error `-25244`, Mooring erases its credential and key without editing the item's ownership; if erasure also fails, removal reports an error and keeps the saved row for retry.
 
-In a native viewer, **View → Diagnostic Footer** (⌃⌘D) shows or hides the footer, including in full screen. The choice is remembered and is also in **Settings → Viewing**. **View → Stats for Nerds** (⌃⌘I) opens live stream details over the picture, with a **Save Diagnostics** action. These two shortcuts stay on the viewing Mac while remote input is captured. Stats consume measurement and peer-telemetry events as they arrive, without a repeating UI refresh timer; display updates are capped at 10 per second. Local rates cover a rolling second, host stats arrive in one-second samples, and recovery counters cover the session. Stats distinguish received video bitrate from the host's bitrate target and network RTT from screen-to-display latency. Unavailable values show **—**, and host samples expire after three seconds. A still screen can legitimately show zero FPS. These measurements apply to Mooring native sessions, not Apple's Screen Sharing.
+In a native viewer, **View → Diagnostic Footer** (⌃⌘D) shows or hides the footer, including in full screen. The choice is remembered and is also in **Settings → Viewing**. **View → Stats for Nerds** (⌃⌘I) opens live stream details over the picture, with a **Save Diagnostics** action. These two shortcuts stay on the viewing Mac while remote input is captured. Stats consume measurement and peer-telemetry events as they arrive, without a repeating UI refresh timer; display updates are capped at 10 per second. Local rates cover a rolling second, host stats arrive in one-second samples, and recovery counters cover the session. Stats distinguish received video bitrate from the host's bitrate target and network RTT from screen-to-display latency. Unavailable values show **—**, and host samples expire after three seconds. A still screen can legitimately show zero FPS. These measurements apply to Mac-to-Mac sessions; the Linux viewer's footer shows its own size, update rate, data rate and lock state.
 
 **Full screen on a Mac with a camera notch.** With **Settings → Viewing → Use the space beside the camera** on (the default), the sharing Mac's menu bar moves up beside the notch. The sharing Mac keeps the part behind the notch clear with an invisible menu bar item, so its icons sit on either side. They shuffle for a few seconds while it finds the spot.
 
@@ -35,22 +35,20 @@ If a wide empty space stays between the notch and the sharing Mac's icons, some 
 
 The sharing Mac's session log shows how close it got (`menu bar gap placed beside the viewer's camera, N points to spare`). `scripts/probe-menu-bar-order.swift` maps where a Mac can place a new menu bar item.
 
-For Apple Screen Sharing, choose **Add Mac**, enter its hostname or IP, and click **Add & Connect**. On the first connection, **Enable & Connect** opens macOS Accessibility settings; once you grant access, the connection continues automatically. You can also connect without automation. Sign in through Apple Screen Sharing if prompted. Mooring never asks for or stores a remote password.
+**Linux desktops.** Run a VNC server such as wayvnc on the Linux computer, then choose **Add Linux Desktop** and enter how you reach it with SSH: an `~/.ssh/config` alias or `user@host`. Connecting opens an SSH tunnel with your own keys and agent (Mooring never asks for an SSH password and listens on 127.0.0.1 only), checks read-only whether the desktop is locked, and asks once for that computer's account. The password goes to the VNC server encrypted (RSA-AES) inside SSH, is sent once and is never saved or logged. After two rejected sign-ins within ten minutes Mooring waits instead of risking an account lockout. The viewer opens full screen; its footer (⌃⌘D) shows the size, update rate, data rate and lock state, and floats over the picture in full screen. ⌃⌘F, ⌃⌘D, ⌃⌘Q and ⌥⌘Esc stay on this Mac; other ⌘ shortcuts reach the desktop as Super. If the desktop is locked, unlock it in the viewer; Mooring never types a password into a lock screen. Tested with wayvnc 0.10.2 on Hyprland (Omarchy). Mooring never selects Apple Diffie-Hellman sign-in, which crashes that wayvnc version.
 
-No home-network marking or capability checkbox is required to start. Auto starts with Standard and learns a direct network after an explicitly opened, identified session and sustained healthy checks. It may then make a bounded High Performance trial without claiming that support or bandwidth has been verified. Settings contains optional display, login and connection preferences; **Advanced** contains home overrides and detailed tuning. Previously configured preferences are preserved.
-
-Builds and GitHub preview releases target Apple silicon (arm64) only. Download the [native session preview](https://github.com/kcirtapfromspace/mooring/releases/latest). Distribution uses Developer ID signing, Apple notarization, and a stapled ticket checked after extracting the final ZIP. Local development builds remain ad hoc by default. See [testing instructions](docs/TESTING.md), [automation behavior](docs/AUTOMATION.md), and the [notarization workflow](docs/NOTARIZATION.md).
+Builds and GitHub preview releases target Apple silicon (arm64) only. Download the [native session preview](https://github.com/kcirtapfromspace/mooring/releases/latest). Distribution uses Developer ID signing, Apple notarization, and a stapled ticket checked after extracting the final ZIP. Local development builds remain ad hoc by default. See [testing instructions](docs/TESTING.md) and the [notarization workflow](docs/NOTARIZATION.md).
 
 ## CLI
 
 ```sh
 cargo run -p mooring-cli -- doctor
-cargo run -p mooring-cli -- add --name 'Studio' --host studio.local
+cargo run -p mooring-cli -- add --name 'Linux' --ssh m1-linux
 cargo run -p mooring-cli -- list
 cargo run -p mooring-cli -- inspect SAVED_ID
+cargo run -p mooring-cli -- desktop-status SAVED_ID
+cargo run -p mooring-cli -- vnc-check SAVED_ID
 cargo run -p mooring-cli -- connect SAVED_ID
-cargo run -p mooring-cli -- connect-mode SAVED_ID standard
-cargo run -p mooring-cli -- network-probe SAVED_ID
 cargo run -p mooring-cli -- simulate
 cargo run -p mooring-cli -- telemetry --count 5
 cargo run -p mooring-cli -- tune --bitrate-mbps 15
@@ -60,13 +58,13 @@ cargo run -p mooring-cli -- tune --bitrate-mbps 15
 
 ## Layout
 
-- `crates/mooring-core`: live target-network mode policy plus the separate simulated streaming quality/mailbox/reconnect foundation.
-- `crates/mooring-platform`: validated Apple Screen Sharing launch URLs and read-only RFB greeting diagnostics.
-- `crates/mooring-cli`: JSON command interface and persistent saved Macs.
+- `crates/mooring-core`: the SSH tunnel lifecycle, the remote desktop lock-state reading, and the simulated streaming quality/mailbox/reconnect foundation.
+- `crates/mooring-platform`: host validation, read-only RFB greeting diagnostics, the system-ssh tunnel and the read-only desktop check.
+- `crates/mooring-vnc`: Mooring's VNC client for Linux desktops: RSA-AES sign-in, Raw/CopyRect/ZRLE decoding, key mapping and the failed-sign-in budget.
+- `crates/mooring-cli`: JSON command interface and saved Linux desktops.
 - `crates/mooring-session`: experimental native session (static library): encrypted transport, typed wire formats and validation, per-role policy, host input state, pairing codes and saved peers. See its [README](crates/mooring-session/README.md).
-- `app`: native menu, settings, network-change notifications and bounded Accessibility session supervision; Rust handles mode policy, connection validation, diagnostics, and saved Macs.
+- `app`: native menu, settings, the Mac-to-Mac viewer and host, and the Linux viewer window; Rust handles protocols, validation, policy and saved connections.
 - `scripts/probe-codecs.swift`: public VideoToolbox capability probe; no screen capture or transmission.
-- `docs/apple-backend.md`: Apple interoperability research and limitations.
 - `docs/performance.md`: proposed performance targets and measurement method.
 - `docs/roadmap.md`: acceptance gates for the real remote-desktop engine.
 
@@ -82,6 +80,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 swift scripts/probe-codecs.swift
 ```
 
-Network tests use loopback mock RFB servers. No test enables remote sharing, captures the desktop, stores credentials, or connects to a real remote Mac.
+Network tests use loopback mock RFB servers. No test enables remote sharing, captures the desktop, stores credentials, or connects to a real remote Mac. `scripts/test-ssh-tunnel-live.py` checks a real Linux host through SSH, separately from CI, and never signs in.
 
 The original source in this project is MIT-licensed. External projects cited in the research retain their own licenses; no iShareScreen implementation code is included.
