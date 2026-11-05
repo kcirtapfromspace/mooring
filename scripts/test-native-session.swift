@@ -150,6 +150,66 @@ enum NativeSessionTests {
         try devices.reset()
         try require(try devices.load().devices.isEmpty, "Reset approves no one")
     }
+    /// A PIN on a pairing listener approves this Mac's key without a session, a
+    /// wrong one uses a try, and the saved pairing then connects to the sharing
+    /// listener of the same identity. Loopback and a temporary list only.
+    static func testPinPairing() throws {
+        ml_capabilities_set(NativeCapabilities.local(hevc444: false, virtualDisplay: false, audio: false))
+        defer { ml_capabilities_set(0) }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("mooring-pin-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let devices = NativeDeviceStore(directory: folder.path)
+        try devices.prepare(acceptOldCode: false)
+        let identity = try NativeHostIdentity.create()
+        let pins = try NativeTransport.listenForPIN(identity: identity, devices: devices, bindAddress: "127.0.0.1", port: 0)
+        defer { pins.close() }
+        let sharing = try NativeTransport.listen(identity: identity, devices: devices, bindAddress: "127.0.0.1", port: 0)
+        defer { sharing.close() }
+        try rejects("A sharing listener makes no PIN") {
+            _ = try sharing.newPIN(address: "studio.local", computerName: "Studio", alternates: [])
+        }
+        let pin = try pins.newPIN(address: "Studio.local", computerName: "Studio", alternates: ["127.0.0.1"])
+        try require(pin.count == 6 && NativeTransport.normalizedPIN(pin.lowercased()) == pin
+                    && NativeTransport.normalizedPIN("12345") == nil, "A PIN is six characters, typed in any case")
+        try require(pins.pinState?.active == 1 && pins.pinState?.tries_left == UInt8(ML_PIN_TRIES), "A new PIN has every try")
+
+        func attempt(_ typed: String, _ key: NativeDeviceKey)
+            -> (Result<(NativePairingCode, String), Error>, Result<(id: String, name: String)?, Error>?) {
+            let host = Slot<Result<(id: String, name: String)?, Error>>()
+            let done = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async { host.value = Result { try pins.acceptPIN() }; done.signal() }
+            let viewer = Result { try NativeTransport.pairWithPIN(typed, addresses: ["127.0.0.1"], deviceKey: key,
+                                                                  deviceName: "MacBook Pro", port: pins.listeningPort) }
+            done.wait()
+            return (viewer, host.value)
+        }
+        func status(_ result: Result<(NativePairingCode, String), Error>) -> Int32 {
+            if case .failure(let error) = result { return (error as? NativeSessionError)?.status ?? 0 }
+            return 0
+        }
+        let key = try NativeDeviceKey.create()
+        let wrong = String(pin.prefix(5)) + (pin.hasSuffix("Z") ? "Y" : "Z")
+        let (refused, _) = attempt(wrong, key)
+        try require(status(refused) == Int32(ML_SESSION_AUTH) && pins.pinState?.tries_left == UInt8(ML_PIN_TRIES) - 1
+                    && (try devices.load().devices.isEmpty), "A wrong PIN is refused and uses a try")
+
+        let (paired, approved) = attempt(pin, key)
+        let (code, used) = try paired.get()
+        guard case .success(let device?) = approved else { throw Failure("The sharing Mac reports the Mac that paired") }
+        try require(code.kind == .device && code.name == "Studio" && code.publicKey == identity.publicKey
+                    && code.addresses == ["studio.local", "127.0.0.1"] && used == "127.0.0.1",
+                    "The viewer saves the sharing Mac's key, name and addresses")
+        try require(device.name == "MacBook Pro" && (try devices.load().devices.map(\.id)) == [device.id]
+                    && pins.pinState?.active == 0, "The PIN approves this Mac, once")
+
+        let (connected, host) = connectOnce(sharing, code, key)
+        let (viewer, mode, _) = try connected.get()
+        try require(mode == .device && host?.peerDevice == device.id, "The PIN's pairing connects as the approved Mac")
+        viewer.close(); host?.close()
+        let (again, _) = attempt(pin, try NativeDeviceKey.create())
+        try require(status(again) == Int32(ML_SESSION_UNAVAILABLE), "A used PIN means that Mac shows none")
+    }
     /// Authenticate, revoke only that viewer, restart the listener, require a
     /// new code, and leave another approved key untouched. Loopback only.
     static func testAsymmetricRevocation() throws {
@@ -360,7 +420,7 @@ enum NativeSessionTests {
     static func main() {
         do {
             try run()
-            print("Native session tests passed: \(checks) checks; Rust pairing, per-Mac keys over loopback, peer store, control and display boundaries, the pointer image, cancellation, bounded delivery, diagnostics and the shared clipboard. Loopback only; no Keychain, capture, or input access.")
+            print("Native session tests passed: \(checks) checks; Rust pairing, PIN pairing and per-Mac keys over loopback, peer store, control and display boundaries, the pointer image, cancellation, bounded delivery, diagnostics and the shared clipboard. Loopback only; no Keychain, capture, or input access.")
         } catch {
             fputs("Native session tests failed: \(error.localizedDescription)\n", stderr)
             exit(1)
@@ -467,6 +527,7 @@ enum NativeSessionTests {
         try testTelemetry()
         try testClipboard()
         try testDevicePairing()
+        try testPinPairing()
         try testAsymmetricRevocation()
         try testKeychainErasure()
 

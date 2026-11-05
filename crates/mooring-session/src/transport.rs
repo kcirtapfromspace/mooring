@@ -14,6 +14,7 @@ use crate::cursor::{self, CursorPacket, CursorShape, MAX_CURSOR};
 use crate::devices::{DeviceStore, Via};
 use crate::input::InputEvent;
 use crate::pairing::{CodeKind, MAX_ADDRESSES, PairingCode, local_name, validate_name};
+use crate::pin::{self, HostInfo, MAX_TRIES, Pin};
 use crate::policy::{
     AUDIO, Admission, CAPABILITY_AUDIO, CAPABILITY_CURSOR, CAPABILITY_GESTURES,
     CAPABILITY_HEVC_444, CAPABILITY_LATENCY, CAPABILITY_MENU_BAR_GAP,
@@ -25,6 +26,8 @@ use crate::telemetry::{MAX_TELEMETRY, TelemetryMessage};
 use crate::video::Codec;
 use crate::video::{VideoFrame, VideoPacket};
 use crate::{Error, Result};
+use curve25519_dalek::montgomery::MontgomeryPoint;
+use sha2::{Digest, Sha256};
 use snow::{Builder, HandshakeState, StatelessTransportState};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -50,8 +53,11 @@ const PROLOGUE_V2: &[u8] = b"MacLink direct session v2";
 /// per-device keys reads it as a malformed first message and closes, and the
 /// viewer falls back to the old handshake.
 const MODE_LABEL: &[u8; 15] = b"maclink-mode/2 ";
-/// A one-time pairing code works for this long after it is made.
+/// A one-time pairing code, or a PIN, works for this long after it is made.
 pub(crate) const PAIRING_LIFETIME: Duration = Duration::from_secs(600);
+/// Once a viewer has asked for the PIN exchange, the rest of it may take this
+/// long, across a VPN too. Until then the usual accept grace applies.
+const PIN_HANDSHAKE: Duration = Duration::from_secs(5);
 
 /// How a viewer authenticates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +71,9 @@ pub(crate) enum Mode {
     Device = 2,
     /// The old pairing secret, once, to approve this Mac's device key.
     Migrate = 3,
+    /// A PIN, through SPAKE2, approves this Mac's device key. Only a pairing
+    /// listener takes it, and no session follows.
+    Pin = 4,
 }
 pub(crate) fn mode_hello(mode: Mode) -> [u8; 16] {
     let mut record = [0_u8; 16];
@@ -77,6 +86,7 @@ fn parse_mode_hello(record: &[u8]) -> Option<Mode> {
         [label @ .., 1] if label == MODE_LABEL => Some(Mode::Pair),
         [label @ .., 2] if label == MODE_LABEL => Some(Mode::Device),
         [label @ .., 3] if label == MODE_LABEL => Some(Mode::Migrate),
+        [label @ .., 4] if label == MODE_LABEL => Some(Mode::Pin),
         _ => None,
     }
 }
@@ -388,14 +398,18 @@ fn parse_device_payload(payload: &[u8]) -> Option<(u32, String)> {
 }
 
 /// A per-device handshake (IK or IKpsk1), viewer side: offers `offer` and
-/// sends this Mac's name. Returns the transport keys and protocol version.
-fn device_initiate(
+/// sends this Mac's name. The host's answer may carry details after a NUL:
+/// `check` reads them, and may refuse them, before this Mac confirms, so the
+/// host records nothing for a viewer that turned the answer down. Returns
+/// the transport keys, the protocol version and what `check` returned.
+fn device_initiate<T>(
     mut noise: HandshakeState,
     stream: &TcpStream,
     end: Instant,
     offer: u32,
     name: &str,
-) -> std::result::Result<(StatelessTransportState, u32), (Reached, Error)> {
+    check: impl FnOnce(&[u8]) -> Result<T>,
+) -> std::result::Result<(StatelessTransportState, u32, T), (Reached, Error)> {
     // Closing before answering, as a refusing host does, is a refusal however
     // it surfaces: on a write, or on the read below.
     let unanswered = |error| match error {
@@ -405,9 +419,9 @@ fn device_initiate(
     // Only for latency: on a connection the other end already reset, macOS
     // refuses it, and the write or read below reports the close.
     let _ = stream.set_nodelay(true);
-    let mut incoming = [0_u8; 1024];
-    let mut outgoing = [0_u8; 1024];
-    let mut payload = [0_u8; 1024];
+    let mut incoming = [0_u8; 4096];
+    let mut outgoing = [0_u8; 4096];
+    let mut payload = [0_u8; 4096];
     let size = noise
         .write_message(&device_payload(offer, name), &mut outgoing)
         .map_err(|_| unanswered(Error::Auth))?;
@@ -418,36 +432,52 @@ fn device_initiate(
     let count = noise
         .read_message(&incoming[..size], &mut payload)
         .map_err(|_| answered(Error::Auth))?;
-    let version = handshake_version(&payload[..count])
+    let answer = &payload[..count];
+    let (offered, details) = match answer.iter().position(|byte| *byte == 0) {
+        Some(split) => (&answer[..split], &answer[split + 1..]),
+        None => (answer, &[][..]),
+    };
+    let version = handshake_version(offered)
         .filter(|peer| (PROTOCOL_MIN..=offer).contains(peer))
         .ok_or(answered(Error::Protocol))?;
     if !noise.is_handshake_finished() {
         return Err(answered(Error::Auth));
     }
+    let checked = check(details).map_err(answered)?;
     let crypto = noise
         .into_stateless_transport_mode()
         .map_err(|_| answered(Error::Auth))?;
     confirm_ready(&crypto, stream, true, end, || Ok(())).map_err(answered)?;
-    Ok((crypto, version))
+    Ok((crypto, version, checked))
+}
+/// The usual answer: a protocol version and nothing more.
+fn no_details(details: &[u8]) -> Result<()> {
+    if details.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::Protocol)
+    }
 }
 
 /// Host side. The first message carries the viewer's static key and name:
 /// `admit` may refuse them before anything is sent back, and `commit`
 /// records the approval once the viewer has proved fresh keys, before the
-/// host's last answer. Returns the transport keys, the protocol version, and
-/// what `commit` returned.
+/// host's last answer. A nonempty `details` follows the version in the
+/// answer, after a NUL. Returns the transport keys, the protocol version,
+/// and what `commit` returned.
 fn device_respond<A, C>(
     mut noise: HandshakeState,
     stream: &TcpStream,
     end: Instant,
     offer: u32,
+    details: &[u8],
     admit: impl FnOnce(&[u8; 32], &str) -> Result<A>,
     commit: impl FnOnce(A, &[u8; 32], &str) -> Result<C>,
 ) -> Result<(StatelessTransportState, u32, C)> {
     stream.set_nodelay(true).map_err(io_error)?;
-    let mut incoming = [0_u8; 1024];
-    let mut outgoing = [0_u8; 1024];
-    let mut payload = [0_u8; 1024];
+    let mut incoming = [0_u8; 4096];
+    let mut outgoing = [0_u8; 4096];
+    let mut payload = [0_u8; 4096];
     let size = read_record(stream, &mut incoming, end, &mut 0)?;
     let count = noise
         .read_message(&incoming[..size], &mut payload)
@@ -462,8 +492,13 @@ fn device_respond<A, C>(
     if version < PROTOCOL_MIN {
         return Err(Error::Protocol);
     }
+    let mut answer = handshake_payload(version);
+    if !details.is_empty() {
+        answer.push(0);
+        answer.extend_from_slice(details);
+    }
     let size = noise
-        .write_message(&handshake_payload(version), &mut outgoing)
+        .write_message(&answer, &mut outgoing)
         .map_err(|_| Error::Auth)?;
     write_record(stream, &outgoing[..size], end)?;
     if !noise.is_handshake_finished() {
@@ -1033,7 +1068,30 @@ pub(crate) struct Listener {
     devices: Option<DeviceStore>,
     /// The current one-time code's secret, in memory only, and its expiry.
     pairing: Mutex<Option<(Zeroizing<[u8; 32]>, Instant)>>,
+    /// This Mac's public key, derived from `private`.
+    public: [u8; 32],
+    /// A pairing listener: it takes only PINs, and never starts a session.
+    pin_only: bool,
+    /// The PIN it shows now, in memory only.
+    pin: Mutex<Option<PinOffer>>,
 }
+/// A PIN on screen, and what the sharing Mac tells the Mac that pairs with it.
+struct PinOffer {
+    pin: Pin,
+    details: Vec<u8>,
+    expires: Instant,
+    tries_left: u8,
+    /// Tells this PIN from a newer one made while an attempt was running.
+    serial: u64,
+}
+/// Whether a pairing listener's PIN still works.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PinState {
+    pub active: bool,
+    pub tries_left: u8,
+    pub seconds_left: u32,
+}
+static PIN_SERIAL: AtomicU64 = AtomicU64::new(1);
 impl Listener {
     pub(crate) fn bind(
         address: SocketAddr,
@@ -1042,6 +1100,7 @@ impl Listener {
     ) -> Result<Self> {
         let socket = TcpListener::bind(address).map_err(io_error)?;
         socket.set_nonblocking(true).map_err(io_error)?;
+        let public = MontgomeryPoint::mul_base_clamped(*private).to_bytes();
         Ok(Self {
             socket,
             private,
@@ -1052,7 +1111,61 @@ impl Listener {
             exact_version: AtomicU32::new(0),
             devices: None,
             pairing: Mutex::new(None),
+            public,
+            pin_only: false,
+            pin: Mutex::new(None),
         })
+    }
+    /// A pairing listener for this Mac's identity: it approves devices into
+    /// `devices` with a PIN, whether or not this Mac is sharing.
+    pub(crate) fn bind_pin(
+        address: SocketAddr,
+        private: Zeroizing<[u8; 32]>,
+        devices: DeviceStore,
+    ) -> Result<Self> {
+        let mut listener =
+            Self::bind(address, private, Zeroizing::new([0; 32]))?.with_devices(devices);
+        listener.pin_only = true;
+        Ok(listener)
+    }
+    /// A new PIN, replacing any earlier one; it works once, within
+    /// PAIRING_LIFETIME and MAX_TRIES. `details` is what the Mac that pairs
+    /// learns about this one.
+    pub(crate) fn new_pin(&self, details: &HostInfo) -> Result<Pin> {
+        if !self.pin_only {
+            return Err(Error::Invalid);
+        }
+        let pin = pin::generate()?;
+        *lock(&self.pin)? = Some(PinOffer {
+            pin: pin.clone(),
+            details: details.encode()?,
+            expires: Instant::now() + PAIRING_LIFETIME,
+            tries_left: MAX_TRIES,
+            serial: PIN_SERIAL.fetch_add(1, Ordering::Relaxed),
+        });
+        Ok(pin)
+    }
+    #[cfg(test)]
+    pub(crate) fn expire_pin(&self) {
+        if let Some(offer) = self.pin.lock().unwrap().as_mut() {
+            offer.expires = Instant::now();
+        }
+    }
+    pub(crate) fn clear_pin(&self) -> Result<()> {
+        *lock(&self.pin)? = None;
+        Ok(())
+    }
+    pub(crate) fn pin_state(&self) -> Result<PinState> {
+        let now = Instant::now();
+        Ok(lock(&self.pin)?
+            .as_ref()
+            .filter(|offer| offer.tries_left > 0 && now < offer.expires)
+            .map_or(PinState::default(), |offer| PinState {
+                active: true,
+                tries_left: offer.tries_left,
+                seconds_left: u32::try_from(offer.expires.duration_since(now).as_secs())
+                    .unwrap_or(u32::MAX),
+            }))
     }
     /// A listener that approves devices from `devices`.
     pub(crate) fn with_devices(mut self, devices: DeviceStore) -> Self {
@@ -1131,7 +1244,7 @@ impl Listener {
             }
             Mode::Migrate if devices.load()?.legacy.is_open(now) => Some(self.psk.clone()),
             Mode::Device => None,
-            Mode::Migrate | Mode::Legacy => return Err(Error::Auth),
+            Mode::Migrate | Mode::Legacy | Mode::Pin => return Err(Error::Auth),
         };
         let pattern = if psk.is_some() {
             PAIRING_PATTERN
@@ -1153,6 +1266,7 @@ impl Listener {
             socket,
             end,
             PROTOCOL_MAX,
+            &[],
             |key, _| match mode {
                 // A returning Mac must be approved before the host answers.
                 Mode::Device => Ok(Some(devices.approved(key)?.ok_or(Error::Auth)?)),
@@ -1193,8 +1307,9 @@ impl Listener {
             let _ = socket.shutdown(Shutdown::Both);
         }
     }
-    pub(crate) fn accept(&self, end: Instant) -> Result<Arc<Session>> {
-        let _accepting = direction(&self.accepting)?;
+    /// The next connection, within `end` and then the accept grace, which
+    /// `close` can interrupt until the caller clears `pending`.
+    fn incoming(&self, end: Instant) -> Result<(TcpStream, Instant)> {
         let socket = loop {
             if self.closed.load(Ordering::Acquire) {
                 return Err(Error::Closed);
@@ -1211,6 +1326,14 @@ impl Listener {
         socket.set_nonblocking(false).map_err(io_error)?;
         let end = end.max(Instant::now() + HANDSHAKE_GRACE);
         *lock(&self.pending)? = Some(socket.try_clone().map_err(io_error)?);
+        Ok((socket, end))
+    }
+    pub(crate) fn accept(&self, end: Instant) -> Result<Arc<Session>> {
+        if self.pin_only {
+            return Err(Error::Invalid);
+        }
+        let _accepting = direction(&self.accepting)?;
+        let (socket, end) = self.incoming(end)?;
         let result = (|| {
             if self.closed.load(Ordering::Acquire) {
                 return Err(Error::Closed);
@@ -1243,6 +1366,90 @@ impl Listener {
         lock(&self.pending)?.take();
         result
     }
+    /// A pairing listener's next PIN attempt. Returns the approved device's
+    /// ID and name. Timeout means nobody tried; any other failure was an
+    /// attempt that didn't pair, such as a wrong PIN.
+    pub(crate) fn accept_pin(&self, end: Instant) -> Result<(String, String)> {
+        if !self.pin_only {
+            return Err(Error::Invalid);
+        }
+        let _accepting = direction(&self.accepting)?;
+        let (socket, end) = self.incoming(end)?;
+        let result = (|| {
+            let mut first = [0_u8; 64];
+            let size = read_record(&socket, &mut first, end, &mut 0)?;
+            if parse_mode_hello(&first[..size]) != Some(Mode::Pin) {
+                return Err(Error::Auth);
+            }
+            self.respond_pin(&socket, end.max(Instant::now() + PIN_HANDSHAKE))
+        })();
+        lock(&self.pending)?.take();
+        result
+    }
+    fn respond_pin(&self, socket: &TcpStream, end: Instant) -> Result<(String, String)> {
+        let devices = self.devices.as_ref().ok_or(Error::Internal)?;
+        // A try counts as it starts, so leaving partway doesn't earn another.
+        let (pin, details, serial) = {
+            let mut offer = lock(&self.pin)?;
+            let current = offer.as_mut().ok_or(Error::Auth)?;
+            if current.tries_left == 0 || Instant::now() >= current.expires {
+                *offer = None;
+                return Err(Error::Auth);
+            }
+            current.tries_left -= 1;
+            (current.pin.clone(), current.details.clone(), current.serial)
+        };
+        let (exchange, message) = pin::start(&pin, &self.public, true);
+        drop(pin);
+        let mut offered = [0_u8; 32 + pin::MESSAGE_LENGTH];
+        offered[..32].copy_from_slice(&self.public);
+        offered[32..].copy_from_slice(&message);
+        write_record(socket, &offered, end)?;
+        let mut reply = [0_u8; 64];
+        let size = read_record(socket, &mut reply, end, &mut 0)?;
+        let psk = pin::finish(exchange, &reply[..size])?;
+        let noise = Builder::new(PAIRING_PATTERN.parse().map_err(|_| Error::Internal)?)
+            .local_private_key(&*self.private)
+            .map_err(|_| Error::Auth)?
+            .prologue(&pin_prologue(&offered, &reply[..size]))
+            .map_err(|_| Error::Auth)?
+            .psk(1, &psk)
+            .map_err(|_| Error::Auth)?
+            .build_responder()
+            .map_err(|_| Error::Auth)?;
+        let now = unix_now();
+        let (_, _, approved) = device_respond(
+            noise,
+            socket,
+            end,
+            PROTOCOL_MAX,
+            &details,
+            |_, _| Ok(()),
+            |(), key, name| {
+                let id = devices.approve(key, name, Via::Code, now)?;
+                // Used: the PIN pairs one Mac. A newer PIN stays.
+                let mut offer = lock(&self.pin)?;
+                if offer
+                    .as_ref()
+                    .is_some_and(|current| current.serial == serial)
+                {
+                    *offer = None;
+                }
+                Ok((id, name.to_owned()))
+            },
+        )?;
+        Ok(approved)
+    }
+}
+
+/// Binds the PIN exchange into the handshake: the mode, then a hash of the
+/// sharing Mac's offer (its key and SPAKE2 message) and the viewer's reply.
+fn pin_prologue(offered: &[u8], reply: &[u8]) -> Vec<u8> {
+    let transcript = Sha256::new()
+        .chain_update(offered)
+        .chain_update(reply)
+        .finalize();
+    [mode_prologue(Mode::Pin).as_slice(), transcript.as_slice()].concat()
 }
 
 #[derive(Clone)]
@@ -1575,6 +1782,137 @@ pub(crate) fn connect_paired(
     }
 }
 
+/// Pairs with a PIN shown on the sharing Mac, approving this Mac's device key
+/// there; no session starts. `hosts` are tried as in `connect_paired`, except
+/// that only the first that takes up the PIN exchange is tried with it: each
+/// attempt counts against the PIN. A sharing Mac that closes before then isn't
+/// showing a PIN, which is Unavailable when no other answered.
+///
+/// Returns the saved pairing for that Mac, with the name and addresses it
+/// sent, and the address that connected.
+pub(crate) fn connect_pin(
+    hosts: &[String],
+    port: u16,
+    pin: &Pin,
+    device_private: &[u8; 32],
+    name: &str,
+    end: Instant,
+) -> Result<(PairingCode, String)> {
+    let name = local_name(name);
+    if hosts.is_empty() || hosts.len() > MAX_ADDRESSES || port == 0 {
+        return Err(Error::Invalid);
+    }
+    let stop = StopRace(Arc::new(AtomicBool::new(false)));
+    let (outcomes, mut pending) = race(hosts, port, end, &stop.0);
+    let (mut declined, mut unreachable) = (false, None);
+    while pending > 0 {
+        let Some(outcome) = remaining(end)
+            .ok()
+            .and_then(|left| outcomes.recv_timeout(left).ok())
+        else {
+            unreachable.get_or_insert(Error::Timeout);
+            break;
+        };
+        pending -= 1;
+        let (stream, host, address, at) = match outcome {
+            Candidate::Failed(error) => {
+                unreachable = Some(error);
+                continue;
+            }
+            Candidate::Reached {
+                stream,
+                host,
+                address,
+                at,
+            } => (stream, host, address, at),
+        };
+        let stream = if at.elapsed() > CANDIDATE_FRESH {
+            drop(stream);
+            match remaining(end)
+                .and_then(|left| TcpStream::connect_timeout(&address, left).map_err(io_error))
+            {
+                Ok(fresh) => fresh,
+                Err(error) => {
+                    unreachable = Some(error);
+                    continue;
+                }
+            }
+        } else {
+            stream
+        };
+        let slice = if pending > 0 {
+            end.min(Instant::now() + CANDIDATE_HANDSHAKE)
+        } else {
+            end
+        };
+        match pin_initiate(&stream, pin, device_private, &name, slice, end) {
+            Ok(code) => return Ok((code, host)),
+            // No answer in time says nothing about a PIN.
+            Err((Reached::Unanswered, Error::Timeout)) => unreachable = Some(Error::Timeout),
+            Err((Reached::Unanswered, _)) => declined = true,
+            Err((Reached::Answered, error)) => return Err(error),
+        }
+    }
+    Err(match (declined, unreachable) {
+        (true, _) => Error::Unavailable,
+        (false, Some(error)) => error,
+        (false, None) => Error::Io,
+    })
+}
+
+/// The PIN exchange and pairing handshake on a connected socket. Until the
+/// sharing Mac answers the mode record, within `slice`, it hasn't counted a
+/// try; the rest may take until `end`.
+fn pin_initiate(
+    stream: &TcpStream,
+    pin: &Pin,
+    device_private: &[u8; 32],
+    name: &str,
+    slice: Instant,
+    end: Instant,
+) -> std::result::Result<PairingCode, (Reached, Error)> {
+    #[cfg(test)]
+    let offer = TEST_OFFER.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    let offer = PROTOCOL_MAX;
+    let unanswered = |error| (Reached::Unanswered, error);
+    let _ = stream.set_nodelay(true);
+    write_record(stream, &mode_hello(Mode::Pin), slice).map_err(unanswered)?;
+    let mut offered = [0_u8; 128];
+    let size = read_record(stream, &mut offered, slice, &mut 0).map_err(unanswered)?;
+    let answered = |error| (Reached::Answered, error);
+    let offered = &offered[..size];
+    let host_public: [u8; 32] = offered
+        .get(..32)
+        .and_then(|key| key.try_into().ok())
+        .filter(|_| size == 32 + pin::MESSAGE_LENGTH)
+        .ok_or(answered(Error::Protocol))?;
+    let (exchange, reply) = pin::start(pin, &host_public, false);
+    write_record(stream, &reply, end).map_err(answered)?;
+    let psk = pin::finish(exchange, &offered[32..]).map_err(answered)?;
+    let noise = (|| -> Result<HandshakeState> {
+        Builder::new(PAIRING_PATTERN.parse().map_err(|_| Error::Internal)?)
+            .local_private_key(device_private)
+            .map_err(|_| Error::Auth)?
+            .remote_public_key(&host_public)
+            .map_err(|_| Error::Auth)?
+            .prologue(&pin_prologue(offered, &reply))
+            .map_err(|_| Error::Auth)?
+            .psk(1, &psk)
+            .map_err(|_| Error::Auth)?
+            .build_initiator()
+            .map_err(|_| Error::Auth)
+    })()
+    .map_err(answered)?;
+    // A wrong PIN gave this Mac another key: the sharing Mac can't read the
+    // first message and closes, which device_initiate reports as Auth.
+    let (_, _, code) = device_initiate(noise, stream, end, offer, name, |details| {
+        HostInfo::pairing(details, &host_public)
+    })
+    .map_err(|(_, error)| answered(error))?;
+    Ok(code)
+}
+
 /// How far a per-device attempt got before it failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Reached {
@@ -1622,7 +1960,7 @@ fn connect_mode(
         Error::Closed => (Reached::Unanswered, Error::Auth),
         other => (Reached::Unanswered, other),
     })?;
-    let (crypto, version) = device_initiate(noise, &socket, end, offer, name)?;
+    let (crypto, version, ()) = device_initiate(noise, &socket, end, offer, name, no_details)?;
     // The host recorded any approval before its last answer, so the session
     // is returned even if it drops now: the caller then saves what was
     // approved and finds it closed.

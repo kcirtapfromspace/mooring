@@ -4,14 +4,16 @@ import MetalKit
 final class NativeShareWindow: NSWindowController, NSWindowDelegate {
     var onToggle: (() -> Void)?
     var onCopy: (() -> Void)?
+    var onShowPIN: (() -> Void)?
     var onReset: (() -> Void)?
     var onControlPermission: (() -> Void)?
     var onDiagnostics: (() -> Void)?
     var onAutomaticChange: ((Bool) -> Void)?
     var onClipboardChange: ((Bool) -> Void)?
     let status = label("Sharing is off", size: 14, weight: .medium)
-    let detail = label("Start sharing. Copy a code to your other Mac.", color: .secondaryLabelColor)
+    let detail = label("To pair your other Mac, show a PIN. Sharing can stay off until you want to connect.", color: .secondaryLabelColor)
     let toggle = NSButton(title: "Start sharing", target: nil, action: nil)
+    let showPIN = NSButton(title: "Show PIN…", target: nil, action: nil)
     let copy = NSButton(title: "Copy code", target: nil, action: nil)
     let control = NSButton(title: "Allow control…", target: nil, action: nil)
     private let controlNote = label("Allow Accessibility for remote control.", size: 12, color: .secondaryLabelColor)
@@ -28,19 +30,22 @@ final class NativeShareWindow: NSWindowController, NSWindowDelegate {
         super.init(window: window)
         window.delegate = self
         let heading = MooringAppearance.header("Share this Mac", subtitle: "Your workspace, on your other Mac.")
-        let note = label("A code grants access. Keep it private. Sharing stays on when this window closes.", size: 12, color: .secondaryLabelColor)
+        let note = label("A PIN or code grants access. Keep it private. Sharing stays on when this window closes.", size: 12, color: .secondaryLabelColor)
         let automaticNote = label("Starts with Mooring. Resumes when this Mac wakes and unlocks.", size: 12, color: .secondaryLabelColor)
         let reset = NSButton(title: "Reset pairing", target: self, action: #selector(resetPairing))
         let diagnostics = NSButton(title: "Save diagnostics…", target: self, action: #selector(saveDiagnostics))
         toggle.target = self; toggle.action = #selector(toggleSharing); toggle.keyEquivalent = "\r"
         copy.target = self; copy.action = #selector(copyCode); copy.isEnabled = false
+        copy.toolTip = "A long code for pairing over a VPN, or with Macs on preview 43 or earlier."
+        showPIN.target = self; showPIN.action = #selector(showPairingPIN)
+        showPIN.toolTip = "Show a 6-character PIN to type on your other Mac. Works whether or not this Mac is sharing."
         control.target = self; control.action = #selector(enableControl)
         automatic.target = self; automatic.action = #selector(changeAutomatic)
         clipboard.target = self; clipboard.action = #selector(changeClipboard)
         clipboard.toolTip = "Copy on one Mac and paste on the other while connected. Items password managers mark as private are never shared."
-        for button in [toggle, copy, control, reset, diagnostics] { button.bezelStyle = .rounded }
+        for button in [toggle, showPIN, copy, control, reset, diagnostics] { button.bezelStyle = .rounded }
         MooringAppearance.primary(toggle)
-        let actions = stack([toggle, copy], orientation: .horizontal, spacing: 10)
+        let actions = stack([toggle, showPIN, copy], orientation: .horizontal, spacing: 10)
         let extras = stack([reset, NSView(), diagnostics], orientation: .horizontal, spacing: 10)
         let state = stack([status, detail, actions], spacing: 12)
         detail.widthAnchor.constraint(equalTo: state.widthAnchor).isActive = true
@@ -61,25 +66,149 @@ final class NativeShareWindow: NSWindowController, NSWindowDelegate {
     @objc private func changeAutomatic() { onAutomaticChange?(automatic.state == .on) }
     @objc private func changeClipboard() { onClipboardChange?(clipboard.state == .on) }
     @objc private func copyCode() { onCopy?() }
+    @objc private func showPairingPIN() { onShowPIN?() }
     @objc private func resetPairing() { onReset?() }
     @objc private func enableControl() { onControlPermission?() }
     @objc private func saveDiagnostics() { onDiagnostics?() }
 }
 
+/// The sharing Mac's PIN, for Pair a Mac on another Mac. It pairs one Mac;
+/// closing the window stops it.
+final class NativePinWindow: NSWindowController, NSWindowDelegate {
+    var onNewPIN: (() -> Void)?
+    var onClose: (() -> Void)?
+    private let pin = NSTextField(labelWithString: "")
+    private let status = label("", size: 13, weight: .medium)
+    private let detail = label("", size: 12, color: .secondaryLabelColor)
+    private let newPIN = NSButton(title: "New PIN", target: nil, action: nil)
+    private var shown: String?
+    private var paired = false
+
+    init() {
+        let window = MooringPrivacyWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 400),
+                                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "Pair with a PIN"
+        MooringAppearance.prepare(window)
+        window.isReleasedWhenClosed = false
+        super.init(window: window)
+        window.delegate = self
+        let heading = MooringAppearance.header("Pair with a PIN", subtitle: "Pair once. Connect anytime.")
+        let note = label("On your other Mac: Mooring → Pair a Mac. Choose this Mac and type the PIN.", color: .secondaryLabelColor)
+        pin.font = .monospacedSystemFont(ofSize: 46, weight: .semibold)
+        pin.alignment = .center
+        pin.isSelectable = false
+        status.alignment = .center; detail.alignment = .center
+        let card = stack([pin, status, detail], spacing: 8)
+        card.alignment = .centerX
+        for view in [pin, status, detail] { view.widthAnchor.constraint(equalTo: card.widthAnchor).isActive = true }
+        newPIN.target = self; newPIN.action = #selector(makeNewPIN); newPIN.bezelStyle = .rounded
+        let done = NSButton(title: "Done", target: self, action: #selector(finish))
+        MooringAppearance.primary(done); done.keyEquivalent = "\r"
+        let actions = stack([newPIN, NSView(), done], orientation: .horizontal, spacing: 8)
+        let surface = MooringAppearance.surface(card)
+        let body = stack([heading, note, surface, actions], spacing: 18)
+        let root = window.contentView!; root.addSubview(body)
+        NSLayoutConstraint.activate([
+            body.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 26),
+            body.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -26),
+            body.topAnchor.constraint(equalTo: root.topAnchor, constant: 24)
+        ])
+        for view in [heading, note, surface, actions] { view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
+        self.body = body
+    }
+    private var body: NSStackView?
+    private func fit() {
+        guard let window, let body else { return }
+        body.layoutSubtreeIfNeeded()
+        window.setContentSize(NSSize(width: 480, height: body.fittingSize.height + 48))
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    /// A new PIN, shown in two groups of three.
+    func show(pin value: String) {
+        shown = value; paired = false
+        pin.stringValue = String(value.prefix(3)) + " " + String(value.dropFirst(3))
+        pin.textColor = .labelColor
+        pin.setAccessibilityLabel("PIN " + value.map(String.init).joined(separator: " "))
+        status.stringValue = "Waiting for your other Mac…"
+        newPIN.title = "New PIN"
+        fit()
+    }
+    /// How long the PIN still works, and whether someone tried a wrong one.
+    func update(_ state: MLPinState) {
+        guard shown != nil, !paired else { return }
+        guard state.active == 1 else {
+            pin.textColor = .tertiaryLabelColor
+            status.stringValue = "This PIN no longer works"
+            detail.stringValue = "It ran out of time or tries. Make a new PIN."
+            return
+        }
+        let seconds = Int(state.seconds_left)
+        let left = String(format: "Works for %d:%02d more", seconds / 60, seconds % 60)
+        let tries = Int(state.tries_left)
+        detail.stringValue = tries < Int(ML_PIN_TRIES)
+            ? "\(left). A wrong PIN was tried: \(tries) \(tries == 1 ? "try" : "tries") left."
+            : left + ". It pairs one Mac."
+    }
+    /// `name` paired. `sharing`: whether it can connect now.
+    func showPaired(_ name: String, sharing: Bool) {
+        paired = true
+        pin.textColor = .tertiaryLabelColor
+        status.stringValue = "Paired with \(name)"
+        detail.stringValue = sharing ? "It can connect now." : "It can connect once you start sharing this Mac."
+        newPIN.title = "Pair another Mac"
+        fit()
+    }
+    func showProblem(_ message: String) {
+        shown = nil; pin.stringValue = "—"; pin.textColor = .tertiaryLabelColor
+        status.stringValue = "No PIN"; detail.stringValue = message
+        fit()
+    }
+    @objc private func makeNewPIN() { onNewPIN?() }
+    @objc private func finish() { window?.performClose(nil) }
+    func windowWillClose(_ notification: Notification) { onClose?() }
+}
+
+/// Pair a Mac. By default with a PIN from a Mac nearby, or at an address:
+/// that only pairs, whatever this Mac is showing. A long code from Copy code
+/// still works, and connects as it pairs.
 final class NativePairWindow: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
     var onClose: (() -> Void)?
+    /// Code: the pasted code and an optional address to try first.
     var onConnect: ((String, String) -> Void)?
+    /// PIN: the PIN and the addresses of the Mac it is for.
+    var onPairPIN: ((String, [String]) -> Void)?
+    /// After pairing with a PIN: connect to that Mac now.
+    var onConnectPaired: ((String) -> Void)?
     let code = NSSecureTextField(string: "")
     let address = NSTextField(string: "")
-    let error = label("", size: 12, color: .systemRed)
-    let connect = NSButton(title: "Pair & connect", target: nil, action: nil)
-    private static let instructions = "On your other Mac: Mooring → Share this Mac → Start sharing. Copy its code here."
-    private let note = label(NativePairWindow.instructions, color: .secondaryLabelColor)
+    private let error = label("", size: 12, color: .systemRed)
+    let connect = NSButton(title: "Pair", target: nil, action: nil)
+    private static let pinInstructions = "On your other Mac: Mooring → Share this Mac → Show PIN. Choose that Mac here and type its PIN."
+    private static let instructions = "On your other Mac: Mooring → Share this Mac → Start sharing, then Copy code. Paste it here."
+    private let note = label(NativePairWindow.pinInstructions, color: .secondaryLabelColor)
+    private let macs = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let pinAddress = NSTextField(string: "")
+    private let pin = NSTextField(string: "")
+    private let success = label("", size: 12, color: .secondaryLabelColor)
+    private let cancel = NSButton(title: "Cancel", target: nil, action: nil)
+    private let modeSwitch = NSButton(title: "Use a pairing code instead", target: nil, action: nil)
     private let options = NSButton(title: "Address override", target: nil, action: nil)
+    private var body: NSStackView!
+    private var pinForm: NSStackView!
+    private var pinAddressForm: NSStackView!
+    private var codeForm: NSStackView!
     private var addressForm: NSStackView!
+    private var nearby: [NativeNearbyMac] = []
+    private var usesCode = false
     private var busy = false
+    private var viewing: String?
+    /// The Mac just paired with a PIN, until the form changes.
+    private var pairedID: String?
+    private static let addressItem = "Enter an address…"
+
     init() {
-        let window = MooringPrivacyWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 380),
+        let window = MooringPrivacyWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 420),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Pair a Mac"
         MooringAppearance.prepare(window)
@@ -87,12 +216,27 @@ final class NativePairWindow: NSWindowController, NSWindowDelegate, NSTextFieldD
         super.init(window: window)
         window.delegate = self
         let heading = MooringAppearance.header("Pair a Mac", subtitle: "Pair once. Connect anytime.")
+        macs.target = self; macs.action = #selector(chooseMac); macs.controlSize = .large
+        macs.autoenablesItems = false
+        macs.setAccessibilityLabel("Mac to pair with")
+        pinAddress.placeholderString = "Hostname or IP address"; pinAddress.setAccessibilityLabel("Address of the Mac to pair with")
+        pin.placeholderString = "6 characters"; pin.setAccessibilityLabel("PIN")
+        pin.font = .monospacedSystemFont(ofSize: 20, weight: .medium)
         code.placeholderString = "Paste pairing code"; code.setAccessibilityLabel("Pairing code")
         address.placeholderString = "Optional address"; address.setAccessibilityLabel("Mac address override")
-        code.controlSize = .large; address.controlSize = .large
-        code.delegate = self; address.delegate = self
-        let form = stack([label("Pairing code", size: 12, weight: .medium), code], spacing: 6)
-        code.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
+        for field in [pinAddress, pin, code, address] { field.controlSize = .large; field.delegate = self }
+        pinAddressForm = stack([label("Address", size: 12, weight: .medium), pinAddress], spacing: 6)
+        pinAddress.widthAnchor.constraint(equalTo: pinAddressForm.widthAnchor).isActive = true
+        pinAddressForm.isHidden = true
+        let pinField = stack([label("PIN", size: 12, weight: .medium), pin], spacing: 6)
+        pin.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        let macField = stack([label("Mac", size: 12, weight: .medium), macs], spacing: 6)
+        macs.widthAnchor.constraint(equalTo: macField.widthAnchor).isActive = true
+        pinForm = stack([macField, pinAddressForm, pinField], spacing: 14)
+        pinForm.detachesHiddenViews = true
+        for view in [macField, pinAddressForm!] { view.widthAnchor.constraint(equalTo: pinForm.widthAnchor).isActive = true }
+        let codeField = stack([label("Pairing code", size: 12, weight: .medium), code], spacing: 6)
+        code.widthAnchor.constraint(equalTo: codeField.widthAnchor).isActive = true
         addressForm = stack([label("Address", size: 12, weight: .medium), address], spacing: 6)
         address.widthAnchor.constraint(equalTo: addressForm.widthAnchor).isActive = true
         addressForm.isHidden = true
@@ -101,15 +245,20 @@ final class NativePairWindow: NSWindowController, NSWindowDelegate, NSTextFieldD
         options.imagePosition = .imageLeading
         options.target = self; options.action = #selector(toggleOptions)
         options.toolTip = "Use a different address, such as the sharing Mac’s VPN address."
+        codeForm = stack([codeField, options, addressForm], spacing: 14)
+        codeForm.detachesHiddenViews = true
+        for view in [codeField, addressForm!] { view.widthAnchor.constraint(equalTo: codeForm.widthAnchor).isActive = true }
+        codeForm.isHidden = true
+        modeSwitch.isBordered = false; modeSwitch.target = self; modeSwitch.action = #selector(switchMode)
+        modeSwitch.contentTintColor = .linkColor
+        modeSwitch.toolTip = "For pairing over a VPN, or with a Mac on preview 43 or earlier."
         connect.target = self; connect.action = #selector(pair); connect.keyEquivalent = "\r"
         MooringAppearance.primary(connect)
-        connect.isEnabled = false
-        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelPairing))
+        cancel.target = self; cancel.action = #selector(cancelPairing)
         cancel.bezelStyle = .rounded; cancel.keyEquivalent = "\u{1b}"
-        let actions = stack([NSView(), cancel, connect], orientation: .horizontal, spacing: 8)
-        error.maximumNumberOfLines = 3
-        error.lineBreakMode = .byTruncatingTail
-        let body = stack([heading, note, form, options, addressForm, error, actions], spacing: 18)
+        let actions = stack([modeSwitch, NSView(), cancel, connect], orientation: .horizontal, spacing: 8)
+        for message in [error, success] { message.maximumNumberOfLines = 3; message.lineBreakMode = .byTruncatingTail }
+        body = stack([heading, note, pinForm, codeForm, error, success, actions], spacing: 18)
         body.detachesHiddenViews = true
         let root = window.contentView!; root.addSubview(body)
         NSLayoutConstraint.activate([
@@ -117,40 +266,145 @@ final class NativePairWindow: NSWindowController, NSWindowDelegate, NSTextFieldD
             body.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -26),
             body.topAnchor.constraint(equalTo: root.topAnchor, constant: 24)
         ])
-        for view in [heading, note, form, addressForm!, error, actions] { view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
-        window.initialFirstResponder = code
+        for view in [heading, note, pinForm!, codeForm!, error, success, actions] {
+            view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+        }
+        window.initialFirstResponder = pin
+        setNearby([], pairedIDs: [])
+        refresh()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    /// The Macs nearby showing a PIN (nil: looking failed). The chosen one
+    /// stays chosen while it's listed.
+    func setNearby(_ found: [NativeNearbyMac]?, pairedIDs: Set<String>) {
+        let chosen = selectedNearby
+        let typing = macs.titleOfSelectedItem == Self.addressItem
+        nearby = found ?? []
+        macs.removeAllItems()
+        if nearby.isEmpty {
+            macs.addItem(withTitle: found == nil ? "Couldn’t look for Macs nearby" : "Looking for Macs showing a PIN…")
+            macs.lastItem?.isEnabled = false
+        }
+        for mac in nearby {
+            let name = MooringPrivacy.name(mac.name, id: mac.id ?? mac.name)
+            macs.addItem(withTitle: mac.id.map { pairedIDs.contains($0) } == true ? name + " · paired" : name)
+        }
+        macs.menu?.addItem(.separator())
+        macs.addItem(withTitle: Self.addressItem)
+        if typing || (nearby.isEmpty && !pinAddress.stringValue.isEmpty) {
+            macs.selectItem(withTitle: Self.addressItem)
+        } else if let chosen, let index = nearby.firstIndex(where: { $0.name == chosen.name && $0.id == chosen.id }) {
+            macs.selectItem(at: index)
+        } else {
+            macs.selectItem(at: 0)
+        }
+        pinAddressForm.isHidden = macs.titleOfSelectedItem != Self.addressItem || MooringPrivacy.isEnabled
+        refresh()
+    }
+    private var selectedNearby: NativeNearbyMac? {
+        let index = macs.indexOfSelectedItem
+        return nearby.indices.contains(index) ? nearby[index] : nil
+    }
+    /// The addresses to pair at, or nil until a Mac is chosen.
+    private var pinAddresses: [String]? {
+        if let mac = selectedNearby { return mac.addresses }
+        let typed = pinAddress.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return macs.titleOfSelectedItem == Self.addressItem && !typed.isEmpty ? [typed] : nil
+    }
+
     @objc private func pair() {
-        guard !busy, !code.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        onConnect?(code.stringValue, address.stringValue)
+        guard !busy else { return }
+        if let pairedID { onConnectPaired?(pairedID); return }
+        if usesCode {
+            guard !code.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            onConnect?(code.stringValue, address.stringValue)
+            return
+        }
+        guard let addresses = pinAddresses else { showError("Choose the Mac showing the PIN, or enter its address."); return }
+        guard let value = NativeTransport.normalizedPIN(pin.stringValue) else {
+            showError("A PIN is 6 letters and digits, as shown on the other Mac."); return
+        }
+        onPairPIN?(value, addresses)
     }
     @objc private func cancelPairing() { window?.performClose(nil) }
+    @objc private func chooseMac() {
+        pinAddressForm.isHidden = macs.titleOfSelectedItem != Self.addressItem || MooringPrivacy.isEnabled
+        if !pinAddressForm.isHidden { window?.makeFirstResponder(pinAddress) }
+        changed()
+    }
+    @objc private func switchMode() {
+        usesCode.toggle()
+        changed()
+        window?.makeFirstResponder(usesCode ? code : pin)
+    }
     @objc private func toggleOptions() {
         let expanded = options.state == .on
         addressForm.isHidden = !expanded
         options.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
-        window?.setContentSize(NSSize(width: 560, height: expanded ? 460 : 380))
+        refresh()
     }
-    /// `name`: the Mac on screen now, which disconnects once the new one connects.
-    func setViewing(_ name: String?) {
-        note.stringValue = name.map { Self.instructions + " \($0) disconnects once the new Mac connects." } ?? Self.instructions
-    }
+    /// `name`: the Mac on screen now. Pairing with a code connects, so that Mac
+    /// disconnects once the new one connects; a PIN only pairs.
+    func setViewing(_ name: String?) { viewing = name; refresh() }
     func setPrivacy(_ hidden: Bool) {
         addressForm.isHidden = hidden || options.state != .on
         options.isHidden = hidden
         if hidden { options.state = .off }
+        pinAddressForm.isHidden = hidden || macs.titleOfSelectedItem != Self.addressItem
+        refresh()
     }
-    func controlTextDidChange(_ obj: Notification) {
-        connect.isEnabled = !busy && !code.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    /// After pairing with a PIN: `name` is in the list, and Connect opens it.
+    func showPaired(_ name: String, peerID: String) {
+        pairedID = peerID
+        pin.stringValue = ""
         error.stringValue = ""
+        success.stringValue = "Paired with \(name). It’s in your list, ready to connect anytime."
+        refresh()
+    }
+    func controlTextDidChange(_ obj: Notification) { changed() }
+    /// Says why pairing didn't work; empty clears it.
+    func showError(_ message: String) { error.stringValue = message; refresh() }
+    /// Any edit starts over from a pairing just made.
+    private func changed() {
+        pairedID = nil; success.stringValue = ""; error.stringValue = ""
+        refresh()
     }
     func windowWillClose(_ notification: Notification) { onClose?() }
     func setBusy(_ busy: Bool) {
         self.busy = busy
-        connect.isEnabled = !busy && !code.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        code.isEnabled = !busy; address.isEnabled = !busy; options.isEnabled = !busy
-        connect.title = busy ? "Connecting…" : "Pair & connect"
+        refresh()
+    }
+    private func refresh() {
+        pinForm.isHidden = usesCode
+        codeForm.isHidden = !usesCode
+        modeSwitch.attributedTitle = NSAttributedString(string: usesCode ? "Use a PIN instead" : "Use a pairing code instead",
+                                                        attributes: [.foregroundColor: NSColor.linkColor, .font: NSFont.systemFont(ofSize: 12)])
+        if usesCode {
+            note.stringValue = viewing.map { Self.instructions + " \($0) disconnects once the new Mac connects." } ?? Self.instructions
+        } else {
+            note.stringValue = Self.pinInstructions
+        }
+        success.isHidden = success.stringValue.isEmpty
+        error.isHidden = error.stringValue.isEmpty
+        let controls: [NSControl] = [code, address, pin, pinAddress, macs, options, modeSwitch]
+        for control in controls { control.isEnabled = !busy }
+        cancel.title = pairedID == nil ? "Cancel" : "Done"
+        if busy {
+            connect.title = usesCode ? "Connecting…" : "Pairing…"
+            connect.isEnabled = false
+        } else if pairedID != nil {
+            connect.title = "Connect"; connect.isEnabled = true
+        } else if usesCode {
+            connect.title = "Pair & connect"
+            connect.isEnabled = !code.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        } else {
+            connect.title = "Pair"
+            connect.isEnabled = pinAddresses != nil && NativeTransport.normalizedPIN(pin.stringValue) != nil
+        }
+        guard let window else { return }
+        body.layoutSubtreeIfNeeded()
+        window.setContentSize(NSSize(width: 560, height: max(320, body.fittingSize.height + 48)))
     }
 }
 

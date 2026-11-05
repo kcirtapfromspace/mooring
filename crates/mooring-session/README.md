@@ -13,8 +13,27 @@ time on both sides of the boundary.
 
 ## Pairing
 
-Each viewing Mac has its own Noise static key; the sharing Mac approves keys. A
-one-time code supplies the sharing Mac's public key and a 32-byte random secret
+Each viewing Mac has its own Noise static key; the sharing Mac approves keys,
+with a PIN or a one-time code.
+
+A PIN is six characters of Crockford base32 (no I, L, O or U; typing ignores case,
+spaces and dashes, and reads O, I and L as 0, 1 and 1). A separate pairing
+listener (`ml_pin_listen`, port 45901) holds it in memory while the sharing Mac
+shows it. It never starts a session, so it works whether or not that Mac is
+sharing or being viewed. A PIN pairs one Mac, within ten minutes and five
+attempts, each counted as it starts. About 30 bits is far too little for a key,
+so SPAKE2 over Ed25519 (RustCrypto's `spake2` 0.4, MIT OR Apache-2.0, unaudited)
+turns it into one. Each side gets the same 32-byte key only if both used the same
+PIN, so every guess needs a live attempt. The sharing Mac's public key is bound
+into the exchange through its SPAKE2 identity, and small-order points are
+refused. The key is then the secret of the usual pairing handshake (mode 4,
+below), whose answer also carries the sharing Mac's name and addresses as JSON
+(`name`, `address`, `addresses`). The viewer checks them strictly before it
+confirms, then saves a device pairing as for a code. Macs nearby find a pairing
+listener through Bonjour (`_mooring-pair._tcp`), which advertises its name, peer
+ID and addresses. None of that is trusted: a false entry can only fail the PIN.
+
+A one-time code supplies the sharing Mac's public key and a 32-byte random secret
 that approves one key, once, within ten minutes. It is `MLP2.` followed by strict
 padded base64 of a JSON object with exactly `version` (2), `address`, `name`,
 `publicKey` and `secret`, and optionally `addresses`: the sharing Mac's other
@@ -75,8 +94,13 @@ earlier preference list is imported once.
 A per-device connection starts with a 16-byte plain-text record,
 `mooring-mode/2 ` and a mode byte: 1 pairs with a one-time code
 (`Noise_IKpsk1_25519_ChaChaPoly_BLAKE2s`, the secret at position 1), 2 connects
-with an approved key (`Noise_IK_25519_ChaChaPoly_BLAKE2s`), and 3 moves a
-long-lived pairing over (IKpsk1 with the old secret). The prologue is
+with an approved key (`Noise_IK_25519_ChaChaPoly_BLAKE2s`), 3 moves a
+long-lived pairing over (IKpsk1 with the old secret), and 4 pairs with a PIN on a
+pairing listener. For mode 4 the sharing Mac answers with its public key and its
+SPAKE2 message, the viewer replies with its own, and IKpsk1 follows with the
+SPAKE2 key as the secret and a SHA-256 of both messages appended to the prologue.
+A sharing listener refuses mode 4, and a pairing listener refuses every other
+mode. The prologue is
 `Mooring direct session v2` followed by the mode byte, so the mode can't change in
 transit. The viewer's first payload is its protocol offer, a NUL and its computer
 name. The sharing Mac refuses an unknown key, or a wrong secret, before it answers.

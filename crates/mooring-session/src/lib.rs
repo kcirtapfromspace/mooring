@@ -1,7 +1,9 @@
 //! Experimental authenticated duplex session for the Mooring LAN prototype.
 //!
 //! Noise IK pins the responder identity and proves each viewer's own key, which
-//! the host approves once with a one-time secret (IKpsk1). Hosts that shared
+//! the host approves once with a one-time secret (IKpsk1): from a long code, or
+//! from a six-character PIN through SPAKE2 (RustCrypto's `spake2`, MIT OR
+//! Apache-2.0, also unaudited). Hosts that shared
 //! before per-device keys also accept, for a while, the older NKpsk0 handshake
 //! with its long-lived 32-byte pairing secret. `snow` is MIT OR Apache-2.0 and explicitly reports no
 //! formal audit: https://github.com/mcginty/snow. This crate is not an audited
@@ -26,6 +28,7 @@ mod flow;
 mod input;
 mod pairing;
 mod peers;
+mod pin;
 mod policy;
 mod telemetry;
 mod transport;

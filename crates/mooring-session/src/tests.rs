@@ -5,8 +5,8 @@ use crate::Error;
 use crate::ffi::*;
 use crate::policy::{CLIPBOARD, CONTROL, INPUT, TELEMETRY, VIDEO};
 use crate::transport::{
-    HANDSHAKE_PAYLOAD, MAX_CONTROL, MAX_INPUT, MAX_RECORD, MAX_VIDEO, PROLOGUE, builder, deadline,
-    read_record, session, write_exact, write_record,
+    HANDSHAKE_PAYLOAD, MAX_CONTROL, MAX_INPUT, MAX_RECORD, MAX_VIDEO, Mode, PROLOGUE, builder,
+    deadline, mode_hello, read_record, session, write_exact, write_record,
 };
 use crate::video::tests::{IDR, P_SLICE, PPS, SPS};
 use std::ffi::{CString, c_char};
@@ -3280,5 +3280,375 @@ fn address_lists_cross_the_c_abi_strictly() {
             "studio.local".into(),
             "100.122.9.8 192.168.25.201".into()
         )
+    );
+}
+
+/// A sharing Mac's pairing listener, and the device list it approves into.
+struct PinHost {
+    listener: Owned,
+    private: [u8; 32],
+    public: [u8; 32],
+    store: Scratch,
+}
+fn pin_host() -> PinHost {
+    crate::transport::TEST_OFFER.with(|value| value.set(5));
+    let (private, public, _) = identity();
+    let store = Scratch::new();
+    assert_eq!(unsafe { ml_devices_init(store.1.as_ptr(), 0) }, 0);
+    let mut id = 0;
+    assert_eq!(
+        unsafe {
+            ml_pin_listen(
+                c"127.0.0.1".as_ptr(),
+                0,
+                private.as_ptr(),
+                store.1.as_ptr(),
+                &mut id,
+            )
+        },
+        0
+    );
+    PinHost {
+        listener: Owned(id),
+        private,
+        public,
+        store,
+    }
+}
+impl PinHost {
+    fn port(&self) -> u16 {
+        ml_session_listener_port(self.listener.0)
+    }
+    fn new_pin(&self) -> String {
+        let mut out = [0 as c_char; ML_PIN_CAPACITY];
+        assert_eq!(
+            unsafe {
+                ml_listener_new_pin(
+                    self.listener.0,
+                    c"Studio.local".as_ptr(),
+                    c" Studio\n".as_ptr(),
+                    c"127.0.0.1 192.168.1.5 vnc://bad".as_ptr(),
+                    out.as_mut_ptr(),
+                )
+            },
+            0
+        );
+        text(&out)
+    }
+    fn state(&self) -> MLPinState {
+        let mut state = MLPinState::default();
+        assert_eq!(
+            unsafe { ml_listener_pin_state(self.listener.0, &mut state) },
+            0
+        );
+        state
+    }
+    fn device_ids(&self) -> Vec<String> {
+        let mut devices: Vec<MLDevice> = (0..ML_DEVICES_MAX)
+            .map(|_| MLDevice {
+                paired: 0,
+                last_seen: 0,
+                id: [0; ML_PEER_ID_CAPACITY],
+                name: [0; ML_TEXT_CAPACITY],
+                via: 0,
+            })
+            .collect();
+        let (mut count, mut legacy) = (0, MLLegacyState::default());
+        assert_eq!(
+            unsafe {
+                ml_devices_load(
+                    self.store.1.as_ptr(),
+                    devices.as_mut_ptr(),
+                    devices.len(),
+                    &mut count,
+                    &mut legacy,
+                )
+            },
+            0
+        );
+        devices[..count]
+            .iter()
+            .map(|device| text(&device.id))
+            .collect()
+    }
+}
+/// A PIN attempt on the host: the paired device's ID and name, or a status.
+type PinAttempt = Result<(String, String), i32>;
+/// Runs `viewer` while the pairing listener takes attempts, returning the
+/// viewer's result and each attempt's outcome on the host.
+fn pin_exchange<T>(listener: u64, viewer: impl FnOnce() -> T) -> (T, Vec<PinAttempt>) {
+    let (stop, stopped) = mpsc::channel::<()>();
+    let host = std::thread::spawn(move || {
+        let mut results = vec![];
+        loop {
+            let mut id = [0 as c_char; ML_PEER_ID_CAPACITY];
+            let mut name = [0 as c_char; ML_TEXT_CAPACITY];
+            match unsafe { ml_pin_accept(listener, 100, id.as_mut_ptr(), name.as_mut_ptr()) } {
+                0 => results.push(Ok((text(&id), text(&name)))),
+                status if status == Error::Timeout as i32 => {
+                    if stopped.try_recv().is_ok() {
+                        return results;
+                    }
+                }
+                status => results.push(Err(status)),
+            }
+        }
+    });
+    let result = viewer();
+    stop.send(()).unwrap();
+    (result, host.join().unwrap())
+}
+/// Pairs with `pin` at `port`: the status, the saved pairing and the address used.
+fn pin_pair(port: u16, pin: &str, device: &[u8; 32]) -> (i32, MLPairingCode, String) {
+    let pin = CString::new(pin).unwrap();
+    let mut code = empty_code();
+    let mut used = [0 as c_char; ML_TEXT_CAPACITY];
+    let status = unsafe {
+        ml_pin_pair(
+            c"127.0.0.1".as_ptr(),
+            port,
+            pin.as_ptr(),
+            device.as_ptr(),
+            c" MacBook\u{200b} Pro\n".as_ptr(),
+            5000,
+            &mut code,
+            used.as_mut_ptr(),
+        )
+    };
+    (status, code, text(&used))
+}
+/// One character changed, so it is still a valid PIN.
+fn wrong_pin(pin: &str) -> String {
+    let last = if pin.ends_with('Z') { "Y" } else { "Z" };
+    format!("{}{last}", &pin[..5])
+}
+
+#[test]
+fn a_pin_pairs_one_mac_without_a_session_and_its_key_then_connects() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let host = pin_host();
+    let pin = host.new_pin();
+    assert_eq!(pin.len(), 6);
+    let state = host.state();
+    assert_eq!((state.active, state.tries_left), (1, ML_PIN_TRIES));
+    assert!(
+        (590..=600).contains(&state.seconds_left),
+        "{}",
+        state.seconds_left
+    );
+
+    let (device, device_id) = device_key();
+    // Typed loosely: lowercase, with a space.
+    let typed = format!("{} {}", pin[..3].to_lowercase(), &pin[3..]);
+    let ((status, code, used), results) =
+        pin_exchange(host.listener.0, || pin_pair(host.port(), &typed, &device));
+    assert_eq!((status, used.as_str()), (0, "127.0.0.1"));
+    assert_eq!(
+        results,
+        vec![Ok((device_id.clone(), "MacBook Pro".to_string()))]
+    );
+    assert_eq!(
+        (
+            text(&code.address),
+            text(&code.name),
+            text(&code.alternates),
+            code.public_key,
+            code.secret,
+            code.kind
+        ),
+        (
+            "studio.local".to_string(),
+            "Studio".to_string(),
+            "127.0.0.1 192.168.1.5".to_string(),
+            host.public,
+            [0; 32],
+            PAIRING_DEVICE
+        )
+    );
+    assert_eq!(host.device_ids(), vec![device_id.clone()]);
+    assert_eq!(host.state().active, 0, "a PIN pairs one Mac");
+
+    // The PIN is used up.
+    let ((status, ..), results) = pin_exchange(host.listener.0, || {
+        pin_pair(host.port(), &pin, &identity().0)
+    });
+    assert_eq!(status, Error::Unavailable as i32);
+    assert!(results.iter().all(Result::is_err));
+
+    // Sharing with the same identity, the approved key connects as a device.
+    let (_, _, psk) = identity();
+    let mut sharing = 0;
+    assert_eq!(
+        unsafe {
+            ml_session_listen_devices(
+                c"127.0.0.1".as_ptr(),
+                0,
+                host.private.as_ptr(),
+                psk.as_ptr(),
+                host.store.1.as_ptr(),
+                &mut sharing,
+            )
+        },
+        0
+    );
+    let sharing = Owned(sharing);
+    let ((status, viewer, mode), mut sessions) = exchange(sharing.0, || {
+        connect_paired(ml_session_listener_port(sharing.0), &code, &device)
+    });
+    assert_eq!(
+        (status, mode, statuses(&sessions)),
+        (0, MODE_DEVICE, vec![0])
+    );
+    let session = sessions.pop().unwrap().unwrap();
+    assert_eq!(peer_device(session.0), device_id);
+    assert_eq!(hello(viewer.unwrap().0), TEST_CAPABILITIES);
+}
+
+#[test]
+fn wrong_pins_and_abandoned_tries_count_until_the_pin_stops() {
+    let host = pin_host();
+    let pin = host.new_pin();
+    let (device, _) = device_key();
+    let ((status, ..), results) = pin_exchange(host.listener.0, || {
+        pin_pair(host.port(), &wrong_pin(&pin), &device)
+    });
+    assert_eq!(status, Error::Auth as i32, "a wrong PIN is refused");
+    assert_eq!(results.len(), 1);
+    assert!(results[0].is_err());
+    assert_eq!(host.state().tries_left, ML_PIN_TRIES - 1);
+
+    // Leaving after the sharing Mac's offer still uses a try.
+    let (_, results) = pin_exchange(host.listener.0, || {
+        let socket = TcpStream::connect(("127.0.0.1", host.port())).unwrap();
+        let end = Instant::now() + Duration::from_secs(5);
+        write_record(&socket, &mode_hello(Mode::Pin), end).unwrap();
+        let mut offer = [0; 128];
+        assert_eq!(read_record(&socket, &mut offer, end, &mut 0).unwrap(), 65);
+        drop(socket);
+        std::thread::sleep(Duration::from_millis(100));
+    });
+    assert_eq!(results.len(), 1);
+    assert_eq!(host.state().tries_left, ML_PIN_TRIES - 2);
+
+    for _ in 2..ML_PIN_TRIES {
+        let ((status, ..), _) = pin_exchange(host.listener.0, || {
+            pin_pair(host.port(), &wrong_pin(&pin), &device)
+        });
+        assert_eq!(status, Error::Auth as i32);
+    }
+    assert_eq!(host.state().active, 0, "out of tries");
+    let ((status, ..), _) = pin_exchange(host.listener.0, || pin_pair(host.port(), &pin, &device));
+    assert_eq!(
+        status,
+        Error::Unavailable as i32,
+        "even the right PIN no longer works"
+    );
+    assert!(host.device_ids().is_empty());
+
+    // A new PIN starts over; an expired one stops.
+    let pin = host.new_pin();
+    assert_eq!(host.state().tries_left, ML_PIN_TRIES);
+    crate::transport::listener(host.listener.0)
+        .unwrap()
+        .expire_pin();
+    assert_eq!(host.state().active, 0);
+    let ((status, ..), _) = pin_exchange(host.listener.0, || pin_pair(host.port(), &pin, &device));
+    assert_eq!(status, Error::Unavailable as i32);
+    let pin = host.new_pin();
+    assert_eq!(ml_listener_clear_pin(host.listener.0), 0);
+    let ((status, ..), _) = pin_exchange(host.listener.0, || pin_pair(host.port(), &pin, &device));
+    assert_eq!(status, Error::Unavailable as i32);
+    assert!(host.device_ids().is_empty());
+}
+
+#[test]
+fn pins_and_sessions_never_cross_listeners() {
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let host = pin_host();
+    let (device, _) = device_key();
+    // Nobody showing a PIN, or nothing listening at all.
+    let ((status, ..), _) =
+        pin_exchange(host.listener.0, || pin_pair(host.port(), "K7QM2P", &device));
+    assert_eq!(status, Error::Unavailable as i32);
+    let closed = pin_host();
+    let port = closed.port();
+    drop(closed);
+    assert_eq!(
+        pin_pair(port, "K7QM2P", &device).0,
+        Error::Unavailable as i32
+    );
+    // A pairing listener starts no session, and takes no code or device key.
+    let mut session = 0;
+    assert_eq!(
+        unsafe { ml_session_accept(host.listener.0, 100, &mut session) },
+        Error::Invalid as i32
+    );
+    host.new_pin();
+    let code = saved_pairing(&host.public);
+    let ((status, ..), results) = pin_exchange(host.listener.0, || {
+        connect_paired(host.port(), &code, &device)
+    });
+    assert_eq!(status, Error::Auth as i32);
+    assert!(!results.is_empty() && results.iter().all(Result::is_err));
+    assert_eq!(host.state().tries_left, ML_PIN_TRIES, "not a PIN attempt");
+
+    // A sharing listener takes no PIN, and makes none.
+    let sharing = device_host(false);
+    let mut out = [0 as c_char; ML_PIN_CAPACITY];
+    assert_eq!(
+        unsafe {
+            ml_listener_new_pin(
+                sharing.listener.0,
+                c"studio.local".as_ptr(),
+                c"Studio".as_ptr(),
+                ptr::null(),
+                out.as_mut_ptr(),
+            )
+        },
+        Error::Invalid as i32
+    );
+    let ((status, ..), results) = exchange(sharing.listener.0, || {
+        pin_pair(sharing.port(), "K7QM2P", &device)
+    });
+    assert_eq!(status, Error::Unavailable as i32);
+    assert!(results.iter().all(Result::is_err));
+    assert!(sharing.devices().0.is_empty());
+}
+
+#[test]
+fn typed_pins_normalize_across_the_abi() {
+    let mut out = [0 as c_char; ML_PIN_CAPACITY];
+    assert_eq!(
+        unsafe { ml_pin_normalize(c"k7q-m2p".as_ptr(), out.as_mut_ptr()) },
+        0
+    );
+    assert_eq!(text(&out), "K7QM2P");
+    assert_eq!(
+        unsafe { ml_pin_normalize(c"o1l 2u3".as_ptr(), out.as_mut_ptr()) },
+        Error::Invalid as i32
+    );
+    assert_eq!(text(&out), "", "a failed call leaves no partial result");
+    assert_eq!(
+        unsafe { ml_pin_normalize(ptr::null(), out.as_mut_ptr()) },
+        Error::Invalid as i32
+    );
+    let (device, _) = device_key();
+    let mut code = empty_code();
+    let mut used = [0 as c_char; ML_TEXT_CAPACITY];
+    assert_eq!(
+        unsafe {
+            ml_pin_pair(
+                c"127.0.0.1".as_ptr(),
+                1,
+                c"K7QM2".as_ptr(),
+                device.as_ptr(),
+                c"Mac".as_ptr(),
+                1000,
+                &mut code,
+                used.as_mut_ptr(),
+            )
+        },
+        Error::Invalid as i32,
+        "a malformed PIN never reaches the network"
     );
 }

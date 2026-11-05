@@ -3,6 +3,7 @@ import IOKit.pwr_mgt
 import ApplicationServices
 import SystemConfiguration
 import CoreVideo
+import CryptoKit
 
 /// Host input checks run on the network thread for every event. Session
 /// eligibility and permission are re-read at most every 250 ms rather than per
@@ -58,6 +59,17 @@ final class NativeSessionCoordinator {
     private let deviceStore = NativeDeviceStore()
     private var shareWindow: NativeShareWindow?
     private var pairWindow: NativePairWindow?
+    /// Host: the PIN on screen, its pairing listener and Bonjour advert. The
+    /// listener runs while the window is open, whether or not this Mac shares.
+    private var pinWindow: NativePinWindow?
+    private var pinListener: NativeTransport?
+    private var pinToken: NativeRunToken?
+    private var pinAdvert: NativePinAdvert?
+    private var pinTimer: Timer?
+    /// Viewer: Macs nearby showing a PIN, while Pair a Mac is open, and a
+    /// PIN pairing in flight.
+    private let pinBrowser = NativePinBrowser()
+    private var pinPairing: NativeRunToken?
     private var viewerWindow: NativeViewerWindow?
     private var listener: NativeTransport?
     private var sharingToken: NativeRunToken?
@@ -296,6 +308,7 @@ final class NativeSessionCoordinator {
                 guard let self else { return }
                 self.stopSharing(reason: self.pausedReason("Sharing stopped while this Mac sleeps or its user session is inactive."))
                 self.pauseViewer(reason: "This Mac went to sleep or changed user session.")
+                self.endPINForPrivacy()
             })
         }
         // Owner-only local socket; a second running copy leaves it to the first.
@@ -307,6 +320,7 @@ final class NativeSessionCoordinator {
             guard let self else { return }
             self.pauseSharing("This Mac locked or its display went to sleep.")
             self.pauseViewer(reason: "This Mac locked or its display went to sleep.")
+            self.endPINForPrivacy()
         }
         // Announce HEVC 4:4:4 and sound only after this Mac has proven it can
         // encode and decode them. Sessions wait for this; if the tests stall,
@@ -352,6 +366,7 @@ final class NativeSessionCoordinator {
                 if self.isSharing { self.stopSharingByUser() } else { self.userStoppedSharing = false; self.startSharing() }
             }
             controller.onCopy = { [weak self] in self?.copyPairingCode() }
+            controller.onShowPIN = { [weak self] in self?.showPIN() }
             controller.onReset = { [weak self] in self?.resetPairing() }
             controller.onControlPermission = { [weak self] in self?.allowKeyboardAndMouse() }
             controller.onAutomaticChange = { [weak self] enabled in self?.setSharingAutomatically(enabled) }
@@ -452,30 +467,38 @@ final class NativeSessionCoordinator {
             return
         }
         do {
-            var identity: NativeHostIdentity
-            if let saved = try keychain.hostIdentity() { try saved.validate(); identity = saved }
-            else {
-                // A new identity approves no Mac: clear any list left from an earlier one first.
-                try deviceStore.reset()
-                identity = try NativeHostIdentity.create(); try keychain.saveHostIdentity(identity)
-            }
-            // A Mac that shared before per-device keys keeps accepting its old
-            // code, so its paired Macs can move over; a new identity never does.
-            try deviceStore.prepare(acceptOldCode: identity.listsDevices != true)
-            if identity.listsDevices != true {
-                var marked = identity; marked.listsDevices = true
-                do { try keychain.saveHostIdentity(marked); identity = marked }
-                catch { NativeLog.session.error("couldn't note the approved-Mac list with this Mac's identity") }
-            }
+            let identity = try preparedHostIdentity()
             let listener = try NativeTransport.listen(identity: identity, devices: deviceStore)
             let token = NativeRunToken()
-            self.listener = listener; sharingToken = token; hostIdentity = identity
+            self.listener = listener; sharingToken = token
             NativeLog.session.notice("sharing started \(automatic ? "automatically" : "by the user", privacy: .public)")
             refreshShare("Copy a code to your other Mac. Sharing stays on when this window closes.")
             acceptNext(listener: listener, token: token)
             permissionTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.updateHostPermission() }
             if let permissionTimer { RunLoop.main.add(permissionTimer, forMode: .common) }
         } catch { refreshShare(error.localizedDescription) }
+    }
+
+    /// This Mac's sharing identity, made on first use, with its list of
+    /// approved Macs ready. Sharing and showing a PIN both use it.
+    private func preparedHostIdentity() throws -> NativeHostIdentity {
+        var identity: NativeHostIdentity
+        if let saved = try keychain.hostIdentity() { try saved.validate(); identity = saved }
+        else {
+            // A new identity approves no Mac: clear any list left from an earlier one first.
+            try deviceStore.reset()
+            identity = try NativeHostIdentity.create(); try keychain.saveHostIdentity(identity)
+        }
+        // A Mac that shared before per-device keys keeps accepting its old
+        // code, so its paired Macs can move over; a new identity never does.
+        try deviceStore.prepare(acceptOldCode: identity.listsDevices != true)
+        if identity.listsDevices != true {
+            var marked = identity; marked.listsDevices = true
+            do { try keychain.saveHostIdentity(marked); identity = marked }
+            catch { NativeLog.session.error("couldn't note the approved-Mac list with this Mac's identity") }
+        }
+        hostIdentity = identity
+        return identity
     }
 
     /// Runs at launch and once a second. Retries are spaced five seconds apart.
@@ -1050,12 +1073,159 @@ final class NativeSessionCoordinator {
     }
     private func resetPairing() {
         stopSharing(reason: "Pairing reset requested.")
+        // A PIN on screen belongs to the identity being replaced.
+        pinWindow?.close(); stopPIN()
         do {
             // Approvals first: if they can't be cleared, the old identity stays.
             try deviceStore.reset()
             let identity = try NativeHostIdentity.create(); try keychain.saveHostIdentity(identity); hostIdentity = identity
             refreshShare("No Mac can connect until it pairs again. Start sharing and copy a new code.")
         } catch { refreshShare(error.localizedDescription) }
+    }
+
+    /// Shows a PIN another Mac can pair with in Pair a Mac, whether or not this
+    /// Mac is sharing, and while another Mac is viewing it.
+    func showPIN() {
+        if pinWindow == nil {
+            let controller = NativePinWindow(); pinWindow = controller
+            controller.onNewPIN = { [weak self] in self?.makePIN() }
+            controller.onClose = { [weak self] in self?.stopPIN() }
+        }
+        pinWindow?.showWindow(nil); pinWindow?.window?.center(); NSApp.activate(ignoringOtherApps: true)
+        if pinToken == nil { makePIN() }
+    }
+    /// A new PIN, replacing any earlier one, on a pairing listener started if needed.
+    private func makePIN() {
+        do {
+            let listener: NativeTransport
+            if let pinListener, pinToken?.isActive == true {
+                listener = pinListener
+            } else {
+                stopPIN()
+                listener = try NativeTransport.listenForPIN(identity: try preparedHostIdentity(), devices: deviceStore)
+                let token = NativeRunToken()
+                pinListener = listener; pinToken = token
+                acceptPINs(listener, token: token)
+                let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.refreshPIN() }
+                RunLoop.main.add(timer, forMode: .common); pinTimer = timer
+            }
+            let localName = (SCDynamicStoreCopyLocalHostName(nil) as String? ?? "localhost") + ".local"
+            let others = NativePairingCode.localAddresses()
+            let pin = try listener.newPIN(address: localName, computerName: NativeDeviceKey.computerName, alternates: others)
+            pinWindow?.show(pin: pin)
+            pinAdvert?.stop()
+            pinAdvert = hostIdentity.flatMap { identity in
+                NativePinAdvert(name: NativeDeviceKey.computerName, port: NativeTransport.pinPort,
+                                peerID: SHA256.hash(data: identity.publicKey).map { String(format: "%02x", $0) }.joined(),
+                                addresses: [localName] + others)
+            }
+            if pinAdvert == nil { NativeLog.session.error("couldn't advertise the PIN nearby; pair by address instead") }
+            NativeLog.session.notice("showing a pairing PIN")
+            refreshPIN()
+        } catch {
+            stopPIN()
+            pinWindow?.showProblem(error.localizedDescription)
+        }
+    }
+    /// Takes PIN attempts until the window closes. Each that didn't pair
+    /// shows in the window as a try used.
+    private func acceptPINs(_ listener: NativeTransport, token: NativeRunToken) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            while token.isActive {
+                do {
+                    guard let device = try listener.acceptPIN() else { continue }
+                    DispatchQueue.main.async { self?.pinPaired(device, token: token) }
+                } catch {
+                    guard token.isActive else { return }
+                    DispatchQueue.main.async { self?.refreshPIN() }
+                    Thread.sleep(forTimeInterval: 0.2)
+                }
+            }
+        }
+    }
+    private func pinPaired(_ device: (id: String, name: String), token: NativeRunToken) {
+        guard token.isActive, pinToken === token else { return }
+        pinAdvert?.stop(); pinAdvert = nil
+        NativeLog.session.notice("a Mac paired with this Mac's PIN")
+        pinWindow?.showPaired(MooringPrivacy.name(device.name, id: device.id), sharing: isSharing)
+        refreshShare()
+    }
+    /// Once a second: how long the PIN works, and its tries. A PIN that
+    /// stopped working is no longer advertised.
+    private func refreshPIN() {
+        guard let state = pinListener?.pinState else { return }
+        if state.active == 0 { pinAdvert?.stop(); pinAdvert = nil }
+        pinWindow?.update(state)
+    }
+    /// A PIN never works while nobody can see it: locked, asleep or another user.
+    private func endPINForPrivacy() {
+        guard pinToken != nil else { return }
+        stopPIN()
+        pinWindow?.showProblem("The PIN stopped when this Mac locked or slept. Make a new one when you're back.")
+    }
+    private func stopPIN() {
+        pinToken?.cancel(); pinToken = nil
+        pinListener?.clearPIN(); pinListener?.close(); pinListener = nil
+        pinAdvert?.stop(); pinAdvert = nil
+        pinTimer?.invalidate(); pinTimer = nil
+    }
+
+    /// Viewer: pairs with a PIN at `addresses`. Only pairs: a session on
+    /// screen stays as it is. A pairing that finishes after the window closed
+    /// is still saved, since the other Mac approved it.
+    private func pairWithPIN(_ pin: String, addresses: [String]) {
+        guard pinPairing == nil else { return }
+        var candidates: [String] = []
+        for entry in addresses {
+            guard let address = NativePairingCode.normalizedAddress(entry) else {
+                pairWindow?.showError("Enter a hostname or IP address without a port."); return
+            }
+            if !candidates.contains(address) { candidates.append(address) }
+        }
+        let deviceKey: NativeDeviceKey
+        do { deviceKey = try NativeDeviceKey.create() } catch { pairWindow?.showError(error.localizedDescription); return }
+        let token = NativeRunToken(); pinPairing = token
+        pairWindow?.setBusy(true); pairWindow?.showError("")
+        let addresses = Array(candidates.prefix(Int(ML_ADDRESSES_MAX)))
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Result { try NativeTransport.pairWithPIN(pin, addresses: addresses, deviceKey: deviceKey) }
+            DispatchQueue.main.async {
+                guard let self, self.pinPairing === token else { return }
+                self.pinPairing = nil
+                self.pairWindow?.setBusy(false)
+                switch result {
+                case .success(let (code, used)):
+                    do {
+                        try self.keychain.savePeerCode(code, deviceKey: deviceKey)
+                        let tried = [used] + addresses.filter { $0 != used }
+                        let peer = (try? self.peerStore.remember(code, tried: tried)) ?? NativePeer(code: code, address: used)
+                        self.peers = (try? self.peerStore.load()) ?? self.peers
+                        MooringPrivacy.register(name: peer.name, id: peer.id, addresses: peer.addresses)
+                        NativeLog.session.notice("paired with a PIN by address \((addresses.firstIndex(of: used) ?? 0) + 1) of \(addresses.count)")
+                        self.pairWindow?.showPaired(MooringPrivacy.name(peer.name, id: peer.id), peerID: peer.id)
+                    } catch {
+                        self.pairWindow?.showError("The other Mac approved this Mac, but it couldn’t save the pairing: "
+                            + error.localizedDescription + " Show a new PIN there and try again.")
+                    }
+                case .failure(let error):
+                    self.pairWindow?.showError(Self.pinFailure(error))
+                }
+            }
+        }
+    }
+    private static func pinFailure(_ error: Error) -> String {
+        switch (error as? NativeSessionError)?.status ?? 0 {
+        case Int32(ML_SESSION_UNAVAILABLE):
+            return "That Mac isn’t showing a PIN. On it, open Mooring → Share this Mac → Show PIN."
+        case Int32(ML_SESSION_AUTH):
+            return "That PIN didn’t work. Check it on the other Mac and try again. A PIN allows \(ML_PIN_TRIES) tries, then make a new one."
+        case Int32(ML_SESSION_TIMEOUT), Int32(ML_SESSION_IO):
+            return "That Mac didn’t answer. Check that both Macs are on the same network, or enter its address."
+        case Int32(ML_SESSION_CLOSED), Int32(ML_SESSION_PROTOCOL):
+            return "That Mac runs a different Mooring version. Update both Macs, then try again."
+        default:
+            return error.localizedDescription
+        }
     }
 
     /// Whether the Mac on `transport` may still connect: its key is still
@@ -1100,11 +1270,24 @@ final class NativeSessionCoordinator {
                     // An address typed in is tried first, with every address in the code.
                     let address = override.trimmingCharacters(in: .whitespacesAndNewlines)
                     self.connect(code: code, addresses: address.isEmpty ? code.addresses : [address] + code.addresses, pairing: true)
-                } catch { self.pairWindow?.error.stringValue = error.localizedDescription }
+                } catch { self.pairWindow?.showError(error.localizedDescription) }
             }
-            controller.onClose = { [weak self] in if self?.connecting?.pairing == true { self?.cancelConnect() } }
+            controller.onPairPIN = { [weak self] pin, addresses in self?.pairWithPIN(pin, addresses: addresses) }
+            controller.onConnectPaired = { [weak self] peerID in
+                self?.pairWindow?.close(); self?.connect(peerID: peerID)
+            }
+            controller.onClose = { [weak self] in
+                self?.pinBrowser.stop()
+                if self?.connecting?.pairing == true { self?.cancelConnect() }
+            }
+            pinBrowser.onChange = { [weak self] found in
+                guard let self else { return }
+                self.pairWindow?.setNearby(found, pairedIDs: Set(self.peers.map(\.id)))
+            }
         }
-        pairWindow?.setBusy(false); pairWindow?.error.stringValue = ""
+        pairWindow?.setNearby([], pairedIDs: Set(peers.map(\.id)))
+        pinBrowser.start()
+        pairWindow?.setBusy(pinPairing != nil); pairWindow?.showError("")
         pairWindow?.setPrivacy(MooringPrivacy.isEnabled)
         pairWindow?.setViewing(connectedPeerID.map { id in
             MooringPrivacy.name(peers.first { $0.id == id }?.name ?? "The Mac on screen", id: id)
@@ -1175,14 +1358,14 @@ final class NativeSessionCoordinator {
         var candidates: [String] = []
         for entry in addresses {
             guard let address = NativePairingCode.normalizedAddress(entry) else {
-                pairWindow?.error.stringValue = "Enter a hostname or IP address without a port."; return
+                pairWindow?.showError("Enter a hostname or IP address without a port."); return
             }
             if !candidates.contains(address) { candidates.append(address) }
         }
         let addresses = Array(candidates.prefix(Int(ML_ADDRESSES_MAX)))
         let attempt = NativeRunToken(), peerID = code.peerID
         connecting = (attempt, peerID, pairing)
-        if pairing { pairWindow?.setBusy(true); pairWindow?.error.stringValue = "" }
+        if pairing { pairWindow?.setBusy(true); pairWindow?.showError("") }
         guard whenCapabilitiesReady(token: attempt, { [weak self] in
             self?.beginConnect(code: code, addresses: addresses, pairing: pairing, automatic: automatic, attempt: attempt)
         }) else {
@@ -1284,7 +1467,7 @@ final class NativeSessionCoordinator {
             onVersionMismatch?()
         }
         if pairing {
-            if pairWindow?.window?.isVisible == true { pairWindow?.error.stringValue = message } else { showError(message) }
+            if pairWindow?.window?.isVisible == true { pairWindow?.showError(message) } else { showError(message) }
             return
         }
         guard let window = openViewerWindow(for: peerID) else { showError(message); return }
