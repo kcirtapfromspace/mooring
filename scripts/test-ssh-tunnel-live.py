@@ -16,6 +16,7 @@ Each case uses an isolated --config-dir; saved connections are not touched.
 import argparse
 import json
 import os
+import shlex
 import signal
 import socket
 import subprocess
@@ -307,8 +308,9 @@ with tempfile.TemporaryDirectory(prefix="mooring-ssh-live-") as directory:
     #    including when Mooring is killed outright. It changes the desktop's
     #    screens for a few seconds, then puts them back.
     def screen_state():
-        script = ("uid=$(id -u alex); sig=$(ls -t /run/user/$uid/hypr | head -1); "
-                  "T() { runuser -u alex -- env XDG_RUNTIME_DIR=/run/user/$uid HYPRLAND_INSTANCE_SIGNATURE=$sig \"$@\"; }; "
+        user = shlex.quote(first_desktop["session_user"])
+        script = (f"uid=$(id -u {user}); sig=$(ls -t /run/user/$uid/hypr | head -1); "
+                  f"T() {{ runuser -u {user} -- env XDG_RUNTIME_DIR=/run/user/$uid HYPRLAND_INSTANCE_SIGNATURE=$sig \"$@\"; }}; "
                   "T hyprctl monitors all | awk '/^Monitor /{print $2}' | tr '\\n' ' '; echo; "
                   "T wayvncctl output-list | awk '$1 == \"*\" {print $2}'")
         found = subprocess.run(["/usr/bin/ssh", "-o", "BatchMode=yes", "--", options.target, script],

@@ -1539,9 +1539,7 @@ mod tests {
             Some(K::SshConfig)
         );
         assert_eq!(
-            kind(
-                "Warning: Permanently added '192.0.2.20' (ED25519) to the list of known hosts."
-            ),
+            kind("Warning: Permanently added '192.0.2.20' (ED25519) to the list of known hosts."),
             None
         );
         let auth = classify_ssh_output(&route, &["Permission denied (publickey).".into()]).unwrap();
