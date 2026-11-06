@@ -197,7 +197,7 @@ pub fn watch_desktop(
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::Fixture;
+    use super::super::tests::{Fixture, fake_host_turn};
     use super::*;
     use mooring_core::desktop::{DisplayState, LockEvidence, LockState, SessionState};
     use std::fs;
@@ -220,11 +220,14 @@ mod tests {
         fixture: Fixture,
         /// Short, because a Unix socket path is limited to about 100 bytes.
         runtime: PathBuf,
+        /// Released last, after the fake host is cleaned up.
+        _turn: std::sync::MutexGuard<'static, ()>,
     }
 
     impl FakeLinux {
         fn new(uid: u32, omarchy_lock: Option<&str>) -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
+            let turn = fake_host_turn();
             let fixture = Fixture::new("desktop");
             let runtime = PathBuf::from(format!(
                 "/tmp/mooring-rt-{}-{}",
@@ -290,7 +293,11 @@ esac"#,
             let socket = hypr.join(".socket.sock");
             assert!(socket.as_os_str().len() < 100, "{}", socket.display());
             drop(UnixListener::bind(&socket).unwrap());
-            Self { fixture, runtime }
+            Self {
+                fixture,
+                runtime,
+                _turn: turn,
+            }
         }
 
         /// A fake ssh that runs the script it is given under `shell` here.

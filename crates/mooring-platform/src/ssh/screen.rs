@@ -370,7 +370,7 @@ impl Drop for VirtualScreen {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::Fixture;
+    use super::super::tests::{Fixture, fake_host_turn};
     use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -451,11 +451,14 @@ mod tests {
     struct FakeDesktop {
         fixture: Fixture,
         runtime: PathBuf,
+        /// Released last, after the fake host is cleaned up.
+        _turn: std::sync::MutexGuard<'static, ()>,
     }
 
     impl FakeDesktop {
         fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
+            let turn = fake_host_turn();
             let fixture = Fixture::new("screen");
             let runtime = PathBuf::from(format!(
                 "/tmp/mooring-vs-{}-{}",
@@ -521,7 +524,11 @@ esac"#,
             let hypr = runtime.join("1001/hypr/sig");
             fs::create_dir_all(&hypr).unwrap();
             drop(UnixListener::bind(hypr.join(".socket.sock")).unwrap());
-            Self { fixture, runtime }
+            Self {
+                fixture,
+                runtime,
+                _turn: turn,
+            }
         }
 
         /// A fake ssh that runs the remote command string under `shell`.
@@ -618,6 +625,7 @@ esac"#,
         assert!(screen.stop());
         assert_eq!(desktop.state("cursor").trim(), "true");
         assert!(!desktop.log().contains("hl.config"), "{}", desktop.log());
+        drop(desktop);
         // Hidden by a session that could not restore it: shown again first.
         let desktop = FakeDesktop::new();
         fs::write(desktop.fixture.0.join("state/cursor"), "true\n").unwrap();

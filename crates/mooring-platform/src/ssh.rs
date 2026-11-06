@@ -1288,6 +1288,16 @@ mod tests {
 
     pub(super) struct Fixture(pub(super) PathBuf);
 
+    /// Held by each fake Linux host for its lifetime. Those run the real
+    /// remote scripts, which start hundreds of short processes; several at
+    /// once can outlast the scripts' own timeouts on a busy Mac, so they take
+    /// turns. A test must drop one fake host before making another.
+    pub(super) fn fake_host_turn() -> std::sync::MutexGuard<'static, ()> {
+        static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        TURN.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     impl Fixture {
         pub(super) fn new(name: &str) -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
