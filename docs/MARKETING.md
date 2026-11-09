@@ -4,7 +4,9 @@
 
 **Your Macs, within reach.** Use the Mac at your desk from the Mac in your bag.
 
-Start with people who already use a MacBook and a desktop Mac. Lead with a familiar desktop, clipboard, gestures and sound. The full-screen notch detail makes a concrete visual hook. Keep Linux support secondary for this audience and describe it as experimental.
+Start with people who use a MacBook to reach another desktop. Show both Mac-to-Mac work and Linux: Omarchy/Hyprland is in the public preview, while the X11 implementation is currently local development work. Use separate, clearly labeled films for each platform. Clipboard, sound and trackpad-gesture claims belong to the Mac-to-Mac film. The full-screen notch detail is one visual hook, not the whole product story.
+
+The follow-up recording brief and synthetic workspace are in [DEMO-RECORDING.md](DEMO-RECORDING.md). Existing Omarchy recordings include transitions revealing unrelated windows and do not meet the new clean-workspace requirement. Fresh Mac-to-Mac, Omarchy and X11 films remain to be captured; none is represented as complete by the original 30-second edit.
 
 ## What to take from FileOctopus
 
@@ -48,9 +50,9 @@ The second input must be the original 59.3-second setup recording, not the new 3
 
 Publication status: draft only. No Reddit post or message has been sent.
 
-**Title:** Mooring: use your desktop Mac from your MacBook, with a menu bar that fits around the notch (free, open-source preview)
+**Title:** Mooring: reach your other Mac or Omarchy desktop from your MacBook (free, open-source preview)
 
-Hi r/macapps — I'm building Mooring, a native remote desktop app for Mac.
+Hi r/macapps — I'm building Mooring, a native Mac app for reaching another Mac or a Linux desktop.
 
 The idea is simple: use the Mac at your desk from the Mac in your bag, and keep the little things that make it feel like a Mac.
 
@@ -71,13 +73,13 @@ What to know before trying it:
 - Your Macs need a direct network connection. Away from home, bring your own VPN, such as Tailscale. There's no built-in internet relay.
 - One Mac viewed at a time and one viewer per sharing Mac.
 - This is early software. Reliability testing across real Macs is ongoing, and the current release notes still list real two-Mac PIN pairing as an acceptance check. Keep another way to reach a Mac you depend on.
-- There's also experimental Linux desktop support over SSH, but large changing desktops currently update slowly.
+- The public preview includes experimental Omarchy/Hyprland support through wayvnc over SSH. Large changing desktops currently update slowly. X11 compatibility is in local development, not preview 45; any X11 footage will be labeled as a development build.
 
 The preview is free, the source is MIT-licensed, and no Mooring account is needed. The download is Developer ID signed and notarized.
 
 [Download and demo](https://kcirtapfromspace.github.io/mooring/) · [Source](https://github.com/kcirtapfromspace/mooring) · [Release notes](https://github.com/kcirtapfromspace/mooring/releases/latest)
 
-If you use a desktop Mac from a MacBook, what most often breaks the feeling that you're working on the other Mac: keyboard shortcuts, display sizing, clipboard, or something else?
+If you reach another Mac or a Linux desktop from a MacBook, what most often breaks the feeling that you're working on that computer: keyboard shortcuts, display sizing, or something else?
 
 ## First launch and follow-up
 

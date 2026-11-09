@@ -14,6 +14,8 @@ Pair your Macs with a six-character PIN, start sharing on the Mac you want to re
 
 **Early preview:** one Mac viewed at a time, one viewer per sharing Mac, and no hosted internet relay. Reliability testing is ongoing; real two-Mac PIN pairing remains an acceptance check in the current release notes. See the [latest release notes](https://github.com/kcirtapfromspace/mooring/releases/latest) for current limits, including experimental Linux desktop support through SSH.
 
+**Linux:** preview 45 includes Omarchy/Hyprland through wayvnc over SSH. X11 compatibility is currently in a separate local development build and is not in that public preview. Fresh, clean-workspace recordings for Mac-to-Mac, Omarchy and X11 are specified in the [recording brief](docs/DEMO-RECORDING.md); the current public video is the earlier feature edit.
+
 Source, downloads, and the signed update feed live together in the public [Mooring repository](https://github.com/kcirtapfromspace/mooring). The product goal is reliable, responsive remote control with sensible automatic quality; the streaming quality policy is still simulated.
 
 **Current milestone:** Macs connect through Mooring's own encrypted session (below), and Linux desktops open in Mooring's own viewer through SSH. Mooring no longer uses Apple Screen Sharing; addresses saved for it stay listed, marked **Needs pairing**, until you pair that Mac or remove them. There is no claim of performance parity or measured video bandwidth.
