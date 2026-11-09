@@ -50,6 +50,12 @@ h3 { font-size: 18px; line-height: 1.35; letter-spacing: -.3px; margin: 14px 0 1
 .feature-grid p { font-size: 15px; color: var(--muted); margin: 0; }
 .feature-footnote { margin: 30px 0 0; color: var(--muted); font-size: 12px; }
 .setup { border-top: 1px solid var(--line); padding: 68px 0; }
+.linux-platforms { display: grid; grid-template-columns: 1fr 1fr; gap: 44px; margin-top: 38px; }
+.linux-platforms article { min-width: 0; }
+.linux-platforms article + article { border-left: 1px solid var(--line); padding-left: 36px; }
+.linux-platforms p { font-size: 15px; color: var(--muted); }
+.linux-platforms .platform-status { color: var(--teal); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; }
+.linux-platforms .development { color: #9d2443; }
 .steps { display: grid; grid-template-columns: repeat(3, 1fr); counter-reset: setup; list-style: none; margin: 40px 0 0; padding: 0; gap: 36px; }
 .steps li { counter-increment: setup; }
 .steps li::before { content: counter(setup); display: grid; place-items: center; width: 36px; height: 36px; background: var(--yellow); border-radius: 50%; font-size: 14px; font-weight: 700; }
@@ -97,7 +103,8 @@ h3 { font-size: 18px; line-height: 1.35; letter-spacing: -.3px; margin: 14px 0 1
   .section-heading { display: block; margin-bottom: 24px; }
   .section-heading > p { margin-top: 20px; max-width: 460px; font-size: 15px; }
   .demo { padding-bottom: 44px; } .demo-media video { border-radius: 7px; }
-  .feature-grid, .steps { grid-template-columns: 1fr; gap: 30px; margin-top: 30px; }
+  .feature-grid, .steps, .linux-platforms { grid-template-columns: 1fr; gap: 30px; margin-top: 30px; }
+  .linux-platforms article + article { border-left: 0; border-top: 1px solid var(--line); padding: 24px 0 0; }
   .feature-grid article { max-width: 460px; } .everyday, .setup, .faq { padding-block: 44px; }
   .preview { grid-template-columns: 1fr; padding: 28px; gap: 30px; }
   .preview-facts { border-left: 0; border-top: 1px solid #555c57; padding: 26px 0 0; }
@@ -106,5 +113,6 @@ h3 { font-size: 18px; line-height: 1.35; letter-spacing: -.3px; margin: 14px 0 1
 @media (max-width: 380px) {
   .page { padding-inline: 18px; } nav { gap: 12px; font-size: 11px; }
   .site-header .wordmark { font-size: 17px; } h1 { font-size: 56px; } .preview { padding: 24px; }
+  .site-header { flex-wrap: wrap; padding-block: 18px; }
 }
 @media (prefers-reduced-motion: reduce) { .button { transition: none; } }
