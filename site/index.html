@@ -3,50 +3,92 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Mooring is an open-source app for better screen sharing between Macs.">
+  <meta name="description" content="Use your other Mac from the one in front of you. Mooring is a free, open-source remote desktop app for Apple silicon Macs. Download the signed and notarized preview.">
   <meta name="theme-color" content="#FFF2F4">
   <meta property="og:title" content="Mooring — Your Macs, within reach.">
-  <meta property="og:description" content="An open-source remote desktop app for Mac. Early preview.">
+  <meta property="og:description" content="Your desktop from your laptop. Native remote control, shared clipboard, and sound. Free and open source. Early preview for Mac.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://kcirtapfromspace.github.io/mooring/">
-  <meta property="og:image" content="https://kcirtapfromspace.github.io/mooring/assets/icon.png">
+  <meta property="og:image" content="https://kcirtapfromspace.github.io/mooring/assets/demo-poster.jpg?v=7f440773fad4">
+  <meta property="og:image:width" content="1440">
+  <meta property="og:image:height" content="900">
+  <meta property="og:image:alt" content="Mooring remote desktop demo: the other Mac's menu bar fits around a MacBook's camera notch.">
+  <meta name="twitter:card" content="summary_large_image">
   <link rel="canonical" href="https://kcirtapfromspace.github.io/mooring/">
   <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="style.css?v=df27c4dd1e61">
+  <link rel="stylesheet" href="style.css?v=bd0548118cf2">
   <title>Mooring — Your Macs, within reach.</title>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header page">
+    <a class="wordmark" href="#main" aria-label="Mooring home"><img src="assets/icon.svg" width="36" height="36" alt="">Mooring</a>
+    <nav aria-label="Main navigation"><a href="#demo">Demo</a><a href="#linux">Linux</a><a href="#setup">Get started</a><a href="https://github.com/kcirtapfromspace/mooring">GitHub <span aria-hidden="true">↗</span></a></nav>
+  </header>
   <main id="main" class="page">
     <section class="hero" aria-labelledby="hero-title">
       <div class="hero-copy">
-        <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> Remote desktop, made for Mac</p>
+        <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> Native remote desktop for Mac</p>
         <h1 id="hero-title">Your Macs,<br><em>within reach.</em></h1>
-        <p class="intro">The Mac at your desk. The Mac in your bag. Bring them together with a native app that feels at home on both.</p>
-        <div class="hero-actions">
-          <a class="button" href="https://github.com/kcirtapfromspace/mooring/releases/latest">Download the preview <span aria-hidden="true">↗</span></a>
-          <a class="text-link" href="https://github.com/kcirtapfromspace/mooring">Explore the source <span aria-hidden="true">↗</span></a>
-        </div>
-        <p class="requirements">Apple silicon · macOS 14 or later<br>Developer ID signed &amp; notarized</p>
+        <p class="intro">Use the Mac at your desk from the Mac in your bag. Your desktop, your apps, and your work, on the screen in front of you.</p>
+        <div class="hero-actions"><a class="button" href="https://github.com/kcirtapfromspace/mooring/releases/latest">Download the free preview <span aria-hidden="true">↗</span></a><a class="text-link" href="#demo">Watch it work <span aria-hidden="true">↓</span></a></div>
+        <p class="requirements">Apple silicon · macOS 14 or later<br>Developer ID signed &amp; notarized · No Mooring account</p>
       </div>
-      <div class="hero-art" aria-hidden="true">
-        <div class="orbit"></div>
-        <img class="hero-icon" src="assets/icon.svg" width="360" height="360" alt="">
-        <span class="art-note">Two places. One workspace.</span>
-        <span class="art-star">✳</span>
-      </div>
+      <aside class="hero-note" aria-label="About this preview"><img src="assets/icon.svg" width="112" height="112" alt="" class="note-icon"><p class="note-heading">Two Macs.<br>One place to work.</p><p>Free and open source.<br>Built for the Macs you already own.</p><a href="#preview">An early preview, with room to grow <span aria-hidden="true">↓</span></a></aside>
     </section>
-    <section class="demo" aria-labelledby="demo-title">
-      <p class="eyebrow">See it work</p>
-      <h2 id="demo-title">Download, pair, <em>connect.</em></h2>
+    <section id="demo" class="demo" aria-labelledby="demo-title">
+      <div class="section-heading"><div><p class="eyebrow">A small detail. A more familiar Mac.</p><h2 id="demo-title">Even the menu bar<br><em>feels at home.</em></h2></div><p>In full screen, your other Mac’s menu bar fits around your MacBook’s camera notch. Its menus stay within reach on both sides.</p></div>
       <figure class="demo-media">
-        <video controls muted playsinline preload="metadata" poster="assets/demo-poster.jpg" width="1440" height="900">
-          <source src="assets/demo.mp4" type="video/mp4">
-          <a href="assets/demo.mp4">Download the demo video (MP4)</a>
+        <video controls muted playsinline preload="none" poster="assets/demo-poster.jpg?v=7f440773fad4" width="1440" height="900" aria-label="Mooring product demo: full-screen notch support, remote menus, and a connected sharing session" aria-describedby="demo-caption">
+          <source src="assets/demo.mp4?v=f73d4dc3cc01" type="video/mp4">
+          <track kind="descriptions" src="assets/demo-descriptions.vtt" srclang="en" label="English visual descriptions">
+          <a href="assets/demo.mp4?v=f73d4dc3cc01">Download the demo video (MP4)</a>
         </video>
-        <figcaption>Start sharing on one Mac and copy its code. Paste the code on your other Mac and connect. Recorded on two Macs, without sound.</figcaption>
+        <figcaption id="demo-caption"><span>Real preview recordings, edited and captioned. No sound.</span><a href="assets/demo.mp4?v=f73d4dc3cc01" download>Download the demo <span aria-hidden="true">↓</span></a></figcaption>
       </figure>
+      <details class="transcript"><summary>Read the demo description</summary><p>The demo compares a remote desktop that stops below a MacBook’s notch with Mooring’s full-screen view. The remote menu bar moves up beside the notch, and its icons make room for the camera. Menus open on the remote Mac. A connected Share this Mac window shows encrypted sharing and the controls for automatic sharing and shared clipboard. The closing card links to the free, open-source preview.</p></details>
     </section>
+    <section class="everyday" aria-labelledby="everyday-title">
+      <p class="eyebrow">Mac-to-Mac essentials</p><h2 id="everyday-title">Your other Mac.<br><em>Your usual way of working.</em></h2>
+      <div class="feature-grid">
+        <article><span class="feature-index" aria-hidden="true">01 /</span><h3>Copy here. Paste there.</h3><p>Share the clipboard in both directions while connected. Copy on one Mac and paste on the other.</p></article>
+        <article><span class="feature-index" aria-hidden="true">02 /</span><h3>Bring your hands with you.</h3><p>Pinch, rotate, and smart zoom reach the other Mac. Allow Accessibility to send system shortcuts such as ⌘-Tab, too.</p></article>
+        <article><span class="feature-index" aria-hidden="true">03 /</span><h3>Hear what’s happening.</h3><p>Your other Mac’s sound plays on the Mac you’re using. Control sound and clipboard sharing in Settings.</p></article>
+      </div>
+      <p class="feature-footnote">These features are in the preview. Reliability testing across real Macs and networks is ongoing.</p>
+    </section>
+    <section id="linux" class="linux setup" aria-labelledby="linux-title">
+      <div class="section-heading"><div><p class="eyebrow">Linux, from your Mac</p><h2 id="linux-title">Your MacBook.<br><em>Your Linux desktop.</em></h2></div><p>Open a Linux desktop in Mooring’s own viewer through SSH. Keep your Mac’s familiar window controls while you work on the other computer.</p></div>
+      <div class="linux-platforms">
+        <article><p class="platform-status">In preview 45</p><h3>Omarchy / Hyprland</h3><p>Connect to wayvnc through SSH. Fit a virtual Linux screen to your MacBook, including the space beside its camera. With Accessibility allowed, ⌘-Tab and ⌘-Space reach the Linux desktop.</p><p>Choose <strong>Add Linux Desktop</strong> and enter your SSH target. You’ll need a configured VNC server on Linux. Large changing desktops currently update slowly.</p><a class="text-link" href="https://github.com/kcirtapfromspace/mooring/releases/tag/v0.3.0-preview.45">Read the Linux preview notes <span aria-hidden="true">↗</span></a>
+        </article>
+        <article><p class="platform-status development">In development</p><h3>X11 Linux</h3><p>Work in progress adds compatibility with X11 desktops, including x11vnc on Ubuntu, along with work on how the picture updates as windows move.</p><p>These X11 changes are in <strong>local development build 50</strong> and are <strong>not included in preview 45</strong>.</p><a class="text-link" href="https://github.com/kcirtapfromspace/mooring/releases">Check public release availability <span aria-hidden="true">↗</span></a>
+        </article>
+      </div>
+      <p class="feature-footnote">Linux is experimental. Clipboard, audio, and trackpad-gesture features described above apply to Mac-to-Mac sessions.</p>
+    </section>
+    <section id="setup" class="setup" aria-labelledby="setup-title">
+      <div class="section-heading"><div><p class="eyebrow">Mac-to-Mac setup</p><h2 id="setup-title">Pair once.<br><em>Come back when you need it.</em></h2></div><p>Install Mooring on both Macs. Use the same network, or connect them through a VPN such as Tailscale when you’re away.</p></div>
+      <ol class="steps">
+        <li><h3>Show a PIN.</h3><p>On the Mac you want to reach, choose <strong>Show Pairing PIN…</strong> from Mooring’s menu bar.</p></li>
+        <li><h3>Pair your Macs.</h3><p>On your other Mac, choose <strong>Pair a Mac…</strong>, select the nearby Mac or enter its address, and type its six-character PIN.</p></li>
+        <li><h3>Share, then connect.</h3><p>On the first Mac, choose <strong>Share this Mac</strong> and grant the requested permissions. On your other Mac, select it and choose <strong>Connect</strong>.</p></li>
+      </ol>
+      <p class="setup-note">Pairing establishes trust; sharing lets a paired Mac connect. Both Macs need the current preview for PIN pairing. <a href="https://github.com/kcirtapfromspace/mooring/blob/main/docs/TESTING.md">Read the setup and testing guide <span aria-hidden="true">↗</span></a></p>
+    </section>
+    <section id="preview" class="preview" aria-labelledby="preview-title">
+      <div><p class="eyebrow">Where Mooring is today</p><h2 id="preview-title">An early preview.<br><em>Out in the open.</em></h2><p>Mooring is free to download, with MIT-licensed source on GitHub. Try it, see how it works, and help shape what comes next.</p><a class="text-link" href="https://github.com/kcirtapfromspace/mooring/releases/latest">Read the current release notes <span aria-hidden="true">↗</span></a></div>
+      <div class="preview-facts"><h3>Before you download</h3><ul><li>Apple silicon Macs running macOS 14 or later.</li><li>A direct network connection or your own VPN. Mooring doesn’t provide an internet relay.</li><li>One Mac viewed at a time; one viewer per sharing Mac.</li><li>Early software: keep another way to reach a Mac you depend on. Real two-Mac PIN pairing remains an acceptance check in the current release notes.</li></ul><p>Also in preview: Linux desktops through SSH, tested with wayvnc on Hyprland. Large changing desktops currently update slowly. <a href="https://github.com/kcirtapfromspace/mooring/releases/latest">Details and limits <span aria-hidden="true">↗</span></a></p></div>
+    </section>
+    <section class="faq" aria-labelledby="faq-title">
+      <p class="eyebrow">A few practical questions</p><h2 id="faq-title">Before you <em>connect.</em></h2>
+      <details><summary>Do I need an account or subscription?</summary><p>No Mooring account or subscription is required. The preview is free, and the source is <a href="https://github.com/kcirtapfromspace/mooring/blob/main/LICENSE">MIT-licensed</a>. A separate VPN service may have its own account or plan.</p></details>
+      <details><summary>Does it work away from home?</summary><p>Your Macs need to be able to reach each other directly. Away from home, use a VPN such as Tailscale. Mooring does not include a hosted relay. The long pairing-code option remains available for pairing over a VPN.</p></details>
+      <details><summary>What permissions does it need?</summary><p>The sharing Mac needs Screen Recording permission to send its screen and Accessibility for remote keyboard and mouse control. The viewing Mac needs Accessibility to pass system shortcuts to the other Mac. macOS may also ask for Local Network access when discovering nearby Macs. The <a href="https://github.com/kcirtapfromspace/mooring/blob/main/docs/TESTING.md">preview guide</a> walks through setup.</p></details>
+      <details><summary>Can I choose which Macs have access?</summary><p>Yes. Each paired viewing Mac has its own key. Remove an individual Mac’s access from the sharing Mac’s Settings, or stop sharing. Sharing can continue after its window closes; use the sharing control to stop it.</p></details>
+    </section>
+    <section class="closing" aria-labelledby="closing-title"><p class="eyebrow">Made for your Macs</p><h2 id="closing-title">A little closer<br><em>to your other desktop.</em></h2><a class="button" href="https://github.com/kcirtapfromspace/mooring/releases/latest">Download the free preview <span aria-hidden="true">↗</span></a><p>Apple silicon · macOS 14+ · Signed &amp; notarized</p></section>
   </main>
+  <footer class="site-footer page"><a class="wordmark" href="#main"><img src="assets/icon.svg" width="28" height="28" alt="">Mooring</a><nav aria-label="Footer"><a href="https://github.com/kcirtapfromspace/mooring">Source</a><a href="https://github.com/kcirtapfromspace/mooring/issues">Feedback</a><a href="https://github.com/kcirtapfromspace/mooring/releases">Releases</a></nav><p>This website has no analytics or tracking.</p></footer>
 </body>
 </html>

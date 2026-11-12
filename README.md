@@ -2,11 +2,21 @@
 
 # Mooring
 
-Source, downloads, and the signed update feed live together in the public [Mooring repository](https://github.com/kcirtapfromspace/mooring).
+**Your Macs, within reach.** Use the Mac at your desk from the Mac in your bag. Mooring is a native remote desktop app for Apple silicon Macs, with shared clipboard, sound, and familiar trackpad gestures.
 
-**[Download the preview](https://github.com/kcirtapfromspace/mooring/releases/latest)** · **[Website](https://kcirtapfromspace.github.io/mooring/)** · [Preview guide](docs/TESTING.md)
+**[Download the free preview](https://github.com/kcirtapfromspace/mooring/releases/latest)** · **[Watch the 30-second demo](https://kcirtapfromspace.github.io/mooring/#demo)** · [Setup and testing guide](docs/TESTING.md)
 
-**Your Macs, within reach.** A native Mac connection app with a Rust core. The product goal is reliable, responsive Mac-to-Mac remote control that chooses sensible quality automatically.
+Apple silicon · macOS 14 or later · Developer ID signed and notarized · Free preview · No Mooring account · MIT-licensed source
+
+[![Watch Mooring: the remote Mac's menu bar fits around a MacBook's notch](site/assets/demo-poster.jpg)](https://kcirtapfromspace.github.io/mooring/#demo)
+
+Pair your Macs with a six-character PIN, start sharing on the Mac you want to reach, and connect from the other. Use the same network, or your own VPN when away. In full screen, the remote Mac's menu bar can fit around your MacBook's camera notch. Each paired viewing Mac has its own key, and you can remove its access individually.
+
+**Early preview:** one Mac viewed at a time, one viewer per sharing Mac, and no hosted internet relay. Reliability testing is ongoing; real two-Mac PIN pairing remains an acceptance check in the current release notes. See the [latest release notes](https://github.com/kcirtapfromspace/mooring/releases/latest) for current limits, including experimental Linux desktop support through SSH.
+
+**Linux:** preview 45 includes Omarchy/Hyprland through wayvnc over SSH. X11 compatibility is in local development build 50, not that public preview. Read the [Linux overview](https://kcirtapfromspace.github.io/mooring/#linux). Product recordings must show Mooring’s connection workflow and a graphical Linux desktop inside its Mac window; the [recording brief](docs/DEMO-RECORDING.md) describes the required scenes.
+
+Source, downloads, and the signed update feed live together in the public [Mooring repository](https://github.com/kcirtapfromspace/mooring). The product goal is reliable, responsive remote control with sensible automatic quality; the streaming quality policy is still simulated.
 
 **Current milestone:** Macs connect through Mooring's own encrypted session (below), and Linux desktops open in Mooring's own viewer through SSH. Mooring no longer uses Apple Screen Sharing; addresses saved for it stay listed, marked **Needs pairing**, until you pair that Mac or remove them. There is no claim of performance parity or measured video bandwidth.
 
