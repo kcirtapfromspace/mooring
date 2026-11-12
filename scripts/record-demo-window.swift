@@ -18,6 +18,10 @@ final class WindowWriter: NSObject, SCStreamOutput, SCStreamDelegate {
     private var started = false
     private var streamFailed = false
     private var frames = 0
+    private var lastSample: CMSampleBuffer?
+    private var completeSamples = 0
+    private var blockedSamples = 0
+    private var otherSamples = 0
 
     init(output: URL) throws {
         writer = try AVAssetWriter(outputURL: output, fileType: .mp4)
@@ -29,6 +33,7 @@ final class WindowWriter: NSObject, SCStreamOutput, SCStreamDelegate {
                 AVVideoAverageBitRateKey: 4_000_000,
                 AVVideoExpectedSourceFrameRateKey: 30,
                 AVVideoMaxKeyFrameIntervalKey: 60,
+                AVVideoAllowFrameReorderingKey: false,
             ],
         ])
         input.expectsMediaDataInRealTime = true
@@ -40,14 +45,16 @@ final class WindowWriter: NSObject, SCStreamOutput, SCStreamDelegate {
     func stream(_ stream: SCStream, didOutputSampleBuffer buffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, buffer.isValid,
               let attachments = CMSampleBufferGetSampleAttachmentsArray(buffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
-              let status = attachments.first?[.status] as? Int,
-              status == SCFrameStatus.complete.rawValue else { return }
+              let status = attachments.first?[.status] as? Int else { return }
+        guard status == SCFrameStatus.complete.rawValue else { otherSamples += 1; return }
+        completeSamples += 1
+        lastSample = buffer
         if !started {
             guard writer.startWriting() else { return }
             writer.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(buffer))
             started = true
         }
-        guard writer.status == .writing, input.isReadyForMoreMediaData else { return }
+        guard writer.status == .writing, input.isReadyForMoreMediaData else { blockedSamples += 1; return }
         if input.append(buffer) { frames += 1 }
     }
 
@@ -57,7 +64,19 @@ final class WindowWriter: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func finish() async throws {
         let result = queue.sync { () -> (Int, Bool) in
-            if started { input.markAsFinished() }
+            if started {
+                let end = CMClockGetTime(CMClockGetHostTimeClock())
+                if let lastSample, input.isReadyForMoreMediaData {
+                    var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 30), presentationTimeStamp: end, decodeTimeStamp: .invalid)
+                    var tail: CMSampleBuffer?
+                    if CMSampleBufferCreateCopyWithNewTiming(allocator: kCFAllocatorDefault, sampleBuffer: lastSample, sampleTimingEntryCount: 1, sampleTimingArray: &timing, sampleBufferOut: &tail) == noErr, let tail {
+                        _ = input.append(tail)
+                    }
+                }
+                writer.endSession(atSourceTime: end)
+                input.markAsFinished()
+            }
+            print("Capture samples: \(completeSamples) complete, \(otherSamples) idle/other, \(blockedSamples) encoder drops.")
             return (frames, streamFailed)
         }
         guard result.0 > 0 else {
@@ -71,8 +90,8 @@ final class WindowWriter: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 }
 
-@main struct RecordMooringWindow {
-    static let allowedBundleIDs: Set<String> = ["dev.maclink.launcher", "dev.mooring.demo"]
+@main @MainActor struct RecordMooringWindow {
+    static let allowedBundleIDs: Set<String> = ["dev.maclink.launcher"]
 
     static func main() async {
         do { try await run() }
@@ -83,10 +102,17 @@ final class WindowWriter: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     static func run() async throws {
+        _ = NSApplication.shared
+        NSApp.setActivationPolicy(.prohibited)
         umask(0o077)
         let arguments = Array(CommandLine.arguments.dropFirst())
-        guard arguments == ["check"] || arguments == ["list"] || (arguments.count == 4 && arguments[0] == "record") else {
-            throw RecordingError(message: "Usage: mooring-record-window check | list | record WINDOW_ID SECONDS OUTPUT.mp4")
+        guard arguments == ["check"] || arguments == ["request-access"] || arguments == ["list"] || (arguments.count == 4 && arguments[0] == "record") else {
+            throw RecordingError(message: "Usage: mooring-record-window check | request-access | list | record WINDOW_ID SECONDS OUTPUT.mp4")
+        }
+        if arguments == ["request-access"] {
+            let available = CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess()
+            print(available ? "Screen Recording access is available. No capture started." : "macOS recording permission was requested. Complete it in System Settings, then relaunch this session. No capture started.")
+            return
         }
         guard CGPreflightScreenCaptureAccess() else {
             throw RecordingError(message: "Screen Recording access is not granted to this recording process. No capture was started; enable access for its terminal/app in System Settings, then relaunch it.")
@@ -126,7 +152,7 @@ final class WindowWriter: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.width = 1440
         configuration.height = 900
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: 30)
-        configuration.queueDepth = 3
+        configuration.queueDepth = 6
         configuration.capturesAudio = false
         configuration.showsCursor = true
         configuration.preservesAspectRatio = true
