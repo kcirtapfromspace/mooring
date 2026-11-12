@@ -6,7 +6,7 @@
 
 Start with people who use a MacBook to reach another desktop. Show both Mac-to-Mac work and Linux: Omarchy/Hyprland is in the public preview, while the X11 implementation is currently local development work. Use separate, clearly labeled films for each platform. Clipboard, sound and trackpad-gesture claims belong to the Mac-to-Mac film. The full-screen notch detail is one visual hook, not the whole product story.
 
-The [recording brief](DEMO-RECORDING.md) requires the normal OS and ordinary apps. New Omarchy (24 seconds) and X11 (18 seconds) clips were captured on November 12, with anonymous terminal prompts, computer information hidden, no audio and no sign-in screens. X11 is labeled local development build 50, not preview 45. The main Mac video remains the original 30-second feature edit; a fresh Mac-to-Mac daily-use film is still separate work.
+The [recording brief](DEMO-RECORDING.md) requires the normal OS and ordinary graphical apps, with Mooring’s Mac window and connection workflow clearly visible. The terminal-only Linux clips were retired on November 12: they showed input but did not explain the product. A private Omarchy GUI framing draft has been rendered, and a clean X11 graphical scene is prepared. The final app-opening and window-movement take needs real mouse input because the automation does not reliably forward remote clicks. The main public Mac video remains the original 30-second feature edit.
 
 ## What to take from FileOctopus
 
@@ -87,6 +87,6 @@ Check current r/macapps posting rules and the appropriate flair immediately befo
 
 For feedback, ask for Mac model, macOS version, Mooring version, local network versus VPN, and the action that failed. Do not ask people to publish pairing codes or private desktops. Use GitHub issues for reproducible reports.
 
-Before a broader launch, complete the current two-Mac PIN acceptance check and record a 45–60 second daily-use film: pair, connect, type in a blank document in an ordinary app, copy a harmless sentence across Macs, use a trackpad gesture, demonstrate audio if recording sound, then disconnect. Use privacy mode and a clean desktop. The main short film proves the notch detail and sharing state; the new Linux clips show real terminal input and OS sessions.
+Before a broader launch, complete the current two-Mac PIN acceptance check and record a 45–60 second daily-use film: pair, connect, type in a blank document in an ordinary app, copy a harmless sentence across Macs, use a trackpad gesture, demonstrate audio if recording sound, then disconnect. Use privacy mode and a clean desktop. The main short film proves the notch detail and sharing state; the replacement Linux films need to establish Mooring’s Mac-to-Linux workflow before showing individual app interactions.
 
 Measure actual release-download counts and useful feedback before and after a post. Release counts are cumulative and include repeat downloads, so they do not establish unique users or conversion rates. Keep the website free of analytics unless that choice changes explicitly.
