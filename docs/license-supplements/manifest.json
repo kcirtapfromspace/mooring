@@ -1,0 +1,440 @@
+[
+  {
+    "name": "asn1-rs-impl",
+    "version": "0.2.0",
+    "commit": "a20e5f7319c896737ad0f2557037817b91ad854f",
+    "files": [
+      {
+        "path": "docs/license-supplements/asn1-rs-a20e5f7319c8/LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/rusticata/asn1-rs/a20e5f7319c896737ad0f2557037817b91ad854f/LICENSE-MIT",
+        "sha256": "a5c61b93b6ee1d104af9920cf020ff3c7efe818e31fe562c72261847a728f513"
+      },
+      {
+        "path": "docs/license-supplements/asn1-rs-a20e5f7319c8/LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/rusticata/asn1-rs/a20e5f7319c896737ad0f2557037817b91ad854f/LICENSE-APACHE",
+        "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+      }
+    ]
+  },
+  {
+    "name": "iroh",
+    "version": "1.4.1",
+    "commit": "d6c6963b9602d1b8dd2ba53b6519e7eb19cc7940",
+    "files": [
+      {
+        "path": "docs/license-supplements/iroh-d6c6963b9602/LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/n0-computer/iroh/d6c6963b9602d1b8dd2ba53b6519e7eb19cc7940/LICENSE-MIT",
+        "sha256": "f169adb8124d3b005416d8485d00777c9a7bdd9099982c52a4493f9732e6d050"
+      },
+      {
+        "path": "docs/license-supplements/iroh-d6c6963b9602/LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/n0-computer/iroh/d6c6963b9602d1b8dd2ba53b6519e7eb19cc7940/LICENSE-APACHE",
+        "sha256": "903131e2786f073a942fbf8fae122d9e576e4dad758c6da7f9f2ba58fd8611ab"
+      }
+    ]
+  },
+  {
+    "name": "iroh-base",
+    "version": "1.4.1",
+    "commit": "d6c6963b9602d1b8dd2ba53b6519e7eb19cc7940",
+    "files": [
+      {
+        "path": "docs/license-supplements/iroh-d6c6963b9602/LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/n0-computer/iroh/d6c6963b9602d1b8dd2ba53b6519e7eb19cc7940/LICENSE-MIT",
+        "sha256": "f169adb8124d3b005416d8485d00777c9a7bdd9099982c52a4493f9732e6d050"
+      },
+      {
+        "path": "docs/license-supplements/iroh-d6c6963b9602/LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/n0-computer/iroh/d6c6963b9602d1b8dd2ba53b6519e7eb19cc7940/LICENSE-APACHE",
+        "sha256": "903131e2786f073a942fbf8fae122d9e576e4dad758c6da7f9f2ba58fd8611ab"
+      }
+    ]
+  },
+  {
+    "name": "iroh-dns",
+    "version": "1.4.1",
+    "commit": "d6c6963b9602d1b8dd2ba53b6519e7eb19cc7940",
+    "files": [
+      {
+        "path": "docs/license-supplements/iroh-d6c6963b9602/LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/n0-computer/iroh/d6c6963b9602d1b8dd2ba53b6519e7eb19cc7940/LICENSE-MIT",
+        "sha256": "f169adb8124d3b005416d8485d00777c9a7bdd9099982c52a4493f9732e6d050"
+      },
+      {
+        "path": "docs/license-supplements/iroh-d6c6963b9602/LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/n0-computer/iroh/d6c6963b9602d1b8dd2ba53b6519e7eb19cc7940/LICENSE-APACHE",
+        "sha256": "903131e2786f073a942fbf8fae122d9e576e4dad758c6da7f9f2ba58fd8611ab"
+      }
+    ]
+  },
+  {
+    "name": "iroh-relay",
+    "version": "1.4.1",
+    "commit": "d6c6963b9602d1b8dd2ba53b6519e7eb19cc7940",
+    "files": [
+      {
+        "path": "docs/license-supplements/iroh-d6c6963b9602/LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/n0-computer/iroh/d6c6963b9602d1b8dd2ba53b6519e7eb19cc7940/LICENSE-MIT",
+        "sha256": "f169adb8124d3b005416d8485d00777c9a7bdd9099982c52a4493f9732e6d050"
+      },
+      {
+        "path": "docs/license-supplements/iroh-d6c6963b9602/LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/n0-computer/iroh/d6c6963b9602d1b8dd2ba53b6519e7eb19cc7940/LICENSE-APACHE",
+        "sha256": "903131e2786f073a942fbf8fae122d9e576e4dad758c6da7f9f2ba58fd8611ab"
+      }
+    ]
+  },
+  {
+    "name": "iroh-metrics-derive",
+    "version": "1.0.1",
+    "commit": "a9afb7cd49bb3804fffefec61647993851f9b8c8",
+    "files": [
+      {
+        "path": "docs/license-supplements/iroh-metrics-a9afb7cd49bb/LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/n0-computer/iroh-metrics/a9afb7cd49bb3804fffefec61647993851f9b8c8/LICENSE-MIT",
+        "sha256": "339060c99d5c80c2742cae417f765980afe6b0149a78f959bbf2a79f19ab3af5"
+      },
+      {
+        "path": "docs/license-supplements/iroh-metrics-a9afb7cd49bb/LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/n0-computer/iroh-metrics/a9afb7cd49bb3804fffefec61647993851f9b8c8/LICENSE-APACHE",
+        "sha256": "7953ad8cebf4e01199521a5faa221ef59bec5cee0a9856b179590613a8560cbc"
+      }
+    ]
+  },
+  {
+    "name": "n0-error-macros",
+    "version": "1.0.3",
+    "commit": "43c4be4c27ad4601b722ad2b97dc85b768756ac9",
+    "files": [
+      {
+        "path": "docs/license-supplements/n0-error-43c4be4c27ad/LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/n0-computer/n0-error/43c4be4c27ad4601b722ad2b97dc85b768756ac9/LICENSE-MIT",
+        "sha256": "339060c99d5c80c2742cae417f765980afe6b0149a78f959bbf2a79f19ab3af5"
+      },
+      {
+        "path": "docs/license-supplements/n0-error-43c4be4c27ad/LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/n0-computer/n0-error/43c4be4c27ad4601b722ad2b97dc85b768756ac9/LICENSE-APACHE",
+        "sha256": "7953ad8cebf4e01199521a5faa221ef59bec5cee0a9856b179590613a8560cbc"
+      }
+    ]
+  },
+  {
+    "name": "netwatch",
+    "version": "0.19.3",
+    "commit": "0030e57fc70981895bb86212ff0f059cc41c8a4e",
+    "files": [
+      {
+        "path": "docs/license-supplements/net-tools-0030e57fc709/LICENSE-MIT",
+        "url": "https://raw.githubusercontent.com/n0-computer/net-tools/0030e57fc70981895bb86212ff0f059cc41c8a4e/LICENSE-MIT",
+        "sha256": "33616ec4c88b6e00de66e6c06f1a55d80bb32a9d7939f3aa83d28e673a1adcae"
+      },
+      {
+        "path": "docs/license-supplements/net-tools-0030e57fc709/LICENSE-APACHE",
+        "url": "https://raw.githubusercontent.com/n0-computer/net-tools/0030e57fc70981895bb86212ff0f059cc41c8a4e/LICENSE-APACHE",
+        "sha256": "7986218ec4ea89de3511a843ae27fea2584a525036c220ff7b26589179f07888"
+      }
+    ]
+  },
+  {
+    "name": "block2",
+    "version": "0.6.2",
+    "commit": "b4167b582b2f75f9a1be75495c41b765344fd03c",
+    "declared_spdx": "MIT",
+    "files": [
+      {
+        "path": "docs/license-supplements/declarations/block2-0.6.2/Cargo.toml",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/b4167b582b2f75f9a1be75495c41b765344fd03c/crates/block2/Cargo.toml",
+        "sha256": "d18aec0c39956f1a29b6d157c13ec51ce53d7c2a2982c307528215f8870720ac",
+        "kind": "upstream SPDX declaration and attribution"
+      },
+      {
+        "path": "docs/license-supplements/spdx/MIT.txt",
+        "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/MIT.txt",
+        "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+        "kind": "canonical SPDX license text"
+      },
+      {
+        "path": "docs/license-supplements/objc2-b4167b582b2f/LICENSE.md",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/b4167b582b2f75f9a1be75495c41b765344fd03c/LICENSE.md",
+        "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+        "kind": "upstream licensing discussion"
+      }
+    ]
+  },
+  {
+    "name": "dispatch2",
+    "version": "0.3.1",
+    "commit": "8852b424193ca41602281b3d7540d7c8ed51e49a",
+    "declared_spdx": "Zlib OR Apache-2.0 OR MIT",
+    "files": [
+      {
+        "path": "docs/license-supplements/declarations/dispatch2-0.3.1/Cargo.toml",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/crates/dispatch2/Cargo.toml",
+        "sha256": "f6aeef4bfe348b9e65e33db2bfb079be4149f9ab0f4b0b3bf3f5d04c144545af",
+        "kind": "upstream SPDX declaration and attribution"
+      },
+      {
+        "path": "docs/license-supplements/spdx/Apache-2.0.txt",
+        "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/Apache-2.0.txt",
+        "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+        "kind": "canonical SPDX license text"
+      },
+      {
+        "path": "docs/license-supplements/objc2-8852b424193c/LICENSE.md",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md",
+        "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+        "kind": "upstream licensing discussion"
+      }
+    ]
+  },
+  {
+    "name": "enum-assoc",
+    "version": "1.4.2",
+    "commit": "5d732f47b429d382daffb0948770adbaa2de0b8c",
+    "declared_spdx": "MIT OR Apache-2.0",
+    "files": [
+      {
+        "path": "docs/license-supplements/declarations/enum-assoc-1.4.2/Cargo.toml",
+        "url": "https://raw.githubusercontent.com/Eolu/enum-assoc/5d732f47b429d382daffb0948770adbaa2de0b8c/Cargo.toml",
+        "sha256": "3b44da589dcb0eec543a22ac562460f2c17bb79b7481d2eb3d5cd64442c92317",
+        "kind": "upstream SPDX declaration and attribution"
+      },
+      {
+        "path": "docs/license-supplements/spdx/Apache-2.0.txt",
+        "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/Apache-2.0.txt",
+        "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+        "kind": "canonical SPDX license text"
+      }
+    ]
+  },
+  {
+    "name": "objc2",
+    "version": "0.6.5",
+    "commit": "d7d2fa23ceaa5e6096c923b081040e5d81b3b9df",
+    "declared_spdx": "MIT",
+    "files": [
+      {
+        "path": "docs/license-supplements/declarations/objc2-0.6.5/Cargo.toml",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/d7d2fa23ceaa5e6096c923b081040e5d81b3b9df/crates/objc2/Cargo.toml",
+        "sha256": "4a1e1561612efc4a8aea4dd574c781f6215fa5416696425227558fc782353cba",
+        "kind": "upstream SPDX declaration and attribution"
+      },
+      {
+        "path": "docs/license-supplements/spdx/MIT.txt",
+        "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/MIT.txt",
+        "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+        "kind": "canonical SPDX license text"
+      },
+      {
+        "path": "docs/license-supplements/objc2-d7d2fa23ceaa/LICENSE.md",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/d7d2fa23ceaa5e6096c923b081040e5d81b3b9df/LICENSE.md",
+        "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+        "kind": "upstream licensing discussion"
+      }
+    ]
+  },
+  {
+    "name": "objc2-core-foundation",
+    "version": "0.3.2",
+    "commit": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+    "declared_spdx": "Zlib OR Apache-2.0 OR MIT",
+    "files": [
+      {
+        "path": "docs/license-supplements/declarations/objc2-core-foundation-0.3.2/Cargo.toml",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-core-foundation/Cargo.toml",
+        "sha256": "44cd6a4440c3ea1ba85df240ab9b9e7a95da3a5873ce623ac426ac5acfbe507f",
+        "kind": "upstream SPDX declaration and attribution"
+      },
+      {
+        "path": "docs/license-supplements/spdx/Apache-2.0.txt",
+        "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/Apache-2.0.txt",
+        "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+        "kind": "canonical SPDX license text"
+      },
+      {
+        "path": "docs/license-supplements/objc2-7b1abfd750a2/LICENSE.md",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+        "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+        "kind": "upstream licensing discussion"
+      }
+    ]
+  },
+  {
+    "name": "objc2-encode",
+    "version": "4.1.0",
+    "commit": "8d214f5477365ffcbcbb7de058c86ed9a518efb7",
+    "declared_spdx": "MIT",
+    "files": [
+      {
+        "path": "docs/license-supplements/declarations/objc2-encode-4.1.0/Cargo.toml",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/crates/objc2-encode/Cargo.toml",
+        "sha256": "12972b1faf213492f9e78226f23642c461284b739f7be5437d9401465a2869a6",
+        "kind": "upstream SPDX declaration and attribution"
+      },
+      {
+        "path": "docs/license-supplements/spdx/MIT.txt",
+        "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/MIT.txt",
+        "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+        "kind": "canonical SPDX license text"
+      },
+      {
+        "path": "docs/license-supplements/objc2-8d214f547736/LICENSE.md",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.md",
+        "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+        "kind": "upstream licensing discussion"
+      }
+    ]
+  },
+  {
+    "name": "objc2-security",
+    "version": "0.3.2",
+    "commit": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+    "declared_spdx": "Zlib OR Apache-2.0 OR MIT",
+    "files": [
+      {
+        "path": "docs/license-supplements/declarations/objc2-security-0.3.2/Cargo.toml",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-security/Cargo.toml",
+        "sha256": "e7cf64a82716823985ecc156f57c06c378f1294c1b2fb8c14d66098541741d20",
+        "kind": "upstream SPDX declaration and attribution"
+      },
+      {
+        "path": "docs/license-supplements/spdx/Apache-2.0.txt",
+        "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/Apache-2.0.txt",
+        "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+        "kind": "canonical SPDX license text"
+      },
+      {
+        "path": "docs/license-supplements/objc2-7b1abfd750a2/LICENSE.md",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+        "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+        "kind": "upstream licensing discussion"
+      }
+    ]
+  },
+  {
+    "name": "objc2-system-configuration",
+    "version": "0.3.2",
+    "commit": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+    "declared_spdx": "Zlib OR Apache-2.0 OR MIT",
+    "files": [
+      {
+        "path": "docs/license-supplements/declarations/objc2-system-configuration-0.3.2/Cargo.toml",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/framework-crates/objc2-system-configuration/Cargo.toml",
+        "sha256": "d94de2049b727014440700e0ad8480541d17ea4100bb8acfc2e3cb55d6cfea1d",
+        "kind": "upstream SPDX declaration and attribution"
+      },
+      {
+        "path": "docs/license-supplements/spdx/Apache-2.0.txt",
+        "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/Apache-2.0.txt",
+        "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+        "kind": "canonical SPDX license text"
+      },
+      {
+        "path": "docs/license-supplements/objc2-7b1abfd750a2/LICENSE.md",
+        "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
+        "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+        "kind": "upstream licensing discussion"
+      }
+    ]
+  },
+  {
+    "name": "reloadable-core",
+    "version": "0.1.0",
+    "commit": "369e42a96a0f52610ed1fed007fce8ac03e07ba9",
+    "declared_spdx": "MIT",
+    "files": [
+      {
+        "path": "docs/license-supplements/declarations/reloadable-core-0.1.0/Cargo.toml",
+        "url": "https://raw.githubusercontent.com/MOZGIII/rustls-cert-utils/369e42a96a0f52610ed1fed007fce8ac03e07ba9/crates/reloadable-core/Cargo.toml",
+        "sha256": "7298b26540c8480ad03a4440bd85efa1c58686c109c6a41838820330ad080464",
+        "kind": "upstream SPDX declaration and attribution"
+      },
+      {
+        "path": "docs/license-supplements/spdx/MIT.txt",
+        "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/MIT.txt",
+        "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+        "kind": "canonical SPDX license text"
+      }
+    ]
+  },
+  {
+    "name": "reloadable-state",
+    "version": "0.1.0",
+    "commit": "369e42a96a0f52610ed1fed007fce8ac03e07ba9",
+    "declared_spdx": "MIT",
+    "files": [
+      {
+        "path": "docs/license-supplements/declarations/reloadable-state-0.1.0/Cargo.toml",
+        "url": "https://raw.githubusercontent.com/MOZGIII/rustls-cert-utils/369e42a96a0f52610ed1fed007fce8ac03e07ba9/crates/reloadable-state/Cargo.toml",
+        "sha256": "a11720326fadc6b22250f6ed1393ee2a76d0eb7b64edce9100367e699f53fc74",
+        "kind": "upstream SPDX declaration and attribution"
+      },
+      {
+        "path": "docs/license-supplements/spdx/MIT.txt",
+        "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/MIT.txt",
+        "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+        "kind": "canonical SPDX license text"
+      }
+    ]
+  },
+  {
+    "name": "rustls-cert-file-reader",
+    "version": "0.4.2",
+    "commit": "d7a45045b1bb03d86ddf00ce8bd0b1e8520a1456",
+    "declared_spdx": "MIT",
+    "files": [
+      {
+        "path": "docs/license-supplements/declarations/rustls-cert-file-reader-0.4.2/Cargo.toml",
+        "url": "https://raw.githubusercontent.com/MOZGIII/rustls-cert-utils/d7a45045b1bb03d86ddf00ce8bd0b1e8520a1456/crates/rustls-cert-file-reader/Cargo.toml",
+        "sha256": "b67e4263e18efebd314aa2caab7577086dd1bc7efacc94ecc39b0854842cddd5",
+        "kind": "upstream SPDX declaration and attribution"
+      },
+      {
+        "path": "docs/license-supplements/spdx/MIT.txt",
+        "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/MIT.txt",
+        "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+        "kind": "canonical SPDX license text"
+      }
+    ]
+  },
+  {
+    "name": "rustls-cert-read",
+    "version": "0.3.0",
+    "commit": "d549c2272f2faa5edca935a1501790fb8ed46aa7",
+    "declared_spdx": "MIT",
+    "files": [
+      {
+        "path": "docs/license-supplements/declarations/rustls-cert-read-0.3.0/Cargo.toml",
+        "url": "https://raw.githubusercontent.com/MOZGIII/rustls-cert-utils/d549c2272f2faa5edca935a1501790fb8ed46aa7/crates/rustls-cert-read/Cargo.toml",
+        "sha256": "44bf324e1a804043b50c0175baebb23cad43e57cacb62b0b2f7a670cf7e3a01b",
+        "kind": "upstream SPDX declaration and attribution"
+      },
+      {
+        "path": "docs/license-supplements/spdx/MIT.txt",
+        "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/MIT.txt",
+        "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+        "kind": "canonical SPDX license text"
+      }
+    ]
+  },
+  {
+    "name": "rustls-cert-reloadable-resolver",
+    "version": "0.7.1",
+    "commit": "239c34ff86da418948f3f85c0de448762bdf5ab2",
+    "declared_spdx": "MIT",
+    "files": [
+      {
+        "path": "docs/license-supplements/declarations/rustls-cert-reloadable-resolver-0.7.1/Cargo.toml",
+        "url": "https://raw.githubusercontent.com/MOZGIII/rustls-cert-utils/239c34ff86da418948f3f85c0de448762bdf5ab2/crates/rustls-cert-reloadable-resolver/Cargo.toml",
+        "sha256": "e9e7b10dd8cbbc9a10be702fd5b86ba2f0be1ac0f42095cb2186af67c88e3627",
+        "kind": "upstream SPDX declaration and attribution"
+      },
+      {
+        "path": "docs/license-supplements/spdx/MIT.txt",
+        "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/MIT.txt",
+        "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+        "kind": "canonical SPDX license text"
+      }
+    ]
+  }
+]

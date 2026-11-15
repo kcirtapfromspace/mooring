@@ -26,6 +26,8 @@ pub mod ffi;
 mod files;
 mod flow;
 mod input;
+pub mod internet_ffi;
+pub mod linux_ffi;
 mod pairing;
 mod peers;
 mod pin;

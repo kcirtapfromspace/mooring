@@ -1,5 +1,6 @@
-//! A scripted VNC server for tests: RSA-AES (as neatvnc implements it) or no
-//! sign-in, then the updates a test supplies, recording what the client sent.
+//! A scripted VNC server for tests: RSA-AES (as neatvnc implements it), the
+//! VNC password (as x11vnc does) or no sign-in, then the updates a test
+//! supplies, recording what the client sent.
 
 use crate::auth::{self, SecurityKind};
 use crate::proto::{self, security};
@@ -123,10 +124,32 @@ fn serve(stream: TcpStream, script: &Script, record: &Mutex<Record>) -> Result<(
     writer.send(&list).map_err(err)?;
     let chosen = reader.u8().map_err(err)?;
     record.lock().unwrap().chosen = Some(chosen);
+    let result = |writer: &mut RfbWriter, ok: bool| -> Result<(), String> {
+        if ok {
+            writer.send(&0_u32.to_be_bytes()).map_err(err)
+        } else {
+            let reason = b"Authentication failed";
+            let mut message = 1_u32.to_be_bytes().to_vec();
+            message.extend_from_slice(&(reason.len() as u32).to_be_bytes());
+            message.extend_from_slice(reason);
+            writer.send(&message).map_err(err)
+        }
+    };
     let accepted = match chosen {
         security::NONE => {
             writer.send(&0_u32.to_be_bytes()).map_err(err)?;
             true
+        }
+        security::VNC_PASSWORD => {
+            let mut challenge = [0_u8; auth::VNC_CHALLENGE_BYTES];
+            OsRng.fill_bytes(&mut challenge);
+            writer.send(&challenge).map_err(err)?;
+            let mut response = [0_u8; auth::VNC_CHALLENGE_BYTES];
+            reader.read_exact(&mut response).map_err(err)?;
+            let ok = response == *auth::vnc_response(&challenge, &script.password);
+            record.lock().unwrap().password_matched = Some(ok);
+            result(&mut writer, ok)?;
+            ok
         }
         security::RA2 | security::RA2_256 => {
             let kind = if chosen == security::RA2_256 {
@@ -189,15 +212,7 @@ fn serve(stream: TcpStream, script: &Script, record: &Mutex<Record>) -> Result<(
                 record.username = Some(username);
                 record.password_matched = Some(password == script.password);
             }
-            if ok {
-                writer.send(&0_u32.to_be_bytes()).map_err(err)?;
-            } else {
-                let reason = b"Authentication failed";
-                let mut message = 1_u32.to_be_bytes().to_vec();
-                message.extend_from_slice(&(reason.len() as u32).to_be_bytes());
-                message.extend_from_slice(reason);
-                writer.send(&message).map_err(err)?;
-            }
+            result(&mut writer, ok)?;
             ok
         }
         other => return Err(format!("client chose {other}")),

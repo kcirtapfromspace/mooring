@@ -560,6 +560,9 @@ pub(crate) struct Inbound {
     pub(crate) grace: Duration,
 }
 pub(crate) struct Session {
+    #[cfg(feature = "internet")]
+    pub(crate) internet: Mutex<Option<mooring_connectivity::blocking::InternetBridge>>,
+    pub(crate) internet_path: AtomicU32,
     pub(crate) socket: TcpStream,
     pub(crate) crypto: StatelessTransportState,
     pub(crate) role: Role,
@@ -626,6 +629,11 @@ impl Session {
     pub(crate) fn send_queue(&self) -> Result<SendQueue> {
         use std::os::fd::AsRawFd;
         self.check_open()?;
+        // A compatibility bridge has a local TCP leg. Its queue and RTT are
+        // not measurements of the internet path and must never drive pacing.
+        if self.transport_path() != 0 {
+            return Err(Error::Io);
+        }
         let mut info = TcpConnectionInfo::default();
         let mut length = std::mem::size_of::<TcpConnectionInfo>() as libc::socklen_t;
         // SAFETY: `info` is a plain C struct of `length` bytes that
@@ -656,6 +664,9 @@ impl Session {
             0
         };
         Self {
+            #[cfg(feature = "internet")]
+            internet: Mutex::new(None),
+            internet_path: AtomicU32::new(0),
             socket,
             crypto,
             role,
@@ -681,6 +692,23 @@ impl Session {
     pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::Release);
         let _ = self.socket.shutdown(Shutdown::Both);
+        #[cfg(feature = "internet")]
+        if let Ok(mut bridge) = self.internet.lock() {
+            bridge.take();
+        }
+    }
+    pub(crate) fn transport_path(&self) -> u32 {
+        #[cfg(feature = "internet")]
+        if let Ok(bridge) = self.internet.lock()
+            && let Some(bridge) = bridge.as_ref()
+        {
+            return match bridge.path() {
+                mooring_connectivity::ConnectionPath::Direct => 1,
+                mooring_connectivity::ConnectionPath::Relayed => 2,
+                mooring_connectivity::ConnectionPath::Unknown => 3,
+            };
+        }
+        self.internet_path.load(Ordering::Acquire)
     }
     fn check_open(&self) -> Result<()> {
         if self.closed.load(Ordering::Acquire) {
@@ -1054,6 +1082,8 @@ impl Session {
 }
 
 pub(crate) struct Listener {
+    #[cfg(feature = "internet")]
+    pub(crate) internet: Mutex<Option<mooring_connectivity::blocking::InternetServer>>,
     pub(crate) socket: TcpListener,
     private: Zeroizing<[u8; 32]>,
     /// The old long-lived pairing secret.
@@ -1071,7 +1101,7 @@ pub(crate) struct Listener {
     /// This Mac's public key, derived from `private`.
     public: [u8; 32],
     /// A pairing listener: it takes only PINs, and never starts a session.
-    pin_only: bool,
+    pub(crate) pin_only: bool,
     /// The PIN it shows now, in memory only.
     pin: Mutex<Option<PinOffer>>,
 }
@@ -1102,6 +1132,8 @@ impl Listener {
         socket.set_nonblocking(true).map_err(io_error)?;
         let public = MontgomeryPoint::mul_base_clamped(*private).to_bytes();
         Ok(Self {
+            #[cfg(feature = "internet")]
+            internet: Mutex::new(None),
             socket,
             private,
             psk,
@@ -1301,6 +1333,10 @@ impl Listener {
     }
     fn close(&self) {
         self.closed.store(true, Ordering::Release);
+        #[cfg(feature = "internet")]
+        if let Ok(mut server) = self.internet.lock() {
+            server.take();
+        }
         if let Ok(pending) = self.pending.lock()
             && let Some(socket) = pending.as_ref()
         {
@@ -1359,9 +1395,15 @@ impl Listener {
             if self.closed.load(Ordering::Acquire) {
                 return Err(Error::Closed);
             }
-            Session::new(socket, crypto, Role::Host, version)
-                .with_peer_device(device, self.devices.clone())
-                .established(end)
+            let session = Session::new(socket, crypto, Role::Host, version)
+                .with_peer_device(device, self.devices.clone());
+            #[cfg(feature = "internet")]
+            if socket_is_internet_proxy(&session.socket, self) {
+                // Conservative host-side classification: the local proxy does
+                // not reveal whether its authenticated QUIC leg is direct.
+                session.internet_path.store(3, Ordering::Release);
+            }
+            session.established(end)
         })();
         lock(&self.pending)?.take();
         result
@@ -2014,4 +2056,13 @@ pub(crate) fn connect_offering(
             .map_err(|error| (true, error));
     }
     Err((false, last))
+}
+
+#[cfg(feature = "internet")]
+fn socket_is_internet_proxy(socket: &TcpStream, listener: &Listener) -> bool {
+    socket.peer_addr().is_ok_and(|addr| addr.ip().is_loopback())
+        && listener
+            .internet
+            .lock()
+            .is_ok_and(|server| server.is_some())
 }

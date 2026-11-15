@@ -1,0 +1,3 @@
+# Preserve upstream notice whitespace and byte-for-byte review evidence.
+docs/THIRD-PARTY-NOTICES.txt -whitespace
+docs/license-supplements/** -whitespace

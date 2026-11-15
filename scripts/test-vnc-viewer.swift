@@ -65,7 +65,15 @@ struct VNCViewerTests {
 
         var id: UInt64 = 0
         var nothing: [UInt8] = []
-        let opened = "viewer-test".withCString { key in "".withCString { user in ml_vnc_open(key, port, user, &nothing, 0, &id) } }
+        // The fake server offers no sign-in, as x11vnc -nopw does; through
+        // SSH to the server's loopback address, that needs nothing.
+        var needs: Int32 = -1
+        let none: [UInt8] = [1]
+        let planned = "127.0.0.1".withCString { host in none.withUnsafeBufferPointer { ml_vnc_sign_in_needs(host, $0.baseAddress, $0.count, &needs) } }
+        check(planned == 0 && needs == Int32(ML_VNC_NEEDS_NOTHING), "sign-in needs: \(planned) \(needs)")
+        let elsewhere = "192.168.1.20".withCString { host in none.withUnsafeBufferPointer { ml_vnc_sign_in_needs(host, $0.baseAddress, $0.count, &needs) } }
+        check(elsewhere == Int32(ML_SESSION_AUTH), "no sign-in beyond the SSH host: \(elsewhere)")
+        let opened = "viewer-test".withCString { key in "127.0.0.1".withCString { host in "".withCString { user in ml_vnc_open(key, port, host, user, &nothing, 0, &id) } } }
         check(opened == 0 && id != 0, "open: \(opened)")
 
         let view = VNCView(frame: NSRect(x: 0, y: 0, width: 80, height: 40))
@@ -264,7 +272,10 @@ struct VNCViewerTests {
         let keys = (result["keys"] as! [[Int]]).map { ($0[0], $0[1]) }
         let pointer = (result["pointer"] as! [[Int]])
         check(result["error"] == nil, "server error: \(result["error"] ?? "")")
-        check((result["encodings"] as! [Int]).first == 16, "ZRLE preferred: \(result["encodings"]!)")
+        // Tight (7) with JPEG quality 7 (-25) and compression 1 (-255), then ZRLE (16).
+        let encodings = result["encodings"] as! [Int]
+        check(Array(encodings.prefix(2)) == [7, 16] && encodings.contains(-25) && encodings.contains(-255),
+              "Tight preferred, then ZRLE: \(encodings)")
         check(pointer.first == [0, 1, 0], "pointer mapped to (1, 0): \(pointer)")
         check(pointer.contains([0, 7, 3]), "pointer at the far corner: \(pointer)")
         check(pointer.contains([0, 1, 3]), "pointer in a view of the bottom row lands on row 3: \(pointer)")

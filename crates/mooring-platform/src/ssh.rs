@@ -21,7 +21,7 @@ pub use desktop::{
     watch_desktop,
 };
 pub use screen::{
-    ScreenSize, VIRTUAL_SCREEN_READY_TIMEOUT, VIRTUAL_SCREEN_SCRIPT, VirtualScreen,
+    ScreenKind, ScreenSize, VIRTUAL_SCREEN_READY_TIMEOUT, VIRTUAL_SCREEN_SCRIPT, VirtualScreen,
     start_virtual_screen, virtual_screen_args,
 };
 
@@ -48,61 +48,13 @@ pub const SYSTEM_SSH: &str = "/usr/bin/ssh";
 pub const DEFAULT_REMOTE_HOST: &str = "127.0.0.1";
 pub const DEFAULT_REMOTE_PORT: u16 = 5900;
 
-const MAX_TARGET_LENGTH: usize = 255;
-const MAX_USER_LENGTH: usize = 64;
 const STDERR_LINES: usize = 12;
 const STDERR_LINE_BYTES: usize = 300;
 const RELAY_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_REFUSAL_REASON_BYTES: usize = 512;
 const TICK: Duration = Duration::from_millis(50);
 
-/// Validate an SSH destination: a `~/.ssh/config` host alias, a hostname or
-/// IP address, optionally prefixed with `user@`. Ports, options, URLs and
-/// spaces are refused; put those in `~/.ssh/config`.
-pub fn validate_ssh_target(target: &str) -> Result<String, String> {
-    const INVALID: &str = "Enter an SSH host alias or user@host only, without spaces, options, a port or a URL. Put the port and other settings in ~/.ssh/config.";
-    if target.is_empty() || target.len() > MAX_TARGET_LENGTH || !target.is_ascii() {
-        return Err(INVALID.into());
-    }
-    let (user, host) = match target.split_once('@') {
-        Some((user, host)) => (Some(user), host),
-        None => (None, target),
-    };
-    if let Some(user) = user {
-        let first = user.as_bytes().first().copied().unwrap_or(b'-');
-        if user.len() > MAX_USER_LENGTH
-            || !(first.is_ascii_alphanumeric() || first == b'_')
-            || !user
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-        {
-            return Err(INVALID.into());
-        }
-    }
-    if host.contains(':') {
-        // Only a literal IPv6 address may contain a colon; never host:port.
-        return host
-            .parse::<Ipv6Addr>()
-            .map(|_| target.to_owned())
-            .map_err(|_| INVALID.into());
-    }
-    let first = host.as_bytes().first().copied().unwrap_or(b'-');
-    if host.is_empty()
-        || host.len() > 253
-        || !first.is_ascii_alphanumeric()
-        || host.contains("..")
-        || !host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-    {
-        return Err(INVALID.into());
-    }
-    // Like validate_host: no abbreviated or octal IPv4 such as 127.1.
-    if host.bytes().all(|b| b.is_ascii_digit() || b == b'.') && host.parse::<Ipv4Addr>().is_err() {
-        return Err("Use a complete IPv4 address, for example 192.168.1.10.".into());
-    }
-    Ok(target.to_owned())
-}
+pub use mooring_core::connection::validate_ssh_target;
 
 /// Where the VNC server is, as seen from the SSH host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -697,12 +649,11 @@ fn rfb_preamble(
 fn describe_check(rfb_version: &str, types: &[u8]) -> (bool, bool, String) {
     let looks_like_mac = rfb_version == "003.889";
     let compatible = looks_like_mac || types.iter().any(|id| APPLE_VIEWER_TYPES.contains(id));
-    let mut note = String::from(
+    // Mooring's own viewer signs in now; the CLI adds how. `compatible` stays
+    // in the report for other viewers that use the tunnel.
+    let note = String::from(
         "Reached the VNC server through SSH and read its offered security types without signing in. This does not measure bandwidth or video latency.",
     );
-    if !compatible {
-        note.push_str(" macOS Screen Sharing signs in to servers that are not Macs only with a VNC password (type 2), which this server does not offer, so it will likely fail to sign in. On macOS 27 it did not use Apple Diffie-Hellman (30) with such a server. Another viewer can use the tunnel with connect --no-viewer.");
-    }
     (looks_like_mac, compatible, note)
 }
 
@@ -1597,12 +1548,13 @@ mod tests {
     #[test]
     fn notes_servers_screen_sharing_cannot_sign_in_to() {
         // wayvnc with relax_encryption: Screen Sharing on macOS 27 tried only
-        // a VNC password here and failed, so this is not compatible.
+        // a VNC password here and failed, so this is not compatible. Mooring's
+        // own viewer signs in, so the note no longer warns.
         let (mac, compatible, note) = describe_check("003.008", &[129, 5, 30]);
-        assert!(!mac && !compatible && note.contains("VNC password (type 2)"));
-        assert!(note.contains("--no-viewer"));
-        let (_, compatible, note) = describe_check("003.008", &[2, 129]);
-        assert!(compatible && !note.contains("type 2"));
+        assert!(!mac && !compatible && note.contains("without signing in"));
+        assert!(!note.contains("fail"), "{note}");
+        let (_, compatible, _) = describe_check("003.008", &[2, 129]);
+        assert!(compatible);
         let (mac, compatible, _) = describe_check("003.889", &[35]);
         assert!(mac && compatible);
     }

@@ -6,47 +6,13 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read};
-use std::net::{IpAddr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 pub mod network_probe;
 pub mod ssh;
 
-/// The app's owner-only local telemetry socket, relative to the data directory.
-/// It lives in its own 0700 folder so no other user can reach it.
-pub const TELEMETRY_SOCKET: &str = "telemetry/telemetry.sock";
-
-/// Shared by the CLI and native session. Existing installations keep their
-/// data directory so other running copies still use the same store and lock.
-pub fn support_directory() -> Result<PathBuf, String> {
-    support_directory_for(
-        std::env::var_os("MOORING_HOME"),
-        std::env::var_os("MACLINK_HOME"),
-        std::env::var_os("HOME"),
-    )
-}
-
-fn support_directory_for(
-    override_path: Option<std::ffi::OsString>,
-    legacy_override: Option<std::ffi::OsString>,
-    home: Option<std::ffi::OsString>,
-) -> Result<PathBuf, String> {
-    if let Some(path) = override_path.or(legacy_override) {
-        if path.is_empty() {
-            return Err("MOORING_HOME must not be empty".into());
-        }
-        return Ok(PathBuf::from(path));
-    }
-    let base = PathBuf::from(home.ok_or("HOME is unavailable; set MOORING_HOME")?)
-        .join("Library/Application Support");
-    let existing = base.join("MacLink"); // Stable storage for previously paired Macs.
-    Ok(if existing.exists() {
-        existing
-    } else {
-        base.join("Mooring")
-    })
-}
+pub use mooring_storage::{TELEMETRY_SOCKET, support_directory};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HostInspection {
@@ -61,61 +27,7 @@ pub struct HostInspection {
     pub note: String,
 }
 
-/// Validate and normalize a host without accepting URLs or embedded credentials.
-///
-/// Supports ASCII DNS names, IPv4, and bracketed or unbracketed IPv6. Scoped IPv6
-/// addresses are intentionally unsupported; use the Mac's DNS name instead.
-pub fn validate_host(host: &str) -> Result<String, String> {
-    const INVALID: &str =
-        "Enter a hostname or IP address only, without a URL, user name, port, spaces, or path.";
-    if host.is_empty() || !host.is_ascii() || host.len() > 254 {
-        return Err(INVALID.into());
-    }
-    if host.starts_with('[') || host.ends_with(']') {
-        let value = host
-            .strip_prefix('[')
-            .and_then(|s| s.strip_suffix(']'))
-            .ok_or(INVALID)?;
-        return value
-            .parse::<Ipv6Addr>()
-            .map(|ip| ip.to_string())
-            .map_err(|_| INVALID.into());
-    }
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(ip.to_string());
-    }
-    let name = host.strip_suffix('.').unwrap_or(host);
-    if name.is_empty() || name.len() > 253 {
-        return Err(INVALID.into());
-    }
-    // Do not let the system resolver interpret abbreviated or octal IPv4.
-    if name.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
-        return Err("Use a complete IPv4 address, for example 192.168.1.10.".into());
-    }
-    // Some resolvers also accept hexadecimal IPv4 spellings.
-    if name.split('.').all(|label| {
-        label.bytes().all(|b| b.is_ascii_digit())
-            || label
-                .strip_prefix("0x")
-                .or_else(|| label.strip_prefix("0X"))
-                .is_some_and(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_hexdigit()))
-    }) {
-        return Err("Use a standard hostname or complete IPv4 address.".into());
-    }
-    for label in name.split('.') {
-        if label.is_empty()
-            || label.len() > 63
-            || !label.as_bytes()[0].is_ascii_alphanumeric()
-            || !label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
-            || !label
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        {
-            return Err(INVALID.into());
-        }
-    }
-    Ok(host.to_ascii_lowercase())
-}
+pub use mooring_core::connection::validate_host;
 
 /// Inspect one explicitly supplied host by reading its 12-byte RFB greeting.
 ///
@@ -224,31 +136,7 @@ fn validate_port(port: u16) -> Result<(), String> {
     Ok(())
 }
 
-/// What kind of VNC server a saved connection reaches. Mooring's own viewer
-/// opens `Vnc` servers (such as wayvnc on Linux) through SSH. `Mac` is kept
-/// only so connections saved for Apple Screen Sharing still load: Mooring
-/// now reaches Macs by pairing, and no longer opens Screen Sharing.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ServerKind {
-    #[default]
-    Mac,
-    Vnc,
-}
-
-impl ServerKind {
-    pub fn is_mac(&self) -> bool {
-        *self == ServerKind::Mac
-    }
-
-    pub fn parse(value: &str) -> Result<Self, String> {
-        match value {
-            "vnc" => Ok(Self::Vnc),
-            "mac" => Err("Mooring no longer opens Apple Screen Sharing. Pair Macs with Mooring instead (Pair a Mac in the app).".into()),
-            _ => Err("Server must be vnc (a VNC server such as wayvnc on Linux).".into()),
-        }
-    }
-}
+pub use mooring_core::connection::ServerKind;
 
 #[cfg(test)]
 mod tests {
@@ -256,36 +144,6 @@ mod tests {
     use std::io::Write;
     use std::net::TcpListener;
     use std::thread::{self, JoinHandle};
-
-    #[test]
-    fn branding_preserves_existing_storage_and_explicit_overrides() {
-        let home = std::env::temp_dir().join(format!("mooring-storage-{}", std::process::id()));
-        std::fs::create_dir_all(&home).unwrap();
-        let select = |current, legacy| {
-            support_directory_for(current, legacy, Some(home.clone().into_os_string()))
-        };
-        let base = home.join("Library/Application Support");
-        assert_eq!(select(None, None).unwrap(), base.join("Mooring"));
-        let existing = base.join("MacLink");
-        std::fs::create_dir_all(&existing).unwrap();
-        std::fs::write(existing.join("connections.json"), b"saved connections").unwrap();
-        assert_eq!(select(None, None).unwrap(), existing);
-        assert_eq!(
-            std::fs::read(existing.join("connections.json")).unwrap(),
-            b"saved connections"
-        );
-        assert_eq!(
-            select(Some("new".into()), Some("old".into())).unwrap(),
-            PathBuf::from("new")
-        );
-        assert_eq!(
-            select(None, Some("old".into())).unwrap(),
-            PathBuf::from("old")
-        );
-        assert!(select(Some("".into()), Some("old".into())).is_err());
-        assert!(support_directory_for(None, None, None).is_err());
-        std::fs::remove_dir_all(home).unwrap();
-    }
 
     fn mock_server(action: impl FnOnce(TcpStream) + Send + 'static) -> (u16, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

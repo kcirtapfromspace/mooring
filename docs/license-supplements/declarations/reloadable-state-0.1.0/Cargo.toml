@@ -1,0 +1,18 @@
+[package]
+name = "reloadable-state"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/MOZGIII/rustls-cert-utils"
+description = """
+A generic reloadable shared state.
+"""
+keywords = ["utils", "state", "arc", "arc-swap"]
+categories = ["caching"]
+readme = "../../README.md"
+
+[dependencies]
+reloadable-core = { version = "0.1", path = "../reloadable-core" }
+
+arc-swap = "1"
+tokio = { version = "1", default-features = false, features = ["sync"] }

@@ -682,7 +682,7 @@ fn code_out(code: &PairingCode, out: &mut MLPairingCode) -> Result<()> {
 }
 /// Strictly re-validates a code that crossed the boundary; its peer ID is
 /// always recomputed from the public key.
-fn code_in(raw: &MLPairingCode) -> Result<PairingCode> {
+pub(crate) fn code_in(raw: &MLPairingCode) -> Result<PairingCode> {
     PairingCode::of_kind(
         &read_text(&raw.address)?,
         &read_text(&raw.name)?,

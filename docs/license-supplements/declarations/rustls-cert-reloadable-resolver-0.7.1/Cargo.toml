@@ -1,0 +1,25 @@
+[package]
+name = "rustls-cert-reloadable-resolver"
+version = "0.7.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/MOZGIII/rustls-cert-utils"
+description = """
+A reloadable certificate resolver for rustls.
+"""
+keywords = ["rustls", "utils", "certs"]
+categories = ["network-programming"]
+readme = "../../README.md"
+
+[dependencies]
+reloadable-state = { version = "0.1", path = "../reloadable-state" }
+rustls-cert-read = { version = "0.3", path = "../rustls-cert-read" }
+
+futures-util = { version = "0.3", default-features = false }
+rustls = { version = "0.23", default-features = false }
+thiserror = "2"
+
+[dev-dependencies]
+rustls-cert-file-reader = { version = "0.4", path = "../rustls-cert-file-reader" }
+
+rustls = "0.23"

@@ -7,7 +7,13 @@ license.workspace = true
 [lib]
 crate-type = ["rlib", "staticlib"]
 
+[features]
+default = []
+internet = ["dep:mooring-connectivity"]
+
 [dependencies]
+mooring-connectivity = { path = "../mooring-connectivity", optional = true }
+mooring-core = { path = "../mooring-core" }
 mooring-platform = { path = "../mooring-platform" }
 mooring-vnc = { path = "../mooring-vnc" }
 serde.workspace = true
@@ -21,3 +27,7 @@ snow = { version = "0.10", default-features = false, features = ["std", "use-cur
 getrandom = "0.4"
 libc = "0.2"
 zeroize = "1"
+
+[dev-dependencies]
+iroh-relay = { version = "=1.4.1", default-features = false, features = ["server", "tls-ring"] }
+tokio = { version = "=1.52.1", features = ["rt-multi-thread", "net", "time"] }

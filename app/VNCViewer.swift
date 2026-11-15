@@ -2,11 +2,11 @@ import AppKit
 import IOSurface
 import QuartzCore
 
-/// Mooring's own viewer for VNC servers that are not Macs, such as wayvnc on
-/// Linux, reached through Mooring's SSH tunnel.
+/// Mooring's own viewer for VNC servers that are not Macs, such as wayvnc or
+/// x11vnc on Linux, reached through Mooring's SSH tunnel.
 ///
-/// Rust (`ml_vnc_*`, crate mooring-vnc) owns the protocol, the RSA-AES
-/// sign-in, decoding, key mapping and the failed-sign-in budget. This file
+/// Rust (`ml_vnc_*`, crate mooring-vnc) owns the protocol, the sign-in and
+/// which kind to use, decoding, key mapping and the failed-sign-in budget. This file
 /// only copies changed pixels into an IOSurface each display refresh and
 /// forwards AppKit events. It never stores the password: the bytes are handed
 /// to Rust, which wipes them before returning.
@@ -268,6 +268,17 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItemVal
     /// Set by the app: the Linux desktop was given a virtual screen that
     /// includes the row beside the camera housing.
     var extendsBesideCamera = false { didSet { layoutCameraRow() } }
+    /// Remote pixels per point of this Mac's screen. Nil: the screen's own
+    /// scale, as for a virtual Hyprland output; 1 for an X11 desktop that was
+    /// resized to this Mac in points.
+    var remotePixelsPerPoint: CGFloat? {
+        didSet {
+            guard remotePixelsPerPoint != oldValue else { return }
+            let remote = view.remoteSize
+            if remote.width > 0 { fitToPicture(width: Int(remote.width), height: Int(remote.height)) }
+            layoutCameraRow()
+        }
+    }
     /// macOS acts on ⌘-Tab, ⌘-Space and other system shortcuts before Mooring
     /// sees them; with Accessibility allowed, this sends them to the desktop
     /// while the viewer is in front. ⌃⌘F, ⌃⌘D, ⌃⌘Q and ⌥⌘Esc stay here.
@@ -282,6 +293,8 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItemVal
     private let endedReason = label("", size: 13, color: .secondaryLabelColor)
     private var desktopNote = ""
     private var summary = "Connecting…"
+    /// How this session signed in, for the footer.
+    private var signedIn = ""
     private var statsTimer: Timer?
     private var lastStats = MLVncStats()
     private var lastStatsAt = Date()
@@ -409,27 +422,26 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItemVal
             var length = 0
             guard ml_vnc_poll_event(view.sessionID, &buffer, buffer.count, &length) == 0, length > 0 else { break }
             let data = Data(bytes: buffer, count: length)
-            guard let event = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
-            handle(event)
+            do { handle(try JSONDecoder().decode(VNCSessionEvent.self, from: data)) }
+            catch { end("The viewer received an invalid session event."); onEnded?("The viewer received an invalid session event."); return }
             if view.sessionID == 0 { return }
         }
         view.refresh()
     }
 
-    private func handle(_ event: [String: Any]) {
-        switch event["event"] as? String {
-        case "connected", "resized":
-            let width = event["width"] as? Int ?? 0, height = event["height"] as? Int ?? 0
-            summary = "\(width)×\(height) · RSA-AES through SSH"
+    private func handle(_ event: VNCSessionEvent) {
+        switch event {
+        case .picture(let width, let height, let security):
+            if let security { showSignIn(security) }
+            summary = "\(width)×\(height) · \(signedIn)"
             render()
             fitToPicture(width: width, height: height)
-        case "bell":
+        case .bell:
             NSSound.beep()
-        case "closed":
-            let error = event["error"] as? [String: Any]
-            let message = error?["message"] as? String
+        case .closed(let error):
+            let message = error?.message
             end(message)
-            if error?["kind"] as? String == "sign_in_rejected" {
+            if error?.kind == "sign_in_rejected" {
                 onSignInRejected?(message ?? "The sign-in was not accepted.")
             } else {
                 onEnded?(message)
@@ -439,13 +451,26 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItemVal
         }
     }
 
+    /// The footer's note on how the session signed in. Rust chose the type:
+    /// no VNC password only through SSH to the server's loopback address.
+    private func showSignIn(_ security: String) {
+        let (short, sentence): (String, String)
+        switch security {
+        case "none": (short, sentence) = ("SSH key, no VNC password", "Signed in with your SSH key; this VNC server has no password.")
+        case "vnc_password": (short, sentence) = ("VNC password inside SSH", "Signed in with the VNC server’s password, answered inside SSH and not saved.")
+        default: (short, sentence) = ("RSA-AES through SSH", "Signed in with RSA-AES, inside SSH.")
+        }
+        signedIn = short
+        footer.status.toolTip = sentence + " The Linux desktop sends an update only when its screen changes. Moving your own pointer does not count."
+    }
+
     /// Size the window to the desktop's shape: one remote pixel per screen
     /// pixel when that fits, otherwise as large as fits, and keep that shape
     /// while resizing.
     private func fitToPicture(width: Int, height: Int) {
         guard let window, width > 0, height > 0, !isFullScreen, !window.styleMask.contains(.fullScreen) else { return }
         let footer = showsDiagnosticBar ? ViewerFooter.height : 0
-        let scale = window.backingScaleFactor
+        let scale = remotePixelsPerPoint ?? window.backingScaleFactor
         var size = CGSize(width: CGFloat(width) / scale, height: CGFloat(height) / scale)
         if let visible = window.screen?.visibleFrame {
             let room = CGSize(width: visible.width * 0.92, height: visible.height * 0.92 - footer - 28)
@@ -562,7 +587,7 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItemVal
         }
         let rowHeight = screen.frame.maxY - window.frame.maxY
         let remote = view.remoteSize
-        guard let rowRows = Self.cameraRowRows(remoteHeight: remote.height, scale: screen.backingScaleFactor,
+        guard let rowRows = Self.cameraRowRows(remoteHeight: remote.height, scale: remotePixelsPerPoint ?? screen.backingScaleFactor,
                                                rowHeight: rowHeight, below: view.bounds.height) else {
             hideCameraRow(); return
         }
@@ -618,25 +643,27 @@ final class VNCViewerWindow: NSWindowController, NSWindowDelegate, NSMenuItemVal
 }
 
 /// The sign-in prompt for a VNC server. Rust decides whether an attempt is
-/// allowed; this only collects the two fields.
+/// allowed and what it needs; this only collects the fields: a username and
+/// password, or (with `username` nil) a VNC password alone.
 enum VNCSignIn {
-    static func prompt(name: String, username: String, detail: String, completion: @escaping ((username: String, password: [UInt8])?) -> Void) {
+    static func prompt(name: String, username: String?, detail: String, completion: @escaping ((username: String, password: [UInt8])?) -> Void) {
         let alert = NSAlert()
         alert.messageText = "Sign in to \(name)"
         alert.informativeText = detail
         alert.addButton(withTitle: "Sign In")
         alert.addButton(withTitle: "Cancel")
-        let user = NSTextField(string: username)
+        let user = NSTextField(string: username ?? "")
         user.placeholderString = "Username"
         let secret = NSSecureTextField(string: "")
-        secret.placeholderString = "Password"
-        for field in [user, secret] { field.translatesAutoresizingMaskIntoConstraints = false; field.widthAnchor.constraint(equalToConstant: 260).isActive = true }
-        let fields = NSStackView(views: [user, secret])
+        secret.placeholderString = username == nil ? "VNC password" : "Password"
+        let shown = username == nil ? [secret] : [user, secret]
+        for field in shown { field.translatesAutoresizingMaskIntoConstraints = false; field.widthAnchor.constraint(equalToConstant: 260).isActive = true }
+        let fields = NSStackView(views: shown)
         fields.orientation = .vertical
         fields.spacing = 8
-        fields.frame = NSRect(x: 0, y: 0, width: 260, height: 56)
+        fields.frame = NSRect(x: 0, y: 0, width: 260, height: username == nil ? 24 : 56)
         alert.accessoryView = fields
-        alert.window.initialFirstResponder = username.isEmpty ? user : secret
+        alert.window.initialFirstResponder = username?.isEmpty ?? false ? user : secret
         NSApp.activate(ignoringOtherApps: true)
         let answer = alert.runModal()
         var password = Array(secret.stringValue.utf8)
@@ -646,6 +673,6 @@ enum VNCSignIn {
             completion(nil)
             return
         }
-        completion((user.stringValue.trimmingCharacters(in: .whitespaces), password))
+        completion((username == nil ? "" : user.stringValue.trimmingCharacters(in: .whitespaces), password))
     }
 }

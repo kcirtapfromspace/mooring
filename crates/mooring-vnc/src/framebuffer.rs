@@ -125,6 +125,9 @@ impl Framebuffer {
     /// Copy `rect.pixels()` BGRX pixels, row by row, from `source`.
     pub fn put(&mut self, rect: &Rect, source: &[u8]) {
         debug_assert!(self.contains(rect));
+        if rect.is_empty() {
+            return;
+        }
         debug_assert_eq!(source.len(), rect.pixels() * BYTES_PER_PIXEL);
         let row = usize::from(rect.width) * BYTES_PER_PIXEL;
         for (line, chunk) in source.chunks_exact(row).enumerate() {
@@ -146,6 +149,9 @@ impl Framebuffer {
 
     pub fn fill(&mut self, rect: &Rect, pixel: [u8; 4]) {
         debug_assert!(self.contains(rect));
+        if rect.is_empty() {
+            return;
+        }
         let pixel = Self::opaque(pixel);
         for line in 0..rect.height {
             let start = self.offset(rect.x, rect.y + line);

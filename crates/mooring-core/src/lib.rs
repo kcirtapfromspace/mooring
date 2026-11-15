@@ -3,7 +3,10 @@
 //! This crate does not capture, encode, transport, authenticate, or display video.
 //! The quality scenarios contain simulated measurements, not benchmarks.
 
+pub mod connection;
+pub mod connectivity;
 pub mod desktop;
+pub mod linux_session;
 mod mailbox;
 mod quality;
 mod reconnect;

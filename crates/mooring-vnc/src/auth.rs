@@ -1,9 +1,13 @@
-//! Version and security negotiation, and the RSA-AES sign-in (RA2 and
-//! RA2_256) as specified by the RFB community specification and implemented
-//! by neatvnc (wayvnc) and TigerVNC.
+//! Version and security negotiation, the RSA-AES sign-in (RA2 and RA2_256)
+//! as specified by the RFB community specification and implemented by neatvnc
+//! (wayvnc) and TigerVNC, and, only inside Mooring's SSH tunnel to the
+//! server's own loopback address, no sign-in (None, 1) or the classic VNC
+//! password (VNC Authentication, 2) that x11vnc, vino and TigerVNC offer.
 
 use crate::proto::{self, security};
 use crate::stream::{EaxDirection, RfbReader, RfbWriter};
+use des::Des;
+use des::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
 use rand_core::{OsRng, RngCore};
 use rsa::traits::PublicKeyParts;
 use rsa::{BigUint, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
@@ -12,6 +16,7 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::io;
+use std::net::IpAddr;
 use zeroize::{Zeroize, Zeroizing};
 
 pub const MIN_SERVER_KEY_BITS: u32 = 1_024;
@@ -19,6 +24,49 @@ pub const MAX_SERVER_KEY_BITS: u32 = 8_192;
 pub const CLIENT_KEY_BITS: usize = 2_048;
 /// RA2 limits each credential to one length byte.
 pub const MAX_CREDENTIAL_BYTES: usize = 255;
+/// VNC Authentication uses at most the first 8 bytes of a password; servers
+/// ignore the rest.
+pub const VNC_PASSWORD_BYTES: usize = 8;
+/// VNC Authentication's challenge and response.
+pub const VNC_CHALLENGE_BYTES: usize = 16;
+
+/// How the viewer reaches the VNC server. Only Mooring's SSH tunnel to the
+/// server's own loopback address may use a server's no-password or classic
+/// VNC password sign-in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Route {
+    /// Mooring's SSH tunnel to 127.0.0.0/8, ::1 or localhost on the SSH
+    /// host. SSH checked the host's key, signed in with the person's own key,
+    /// and encrypts every byte; the VNC port is reached only from that host.
+    SshToLoopback,
+    /// Anything else, such as a direct connection or an SSH tunnel whose last
+    /// hop crosses a network unencrypted. Only RSA-AES is used.
+    Other,
+}
+
+impl Route {
+    /// The route of Mooring's SSH tunnel whose remote end is `remote_host`,
+    /// as the SSH host sees it.
+    pub fn ssh_tunnel_to(remote_host: &str) -> Self {
+        if is_loopback_host(remote_host) {
+            Self::SshToLoopback
+        } else {
+            Self::Other
+        }
+    }
+}
+
+/// Whether `host` names the SSH host itself: `localhost`, 127.0.0.0/8 or
+/// ::1, with or without brackets.
+pub fn is_loopback_host(host: &str) -> bool {
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    host.eq_ignore_ascii_case("localhost")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
 
 /// A username and password for one sign-in attempt. The password is wiped
 /// when this is dropped, and neither is ever printed.
@@ -61,7 +109,12 @@ impl fmt::Debug for Credentials {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecurityKind {
+    /// No VNC sign-in: the SSH key is the sign-in. Only through SSH to the
+    /// server's loopback address.
     None,
+    /// The classic VNC password (DES challenge and response). Only through
+    /// SSH to the server's loopback address, which protects the exchange.
+    VncPassword,
     RsaAes128,
     RsaAes256,
 }
@@ -70,10 +123,34 @@ impl SecurityKind {
     pub fn type_id(self) -> u8 {
         match self {
             Self::None => security::NONE,
+            Self::VncPassword => security::VNC_PASSWORD,
             Self::RsaAes128 => security::RA2,
             Self::RsaAes256 => security::RA2_256,
         }
     }
+
+    /// What the person is asked for before this sign-in.
+    pub fn needs(self) -> SignInNeeds {
+        match self {
+            Self::None => SignInNeeds::Nothing,
+            Self::VncPassword => SignInNeeds::Password,
+            Self::RsaAes128 | Self::RsaAes256 => SignInNeeds::Account,
+        }
+    }
+}
+
+/// What signing in asks of the person.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignInNeeds {
+    /// Nothing: the SSH key already signed in, and the server has no VNC
+    /// password.
+    Nothing,
+    /// The VNC server's own password, without a username.
+    Password,
+    /// An account on the computer: a username and its password. RSA-AES may
+    /// ask for the password alone once the handshake has run.
+    Account,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -126,16 +203,39 @@ impl fmt::Display for AuthError {
     }
 }
 
-/// Mooring's choice among the offered types, strongest first. Apple
-/// Diffie-Hellman (30) and the plain VNC password (2) are never chosen.
-pub fn choose_security(offered: &[u8]) -> Option<SecurityKind> {
-    [
-        SecurityKind::RsaAes256,
-        SecurityKind::RsaAes128,
-        SecurityKind::None,
-    ]
-    .into_iter()
-    .find(|kind| offered.contains(&kind.type_id()))
+/// Mooring's choice among the offered types: RSA-AES whenever the server
+/// offers it, strongest first. Only through SSH to the server's loopback
+/// address, no sign-in, then the VNC password. Apple Diffie-Hellman (30) is
+/// never chosen.
+pub fn choose_security(offered: &[u8], route: Route) -> Option<SecurityKind> {
+    let encrypted = [SecurityKind::RsaAes256, SecurityKind::RsaAes128];
+    let inside_ssh = [SecurityKind::None, SecurityKind::VncPassword];
+    let allowed: &[SecurityKind] = match route {
+        Route::SshToLoopback => &[encrypted[0], encrypted[1], inside_ssh[0], inside_ssh[1]],
+        Route::Other => &encrypted,
+    };
+    allowed
+        .iter()
+        .copied()
+        .find(|kind| offered.contains(&kind.type_id()))
+}
+
+/// Why none of `offered` can be used over `route`, for the person.
+pub fn unsupported_message(offered: &[u8], route: Route) -> String {
+    let names: Vec<String> = offered.iter().map(|id| id.to_string()).collect();
+    let names = names.join(", ");
+    let only_inside_ssh = offered
+        .iter()
+        .any(|id| [security::NONE, security::VNC_PASSWORD].contains(id));
+    if route == Route::Other && only_inside_ssh {
+        format!(
+            "The VNC server offers only sign-in without encryption ({names}). Mooring uses that only through its SSH tunnel to the server’s own loopback address (127.0.0.1), so save the connection with host 127.0.0.1 as seen from the SSH host."
+        )
+    } else {
+        format!(
+            "The VNC server offers only sign-in types Mooring does not use ({names}). Mooring signs in with RSA-AES (129 or 5), or, through SSH to the server’s loopback address, with no VNC password (1) or a VNC password (2)."
+        )
+    }
 }
 
 /// What the server's greeting and security list said.
@@ -164,7 +264,11 @@ fn read_reason(reader: &mut RfbReader) -> String {
 }
 
 /// Exchange versions and choose a security type.
-pub fn negotiate(reader: &mut RfbReader, writer: &mut RfbWriter) -> Result<Negotiated, AuthError> {
+pub fn negotiate(
+    reader: &mut RfbReader,
+    writer: &mut RfbWriter,
+    route: Route,
+) -> Result<Negotiated, AuthError> {
     let mut greeting = [0_u8; 12];
     reader.read_exact(&mut greeting)?;
     let Some((major, minor)) = proto::parse_version(&greeting) else {
@@ -198,14 +302,10 @@ pub fn negotiate(reader: &mut RfbReader, writer: &mut RfbWriter) -> Result<Negot
     }
     let mut offered = vec![0_u8; usize::from(count)];
     reader.read_exact(&mut offered)?;
-    let Some(security) = choose_security(&offered) else {
-        let names: Vec<String> = offered.iter().map(|id| id.to_string()).collect();
+    let Some(security) = choose_security(&offered, route) else {
         return Err(AuthError::new(
             AuthErrorKind::UnsupportedSecurity,
-            format!(
-                "The VNC server offers only sign-in types Mooring does not use ({}). Mooring signs in with RSA-AES (129 or 5).",
-                names.join(", ")
-            ),
+            unsupported_message(&offered, route),
         ));
     };
     writer.send(&[security.type_id()])?;
@@ -279,7 +379,7 @@ pub fn ra2_handshake(
     let (random_len, key_len) = match kind {
         SecurityKind::RsaAes256 => (32, 32),
         SecurityKind::RsaAes128 => (16, 16),
-        SecurityKind::None => unreachable!("not an RSA-AES type"),
+        SecurityKind::None | SecurityKind::VncPassword => unreachable!("not an RSA-AES type"),
     };
     let invalid = |message: &str| AuthError::new(AuthErrorKind::HandshakeFailed, message);
     let server_bits = reader.u32()?;
@@ -381,8 +481,50 @@ pub fn send_credentials(
     Ok(())
 }
 
-/// Read SecurityResult. A rejection is `SignInRejected` with the server's reason.
-pub fn read_security_result(reader: &mut RfbReader, minor: u16) -> Result<(), AuthError> {
+/// Read VNC Authentication's random challenge.
+pub fn read_vnc_challenge(reader: &mut RfbReader) -> Result<[u8; VNC_CHALLENGE_BYTES], AuthError> {
+    let mut challenge = [0_u8; VNC_CHALLENGE_BYTES];
+    reader.read_exact(&mut challenge)?;
+    Ok(challenge)
+}
+
+/// VNC Authentication's response: the challenge encrypted with DES, keyed by
+/// the password's first 8 bytes (zero-padded), each byte's bits reversed, as
+/// every VNC server since the original expects. DES is weak; Mooring sends
+/// this only inside SSH to the server's loopback address.
+pub fn vnc_response(
+    challenge: &[u8; VNC_CHALLENGE_BYTES],
+    password: &[u8],
+) -> Zeroizing<[u8; VNC_CHALLENGE_BYTES]> {
+    let mut key = Zeroizing::new([0_u8; VNC_PASSWORD_BYTES]);
+    for (slot, byte) in key.iter_mut().zip(password) {
+        *slot = byte.reverse_bits();
+    }
+    let cipher = Des::new(GenericArray::from_slice(&key[..]));
+    let mut response = Zeroizing::new(*challenge);
+    for block in response.as_chunks_mut::<8>().0 {
+        cipher.encrypt_block(GenericArray::from_mut_slice(block));
+    }
+    response
+}
+
+/// Answer VNC Authentication's challenge with the password in `credentials`.
+pub fn send_vnc_response(
+    writer: &mut RfbWriter,
+    challenge: &[u8; VNC_CHALLENGE_BYTES],
+    credentials: &Credentials,
+) -> Result<(), AuthError> {
+    writer.send(&vnc_response(challenge, &credentials.password)[..])?;
+    Ok(())
+}
+
+/// Read SecurityResult. A rejection is `SignInRejected` with the server's
+/// reason, or `fallback` when it gives none.
+pub fn read_security_result(
+    reader: &mut RfbReader,
+    minor: u16,
+    fallback: &str,
+) -> Result<(), AuthError> {
     match reader.u32()? {
         0 => Ok(()),
         _ => {
@@ -392,7 +534,7 @@ pub fn read_security_result(reader: &mut RfbReader, minor: u16) -> Result<(), Au
                 String::new()
             };
             let reason = if reason.is_empty() {
-                "the username or password was not accepted".to_string()
+                fallback.to_string()
             } else {
                 reason
             };
@@ -413,17 +555,104 @@ pub fn wipe(bytes: &mut [u8]) {
 mod tests {
     use super::*;
 
+    const SSH: Route = Route::SshToLoopback;
+    const OTHER: Route = Route::Other;
+
     #[test]
-    fn mooring_prefers_rsa_aes_and_never_picks_apple_dh_or_des() {
+    fn rsa_aes_is_preferred_on_every_route_and_apple_dh_never_chosen() {
+        for route in [SSH, OTHER] {
+            assert_eq!(
+                choose_security(&[129, 5, 30], route),
+                Some(SecurityKind::RsaAes256)
+            );
+            assert_eq!(
+                choose_security(&[30, 5], route),
+                Some(SecurityKind::RsaAes128)
+            );
+            // RSA-AES wins even when the server also offers no password.
+            assert_eq!(
+                choose_security(&[1, 2, 5], route),
+                Some(SecurityKind::RsaAes128)
+            );
+            assert_eq!(
+                choose_security(&[1, 129], route),
+                Some(SecurityKind::RsaAes256)
+            );
+            assert_eq!(choose_security(&[30], route), None);
+            assert_eq!(choose_security(&[6, 19, 16, 18], route), None);
+        }
+    }
+
+    #[test]
+    fn no_password_and_the_vnc_password_only_through_ssh_to_loopback() {
+        assert_eq!(choose_security(&[1], SSH), Some(SecurityKind::None));
+        assert_eq!(choose_security(&[2], SSH), Some(SecurityKind::VncPassword));
+        assert_eq!(choose_security(&[30, 2, 1], SSH), Some(SecurityKind::None));
         assert_eq!(
-            choose_security(&[129, 5, 30]),
-            Some(SecurityKind::RsaAes256)
+            choose_security(&[18, 2], SSH),
+            Some(SecurityKind::VncPassword)
         );
-        assert_eq!(choose_security(&[30, 5]), Some(SecurityKind::RsaAes128));
-        assert_eq!(choose_security(&[30, 2, 1]), Some(SecurityKind::None));
-        assert_eq!(choose_security(&[30]), None);
-        assert_eq!(choose_security(&[2]), None);
-        assert_eq!(choose_security(&[6, 19, 16]), None);
+        for offered in [&[1][..], &[2], &[30, 2, 1], &[18, 2]] {
+            assert_eq!(choose_security(offered, OTHER), None, "{offered:?}");
+        }
+        assert!(unsupported_message(&[1], OTHER).contains("only through its SSH tunnel"));
+        assert!(unsupported_message(&[30], SSH).contains("RSA-AES (129 or 5)"));
+        assert_eq!(SecurityKind::None.needs(), SignInNeeds::Nothing);
+        assert_eq!(SecurityKind::VncPassword.needs(), SignInNeeds::Password);
+        assert_eq!(SecurityKind::RsaAes256.needs(), SignInNeeds::Account);
+    }
+
+    #[test]
+    fn only_the_ssh_hosts_own_loopback_address_counts() {
+        for host in [
+            "127.0.0.1",
+            "127.1.2.3",
+            "::1",
+            "[::1]",
+            "localhost",
+            "LOCALHOST",
+        ] {
+            assert!(is_loopback_host(host), "{host}");
+            assert_eq!(Route::ssh_tunnel_to(host), SSH, "{host}");
+        }
+        for host in [
+            "",
+            "0.0.0.0",
+            "::",
+            "192.168.1.20",
+            "10.0.0.1",
+            "localhost.example.com",
+            "127.0.0.1.example.com",
+            "thinknvidia.local",
+            "::ffff:192.168.1.1",
+            "[::1",
+        ] {
+            assert!(!is_loopback_host(host), "{host}");
+            assert_eq!(Route::ssh_tunnel_to(host), OTHER, "{host}");
+        }
+    }
+
+    #[test]
+    fn the_vnc_response_matches_known_answers() {
+        // OpenSSL's DES-ECB with the bit-reversed key and libvncserver's
+        // rfbEncryptBytes (x11vnc 0.9.13 on Ubuntu 18.04) both give these.
+        const KNOWN_PASSWORD: &str = "5645abeb5f1e6475e8feb11beb66ea19";
+        const KNOWN_EMPTY: &str = "a068dbeab73d140b56541eb3c7625177";
+        let challenge: [u8; 16] = *b"0123456789abcdef";
+        assert_eq!(
+            hex(&vnc_response(&challenge, b"password")[..]),
+            KNOWN_PASSWORD
+        );
+        // Only the first 8 bytes count, and shorter ones are zero-padded.
+        assert_eq!(
+            vnc_response(&challenge, b"password-longer")[..],
+            vnc_response(&challenge, b"password")[..]
+        );
+        assert_eq!(hex(&vnc_response(&challenge, b"")[..]), KNOWN_EMPTY);
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     #[test]

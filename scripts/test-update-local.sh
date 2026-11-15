@@ -9,6 +9,8 @@
 set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_root"
+export DEVELOPER_DIR="$(python3 scripts/native-targets.py setting developerDir)"
+python3 scripts/native-targets.py toolchain
 root="$project_root/target/update-test"
 installed="$root/installed/Previous.app"
 port=$((47000 + RANDOM % 1000))
@@ -18,16 +20,57 @@ legacy_feed="http://127.0.0.1:$port/legacy-appcast.xml"
 [[ ! -e "$root" ]] || mv "$root" "$(mktemp -d "$project_root/target/update-test-old.XXXXXX")"
 mkdir -p "$root/feed" "$root/home"
 server=""
+# Never read, create, replace or export production Keychain signing material.
+signing="$(mktemp -d "$root/.test-signing.XXXXXX")"
 cleanup() {
     pkill -f "$installed/Contents/MacOS/" 2>/dev/null || true
     [[ -z "$server" ]] || kill "$server" 2>/dev/null || true
+    rm -rf "$signing"
 }
 trap cleanup EXIT
+swift scripts/test-update-key.swift "$signing"
+test_public="$(cat "$signing/public")"
+sparkle_dir="$(./scripts/fetch-sparkle.sh)"
 
 build() {
     MOORING_BUNDLE_IDENTIFIER=$identifier MOORING_BUNDLE_VERSION="$1" MOORING_UPDATE_FEED="${3:-$feed}" \
         MOORING_APP_OUTPUT="$2" ./scripts/build-app.sh >/dev/null
+    /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey $test_public" "$2/Contents/Info.plist"
+    codesign --force --sign - "$2"
+    codesign --verify --deep --strict "$2"
 }
+make_test_feed() {
+    local enclosure
+    enclosure="$("$sparkle_dir/bin/sign_update" --ed-key-file "$signing/seed" "$1")"
+    python3 - "$1" "$2" "$root/feed/appcast.xml" "$enclosure" <<'FEED'
+import plistlib
+from pathlib import Path
+import re
+import sys
+from xml.sax.saxutils import escape
+import zipfile
+archive, url, output, enclosure = sys.argv[1:]
+assert url.startswith('http://127.0.0.1:')
+assert re.fullmatch(r'sparkle:edSignature="[A-Za-z0-9+/=]+" length="[0-9]+"', enclosure)
+with zipfile.ZipFile(archive) as source:
+    info = plistlib.loads(source.read('Mooring.app/Contents/Info.plist'))
+assert info['CFBundleIdentifier'] == 'dev.mooring.updatetest'
+release = escape(info['MooringReleaseVersion'])
+Path(output).write_text(f'''<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><title>Mooring test</title><item>
+<title>Mooring {release}</title>
+<sparkle:version>{info['CFBundleVersion']}</sparkle:version>
+<sparkle:shortVersionString>{release}</sparkle:shortVersionString>
+<sparkle:minimumSystemVersion>{info['LSMinimumSystemVersion']}</sparkle:minimumSystemVersion>
+<sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+<description><![CDATA[<p>Mooring {release} for Apple silicon.</p>]]></description>
+<enclosure url="{escape(url)}" {enclosure} type="application/octet-stream"/>
+</item></channel></rss>
+''')
+FEED
+    "$sparkle_dir/bin/sign_update" --ed-key-file "$signing/seed" --disable-signing-warning "$root/feed/appcast.xml" >/dev/null
+}
+
 # An existing installation follows its old repository URL through a redirect;
 # the installed update must then carry the new canonical feed URL.
 # Exercise the actual previous app, including its previous executable/CLI
@@ -47,6 +90,7 @@ mkdir -p "$root/installed"
 plist="$installed/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $identifier" "$plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 9000' "$plist"
+/usr/libexec/PlistBuddy -c "Set :SUPublicEDKey $test_public" "$plist"
 /usr/libexec/PlistBuddy -c "Set :SUFeedURL $legacy_feed" "$plist"
 sparkle="$installed/Contents/Frameworks/Sparkle.framework"
 for nested in "$sparkle/Versions/B/Autoupdate" "$sparkle/Versions/B/Updater.app" "$sparkle" "$installed"/Contents/Resources/*; do
@@ -57,7 +101,7 @@ codesign --force --sign - "$installed"
 codesign --verify --deep --strict "$installed"
 build 9001 "$root/new/Mooring.app"
 COPYFILE_DISABLE=1 /usr/bin/ditto -c -k --norsrc --noextattr --noqtn --keepParent "$root/new/Mooring.app" "$root/feed/Mooring-9001.zip"
-./scripts/make-appcast.sh "$root/feed/Mooring-9001.zip" "http://127.0.0.1:$port/Mooring-9001.zip" "$root/feed" >/dev/null
+make_test_feed "$root/feed/Mooring-9001.zip" "http://127.0.0.1:$port/Mooring-9001.zip"
 python3 - "$port" "$root/feed" >"$root/server.log" 2>&1 <<'PY' &
 import functools
 import http.server
@@ -109,7 +153,7 @@ printf 'In-place update passed: the legacy feed redirected, build 9000 verified,
 pkill -f "$installed/Contents/MacOS/" || true
 build 9002 "$root/newer/Mooring.app"
 COPYFILE_DISABLE=1 /usr/bin/ditto -c -k --norsrc --noextattr --noqtn --keepParent "$root/newer/Mooring.app" "$root/feed/Mooring-9002.zip"
-./scripts/make-appcast.sh "$root/feed/Mooring-9002.zip" "http://127.0.0.1:$port/Mooring-9002.zip" "$root/feed" >/dev/null
+make_test_feed "$root/feed/Mooring-9002.zip" "http://127.0.0.1:$port/Mooring-9002.zip"
 cp "$root/feed/Mooring-9002.zip" "$root/good-9002.zip"
 python3 - "$root/feed/Mooring-9002.zip" <<'PY'
 import sys

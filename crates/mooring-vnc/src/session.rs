@@ -8,13 +8,14 @@
 //! threads.
 
 use crate::auth::{
-    self, AuthError, AuthErrorKind, Credentials, Negotiated, SecurityKind, client_key,
-    ra2_handshake, read_security_result, send_credentials,
+    self, AuthError, AuthErrorKind, Credentials, Negotiated, Route, SecurityKind, client_key,
+    ra2_handshake, read_security_result, read_vnc_challenge, send_credentials, send_vnc_response,
 };
 use crate::framebuffer::{BYTES_PER_PIXEL, Framebuffer, Rect};
 use crate::keysym::HeldKeys;
 use crate::proto::{self, PixelFormat, encoding};
 use crate::stream::{RfbReader, RfbWriter};
+use crate::tight::{Paint, TightDecoder};
 use crate::zrle::{MAX_COMPRESSED_BYTES, ZrleDecoder};
 use rsa::RsaPrivateKey;
 use serde::Serialize;
@@ -42,16 +43,27 @@ pub struct SessionConfig {
     /// to check a route and its encryption with no sign-in attempt.
     pub check_only: bool,
     pub client_key_bits: usize,
+    /// Encodings to ask for, most preferred first; [`proto::ENCODINGS`] by
+    /// default. Only Raw, CopyRect, ZRLE, Tight and their pseudo-encodings are
+    /// decoded.
+    pub encodings: Vec<i32>,
+    /// How the server is reached. No sign-in and the VNC password are used
+    /// only for [`Route::SshToLoopback`]; anything else gets RSA-AES alone.
+    pub route: Route,
 }
 
 impl SessionConfig {
-    pub fn new(host: &str, port: u16) -> Self {
+    /// A session over `route`. Mooring's viewer reaches every VNC server
+    /// through its SSH tunnel, so callers say where that tunnel ends.
+    pub fn new(host: &str, port: u16, route: Route) -> Self {
         Self {
             host: host.to_owned(),
             port,
             connect_timeout: Duration::from_secs(10),
             check_only: false,
             client_key_bits: auth::CLIENT_KEY_BITS,
+            encodings: proto::ENCODINGS.to_vec(),
+            route,
         }
     }
 }
@@ -130,13 +142,18 @@ pub enum SessionEvent {
         rfb_version: String,
         offered: Vec<u8>,
         security: SecurityKind,
+        route: Route,
     },
-    /// The encrypted handshake worked and the server asked for credentials.
-    /// In a check, the session ends here without sending any.
+    /// The server asked for credentials: after RSA-AES's encrypted handshake
+    /// (with the server's key), or with VNC Authentication's challenge inside
+    /// SSH. In a check, the session ends here without sending any.
     CredentialsRequested {
+        security: SecurityKind,
         username_needed: bool,
-        server_key_bits: u32,
-        server_key_sha256: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        server_key_bits: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        server_key_sha256: Option<String>,
     },
     Connected {
         width: u16,
@@ -569,20 +586,43 @@ fn run(
         offered,
         security,
         minor,
-    } = auth::negotiate(&mut reader, &mut writer)?;
+    } = auth::negotiate(&mut reader, &mut writer, config.route)?;
     shared.event(SessionEvent::Negotiated {
         rfb_version,
         offered,
         security,
+        route: config.route,
     });
     match security {
         SecurityKind::None => {
             if config.check_only {
                 return Ok(());
             }
+            drop(credentials);
             if minor >= 8 {
-                read_security_result(&mut reader, minor)?;
+                read_security_result(&mut reader, minor, "no sign-in was accepted")?;
             }
+        }
+        SecurityKind::VncPassword => {
+            let challenge = read_vnc_challenge(&mut reader)?;
+            shared.event(SessionEvent::CredentialsRequested {
+                security,
+                username_needed: false,
+                server_key_bits: None,
+                server_key_sha256: None,
+            });
+            if config.check_only {
+                return Ok(());
+            }
+            let Some(credentials) = credentials else {
+                return Err(SessionError::new(
+                    SessionErrorKind::CredentialsNeeded,
+                    "The VNC server needs its VNC password.",
+                ));
+            };
+            send_vnc_response(&mut writer, &challenge, &credentials)?;
+            drop(credentials);
+            read_security_result(&mut reader, minor, "the VNC password was not accepted")?;
         }
         SecurityKind::RsaAes128 | SecurityKind::RsaAes256 => {
             let key = keygen
@@ -590,9 +630,10 @@ fn run(
                 .map_err(|_| SessionError::protocol("Key generation failed."))??;
             let ra2 = ra2_handshake(security, &mut reader, &mut writer, &key)?;
             shared.event(SessionEvent::CredentialsRequested {
+                security,
                 username_needed: ra2.credential_subtype == 1,
-                server_key_bits: ra2.server_key_bits,
-                server_key_sha256: ra2.server_key_sha256,
+                server_key_bits: Some(ra2.server_key_bits),
+                server_key_sha256: Some(ra2.server_key_sha256),
             });
             if config.check_only {
                 return Ok(());
@@ -605,7 +646,11 @@ fn run(
             };
             send_credentials(&mut writer, ra2.credential_subtype, &credentials)?;
             drop(credentials);
-            read_security_result(&mut reader, minor)?;
+            read_security_result(
+                &mut reader,
+                minor,
+                "the username or password was not accepted",
+            )?;
         }
     }
 
@@ -632,7 +677,7 @@ fn run(
     *lock(&shared.framebuffer) = Some(Framebuffer::new(width, height));
     writer
         .send(&proto::set_pixel_format(&PixelFormat::BGRX))
-        .and_then(|()| writer.send(&proto::set_encodings(&proto::ENCODINGS)))
+        .and_then(|()| writer.send(&proto::set_encodings(&config.encodings)))
         .and_then(|()| writer.send(&proto::update_request(false, 0, 0, width, height)))
         .map_err(|e| io_error(e, "after sign-in"))?;
     *lock(&shared.writer) = Some(writer);
@@ -706,6 +751,7 @@ fn send_input(shared: &Shared) {
 
 fn receive(shared: &Shared, reader: &mut RfbReader) -> Result<(), SessionError> {
     let mut zrle = ZrleDecoder::new();
+    let mut tight = TightDecoder::new();
     let mut row = Vec::new();
     let lost = |e: io::Error| io_error(e, "during the session");
     loop {
@@ -720,6 +766,8 @@ fn receive(shared: &Shared, reader: &mut RfbReader) -> Result<(), SessionError> 
                 reader.read_exact(&mut header).map_err(lost)?;
                 let count = u16::from_be_bytes([header[1], header[2]]);
                 let mut resized = false;
+                // Servers that end with LastRect send 65535 as the count.
+                let mut received = 0_u64;
                 for _ in 0..count {
                     let x = reader.u16().map_err(lost)?;
                     let y = reader.u16().map_err(lost)?;
@@ -727,8 +775,11 @@ fn receive(shared: &Shared, reader: &mut RfbReader) -> Result<(), SessionError> 
                     let height = reader.u16().map_err(lost)?;
                     let kind = reader.i32().map_err(lost)?;
                     let rect = Rect::new(x, y, width, height);
+                    if kind == encoding::LAST_RECT {
+                        break;
+                    }
+                    received += 1;
                     match kind {
-                        encoding::LAST_RECT => break,
                         encoding::DESKTOP_SIZE => {
                             resize(shared, width, height)?;
                             resized = true;
@@ -751,14 +802,17 @@ fn receive(shared: &Shared, reader: &mut RfbReader) -> Result<(), SessionError> 
                                     "The server sent a rectangle outside the desktop.",
                                 ));
                             }
-                            decode(shared, reader, &mut zrle, &mut row, kind, &rect)?;
+                            let decoders = Decoders {
+                                zrle: &mut zrle,
+                                tight: &mut tight,
+                                row: &mut row,
+                            };
+                            decode(shared, reader, decoders, kind, &rect)?;
                         }
                     }
                 }
                 shared.updates.fetch_add(1, Ordering::Relaxed);
-                shared
-                    .rectangles
-                    .fetch_add(u64::from(count), Ordering::Relaxed);
+                shared.rectangles.fetch_add(received, Ordering::Relaxed);
                 shared.bytes.store(reader.wire_bytes(), Ordering::Relaxed);
                 let size = lock(&shared.framebuffer)
                     .as_ref()
@@ -806,14 +860,22 @@ fn resize(shared: &Shared, width: u16, height: u16) -> Result<(), SessionError> 
     Ok(())
 }
 
+/// Per-connection decoder state: the ZRLE and Tight zlib streams, and a row
+/// buffer for Raw.
+struct Decoders<'a> {
+    zrle: &'a mut ZrleDecoder,
+    tight: &'a mut TightDecoder,
+    row: &'a mut Vec<u8>,
+}
+
 fn decode(
     shared: &Shared,
     reader: &mut RfbReader,
-    zrle: &mut ZrleDecoder,
-    row: &mut Vec<u8>,
+    decoders: Decoders,
     kind: i32,
     rect: &Rect,
 ) -> Result<(), SessionError> {
+    let Decoders { zrle, tight, row } = decoders;
     let lost = |e: io::Error| io_error(e, "during the session");
     match kind {
         encoding::RAW => {
@@ -842,6 +904,17 @@ fn decode(
             }
             fb.copy_within(source_x, source_y, rect);
         }
+        encoding::TIGHT => {
+            // Read and decode outside the lock, so the viewer can still copy
+            // frames while a large JPEG decodes.
+            let paint = tight.read(reader, rect).map_err(lost)?;
+            if let Some(fb) = lock(&shared.framebuffer).as_mut() {
+                match paint {
+                    Paint::Fill(pixel) => fb.fill(rect, pixel),
+                    Paint::Pixels(pixels) => fb.put(rect, &pixels),
+                }
+            }
+        }
         encoding::ZRLE => {
             let length = reader.u32().map_err(lost)?;
             let compressed = reader.bytes(length, MAX_COMPRESSED_BYTES).map_err(lost)?;
@@ -868,10 +941,19 @@ mod tests {
     use crate::proto::security;
     use crate::zrle::tests::ZrleEncoder;
 
+    /// A direct connection: RSA-AES only.
     fn config(server: &FakeServer) -> SessionConfig {
-        let mut config = SessionConfig::new("127.0.0.1", server.port);
+        let mut config = SessionConfig::new("127.0.0.1", server.port, Route::Other);
         config.client_key_bits = 1024;
         config
+    }
+
+    /// As through Mooring's SSH tunnel to the server's loopback address.
+    fn through_ssh(server: &FakeServer) -> SessionConfig {
+        SessionConfig {
+            route: Route::SshToLoopback,
+            ..config(server)
+        }
     }
 
     fn credentials(password: &[u8]) -> Option<Credentials> {
@@ -919,12 +1001,13 @@ mod tests {
         let session = Session::start(config(&server), credentials(b"correct horse"));
         let events = events_until(&session, connected);
         assert!(matches!(events[0], SessionEvent::Connecting));
-        assert!(events.iter().any(|e| matches!(e, SessionEvent::Negotiated { security: SecurityKind::RsaAes256, offered, .. } if offered == &[129, 5, 30])));
+        assert!(events.iter().any(|e| matches!(e, SessionEvent::Negotiated { security: SecurityKind::RsaAes256, offered, route: Route::Other, .. } if offered == &[129, 5, 30])));
         assert!(events.iter().any(|e| matches!(
             e,
             SessionEvent::CredentialsRequested {
+                security: SecurityKind::RsaAes256,
                 username_needed: true,
-                server_key_bits: 1024,
+                server_key_bits: Some(1024),
                 ..
             }
         )));
@@ -1038,39 +1121,186 @@ mod tests {
 
     #[test]
     fn apple_dh_alone_is_refused_without_selecting_it() {
-        let server = FakeServer::start(Script {
-            offered: vec![security::APPLE_DH, security::VNC_PASSWORD],
-            ..Script::default()
-        });
-        let session = Session::start(config(&server), credentials(b"correct horse"));
-        let events = events_until(&session, closed);
-        let error = close_error(&events).unwrap();
-        assert_eq!(error.kind, SessionErrorKind::UnsupportedSecurity);
-        assert!(error.message.contains("30, 2"), "{}", error.message);
-        thread::sleep(Duration::from_millis(50));
-        assert_eq!(
-            server.record().chosen,
-            None,
-            "Mooring must not select type 30 or 2"
-        );
+        for (offered, route) in [
+            (vec![security::APPLE_DH], Route::SshToLoopback),
+            (
+                vec![security::APPLE_DH, security::VNC_PASSWORD],
+                Route::Other,
+            ),
+        ] {
+            let server = FakeServer::start(Script {
+                offered: offered.clone(),
+                ..Script::default()
+            });
+            let session = Session::start(
+                SessionConfig {
+                    route,
+                    ..config(&server)
+                },
+                credentials(b"correct horse"),
+            );
+            let events = events_until(&session, closed);
+            let error = close_error(&events).unwrap();
+            assert_eq!(error.kind, SessionErrorKind::UnsupportedSecurity);
+            let listed: Vec<String> = offered.iter().map(u8::to_string).collect();
+            assert!(
+                error.message.contains(&listed.join(", ")),
+                "{}",
+                error.message
+            );
+            thread::sleep(Duration::from_millis(50));
+            assert_eq!(
+                server.record().chosen,
+                None,
+                "Mooring must not select type 30, nor 2 outside SSH"
+            );
+        }
     }
 
     #[test]
-    fn a_server_without_sign_in_needs_no_credentials() {
+    fn a_server_without_sign_in_needs_no_credentials_through_ssh() {
+        let server = FakeServer::start(Script {
+            offered: vec![security::NONE],
+            ..Script::default()
+        });
+        // Credentials passed by mistake are dropped unsent.
+        let session = Session::start(through_ssh(&server), credentials(b"correct horse"));
+        let events = events_until(&session, connected);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            SessionEvent::Negotiated {
+                security: SecurityKind::None,
+                route: Route::SshToLoopback,
+                ..
+            }
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::CredentialsRequested { .. }))
+        );
+        assert!(matches!(
+            events.last(),
+            Some(SessionEvent::Connected {
+                security: SecurityKind::None,
+                width: 64,
+                height: 32,
+                ..
+            })
+        ));
+        let record = server.wait_for(|r| !r.update_requests.is_empty());
+        assert_eq!(record.chosen, Some(security::NONE));
+        assert_eq!((record.username, record.password_matched), (None, None));
+        assert_eq!(record.shared_flag, Some(1));
+    }
+
+    #[test]
+    fn no_sign_in_is_refused_outside_ssh_to_loopback() {
         let server = FakeServer::start(Script {
             offered: vec![security::NONE],
             ..Script::default()
         });
         let session = Session::start(config(&server), None);
+        let events = events_until(&session, closed);
+        let error = close_error(&events).unwrap();
+        assert_eq!(error.kind, SessionErrorKind::UnsupportedSecurity);
+        assert!(
+            error.message.contains("only through its SSH tunnel"),
+            "{}",
+            error.message
+        );
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(server.record().chosen, None, "type 1 must not be selected");
+        assert_eq!(session.size(), None);
+    }
+
+    #[test]
+    fn rsa_aes_is_chosen_over_no_sign_in_through_ssh() {
+        let server = FakeServer::start(Script {
+            offered: vec![security::NONE, security::VNC_PASSWORD, security::RA2],
+            ..Script::default()
+        });
+        let session = Session::start(through_ssh(&server), credentials(b"correct horse"));
         let events = events_until(&session, connected);
         assert!(matches!(
             events.last(),
             Some(SessionEvent::Connected {
-                security: SecurityKind::None,
+                security: SecurityKind::RsaAes128,
                 ..
             })
         ));
-        assert_eq!(server.record().username, None);
+        assert_eq!(server.record().chosen, Some(security::RA2));
+    }
+
+    #[test]
+    fn the_vnc_password_signs_in_through_ssh_without_a_username() {
+        let server = FakeServer::start(Script {
+            offered: vec![security::VNC_PASSWORD],
+            ..Script::default()
+        });
+        let session = Session::start(through_ssh(&server), credentials(b"correct horse"));
+        let events = events_until(&session, connected);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            SessionEvent::CredentialsRequested {
+                security: SecurityKind::VncPassword,
+                username_needed: false,
+                server_key_bits: None,
+                server_key_sha256: None,
+            }
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(SessionEvent::Connected {
+                security: SecurityKind::VncPassword,
+                ..
+            })
+        ));
+        let record = server.wait_for(|r| !r.update_requests.is_empty());
+        assert_eq!(record.chosen, Some(security::VNC_PASSWORD));
+        assert_eq!(record.password_matched, Some(true));
+        assert_eq!(record.username, None);
+    }
+
+    #[test]
+    fn a_wrong_vnc_password_is_tried_once_and_a_check_sends_none() {
+        let server = FakeServer::start(Script {
+            offered: vec![security::VNC_PASSWORD],
+            ..Script::default()
+        });
+        let session = Session::start(through_ssh(&server), credentials(b"wrong"));
+        let events = events_until(&session, closed);
+        let error = close_error(&events).unwrap();
+        assert_eq!(error.kind, SessionErrorKind::SignInRejected);
+        assert_eq!(server.record().password_matched, Some(false));
+        server.finish().unwrap();
+        // Without credentials: asked for the password, and none is sent.
+        let server = FakeServer::start(Script {
+            offered: vec![security::VNC_PASSWORD],
+            ..Script::default()
+        });
+        let session = Session::start(through_ssh(&server), None);
+        let error = close_error(&events_until(&session, closed)).unwrap();
+        assert_eq!(error.kind, SessionErrorKind::CredentialsNeeded);
+        assert!(server.finish().is_err(), "the client hung up unanswered");
+        // A check stops at the challenge, also without an answer.
+        let server = FakeServer::start(Script {
+            offered: vec![security::VNC_PASSWORD],
+            ..Script::default()
+        });
+        let mut check = through_ssh(&server);
+        check.check_only = true;
+        let session = Session::start(check, None);
+        let events = events_until(&session, closed);
+        assert_eq!(close_error(&events), None);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            SessionEvent::CredentialsRequested {
+                security: SecurityKind::VncPassword,
+                ..
+            }
+        )));
+        assert!(server.finish().is_err());
     }
 
     const BLUE: [u8; 4] = [200, 0, 0, 0xff];
@@ -1150,6 +1380,65 @@ mod tests {
             session.copy_changes(&mut bigger, 80 * 4, 80, 40),
             Copied::Region(Rect::new(0, 0, 80, 40))
         );
+    }
+
+    #[test]
+    fn decodes_tight_fill_jpeg_and_zlib_and_skips_empty_rectangles() {
+        use crate::tight::tests::{RED_BLUE_JPEG, TightEncoder, compact};
+        let mut encoder = TightEncoder::new();
+        let mut basic = vec![0x00]; // stream 0, copied pixels
+        basic.extend(encoder.data(0, &[0, 200, 0].repeat(16)));
+        let mut jpeg = vec![0x90];
+        jpeg.extend(compact(RED_BLUE_JPEG.len()));
+        jpeg.extend_from_slice(RED_BLUE_JPEG);
+        let mut tight_update = update(&[
+            (0, 0, 64, 32, encoding::TIGHT, vec![0x80, 0, 0, 200]),
+            (0, 0, 32, 16, encoding::TIGHT, jpeg),
+            (40, 20, 4, 4, encoding::TIGHT, basic),
+            // Empty rectangles: nothing to read or paint, and no panic.
+            (5, 5, 0, 7, encoding::RAW, Vec::new()),
+            (6, 6, 3, 0, encoding::TIGHT, vec![0x80, 1, 2, 3]),
+            (0, 0, 0, 0, encoding::LAST_RECT, Vec::new()),
+        ]);
+        // As x11vnc sends it with Tight: 65535 rectangles, ended by LastRect.
+        tight_update[2..4].copy_from_slice(&u16::MAX.to_be_bytes());
+        let server = FakeServer::start(Script {
+            offered: vec![security::NONE],
+            updates: vec![tight_update],
+            ..Script::default()
+        });
+        let session = Session::start(through_ssh(&server), None);
+        events_until(&session, connected);
+        let record = server.wait_for(|r| r.update_requests.len() >= 2);
+        assert_eq!(record.encodings, proto::ENCODINGS);
+        assert_eq!(record.encodings[0], encoding::TIGHT);
+        assert!(record.encodings.contains(&(encoding::JPEG_QUALITY_0 + 7)));
+        assert!(record.encodings.contains(&(encoding::COMPRESS_LEVEL_0 + 1)));
+        let mut image = vec![0_u8; 64 * 32 * 4];
+        let at = |image: &[u8], x: usize, y: usize| -> [u8; 4] {
+            let offset = (y * 64 + x) * 4;
+            image[offset..offset + 4].try_into().unwrap()
+        };
+        let near = |pixel: [u8; 4], want: [u8; 4]| {
+            pixel.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 24)
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            session.copy_changes(&mut image, 64 * 4, 64, 32);
+            if at(&image, 41, 21) == [0, 200, 0, 0xff] {
+                break;
+            }
+            assert!(Instant::now() < deadline, "no Tight picture");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(at(&image, 60, 30), BLUE, "fill");
+        assert!(near(at(&image, 3, 8), [0, 0, 220, 0xff]), "JPEG red half");
+        assert!(near(at(&image, 28, 8), [220, 0, 0, 0xff]), "JPEG blue half");
+        assert_eq!(at(&image, 43, 23), [0, 200, 0, 0xff], "zlib copy");
+        // LastRect ends the update early; only the five rectangles count.
+        assert_eq!(session.stats().rectangles, 5);
+        drop(session);
+        assert!(server.wait_for(|r| r.closed_by_client).closed_by_client);
     }
 
     #[test]

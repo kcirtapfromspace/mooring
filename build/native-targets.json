@@ -1,0 +1,196 @@
+{
+  "toolchain": {
+    "rust": "1.99.0",
+    "swift": "6.4.2",
+    "xcodeBuild": "27B52",
+    "sdk": "27.2",
+    "developerDir": "/Applications/Xcode.app/Contents/Developer"
+  },
+  "platform": {
+    "architecture": "arm64",
+    "macOS": "14.0",
+    "rustTarget": "aarch64-apple-darwin",
+    "swiftTarget": "arm64-apple-macosx14.0"
+  },
+  "frameworks": [
+    "AppKit",
+    "Security",
+    "ScreenCaptureKit",
+    "VideoToolbox",
+    "CoreMedia",
+    "CoreVideo",
+    "Metal",
+    "MetalKit",
+    "CoreImage",
+    "CoreText",
+    "AVFoundation",
+    "AudioToolbox",
+    "ApplicationServices",
+    "SystemConfiguration",
+    "Network",
+    "ServiceManagement",
+    "IOKit"
+  ],
+  "groups": {
+    "contracts": [
+      "app/ConnectionModels.swift",
+      "app/LinuxConnectionTypes.swift"
+    ],
+    "linux": [
+      "app/LinuxConnectionAdapters.swift",
+      "app/LinuxConnectionWorkflow.swift",
+      "app/SSHTunnel.swift",
+      "app/VNCViewer.swift"
+    ],
+    "native": [
+      "app/AccessibilityPermission.swift",
+      "app/MooringAppearance.swift",
+      "app/MooringBrand.swift",
+      "app/MooringPrivacy.swift",
+      "app/MooringSettings.swift",
+      "app/MooringStatusMenu.swift",
+      "app/NativeAudio.swift",
+      "app/NativeCameraRow.swift",
+      "app/NativeClipboard.swift",
+      "app/NativeCursor.swift",
+      "app/NativeDisplayTopology.swift",
+      "app/NativeInput.swift",
+      "app/NativeMedia.swift",
+      "app/NativeMenuBarGap.swift",
+      "app/NativePairing.swift",
+      "app/NativePairingDiscovery.swift",
+      "app/NativePrivacyGuard.swift",
+      "app/NativeSessionCoordinator+Hosting.swift",
+      "app/NativeSessionCoordinator+Pairing.swift",
+      "app/NativeSessionCoordinator+Services.swift",
+      "app/NativeSessionCoordinator+Viewing.swift",
+      "app/NativeSessionCoordinator.swift",
+      "app/NativeSessionPorts.swift",
+      "app/NativeSessionState.swift",
+      "app/NativeSharedDisplay.swift",
+      "app/NativeTransport.swift",
+      "app/NativeUI.swift",
+      "app/NativeViewerDiagnostics.swift",
+      "app/NativeViewerMeasurementStream.swift",
+      "app/NativeWakeActivity.swift",
+      "app/NativeWindows.swift",
+      "app/ViewerFooter.swift",
+      "app/NativeTrustWorkflow.swift",
+      "app/NativeReconnectWorkflow.swift",
+      "app/NativeInternetLinks.swift"
+    ],
+    "shell": [
+      "app/Mooring.swift",
+      "app/CLIClient.swift",
+      "app/MooringUpdater.swift"
+    ]
+  },
+  "targets": {
+    "app": {
+      "groups": [
+        "contracts",
+        "linux",
+        "native",
+        "shell"
+      ]
+    },
+    "workflows": {
+      "groups": [
+        "contracts",
+        "linux",
+        "native"
+      ],
+      "sources": [
+        "scripts/test-application-workflows.swift"
+      ]
+    },
+    "status-menu": {
+      "sources": [
+        "app/MooringBrand.swift",
+        "app/MooringPrivacy.swift",
+        "app/MooringStatusMenu.swift",
+        "scripts/test-status-menu.swift"
+      ]
+    },
+    "display-topology": {
+      "sources": [
+        "app/NativeDisplayTopology.swift",
+        "app/NativeSharedDisplay.swift",
+        "scripts/test-native-display.swift"
+      ]
+    },
+    "privacy": {
+      "sources": [
+        "app/NativePrivacyGuard.swift",
+        "scripts/test-native-privacy.swift"
+      ]
+    },
+    "input": {
+      "sources": [
+        "app/NativeInput.swift",
+        "scripts/test-native-input.swift"
+      ]
+    },
+    "vnc-viewer": {
+      "sources": [
+        "app/VNCViewer.swift",
+        "app/ViewerFooter.swift",
+        "app/NativeCameraRow.swift",
+        "app/NativeInput.swift",
+        "app/MooringPrivacy.swift",
+        "app/MooringAppearance.swift",
+        "app/MooringBrand.swift",
+        "app/ConnectionModels.swift",
+        "app/LinuxConnectionTypes.swift",
+        "scripts/test-vnc-viewer.swift"
+      ]
+    },
+    "media": {
+      "sources": [
+        "app/NativeMedia.swift",
+        "app/NativeAudio.swift",
+        "app/NativePrivacyGuard.swift",
+        "scripts/test-native-media.swift"
+      ]
+    },
+    "session": {
+      "sources": [
+        "app/NativePairing.swift",
+        "app/NativeTransport.swift",
+        "app/NativeSessionState.swift",
+        "app/NativeViewerDiagnostics.swift",
+        "app/NativeViewerMeasurementStream.swift",
+        "app/NativeWakeActivity.swift",
+        "app/NativeMedia.swift",
+        "app/NativeAudio.swift",
+        "app/NativePrivacyGuard.swift",
+        "app/NativeInput.swift",
+        "app/NativeClipboard.swift",
+        "app/NativeCursor.swift",
+        "app/NativeSessionPorts.swift",
+        "app/ConnectionModels.swift",
+        "app/LinuxConnectionTypes.swift",
+        "scripts/test-native-session.swift",
+        "app/NativeInternetLinks.swift"
+      ]
+    },
+    "stream": {
+      "sources": [
+        "app/NativeInput.swift",
+        "app/NativePrivacyGuard.swift",
+        "app/NativeMedia.swift",
+        "app/NativeAudio.swift",
+        "app/NativePairing.swift",
+        "app/NativeTransport.swift",
+        "app/NativeSessionState.swift",
+        "app/NativeClipboard.swift",
+        "app/NativeCursor.swift",
+        "app/NativeSessionPorts.swift",
+        "app/ConnectionModels.swift",
+        "app/LinuxConnectionTypes.swift",
+        "scripts/test-native-stream.swift",
+        "app/NativeInternetLinks.swift"
+      ]
+    }
+  }
+}

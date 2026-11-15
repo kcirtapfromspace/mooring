@@ -286,6 +286,19 @@ struct NativeKeychain {
         try save("device", data: key.privateKey)
         return key
     }
+    /// Independent transport identity; never reuses a Noise pairing/device key.
+    func internetIdentity() throws -> Data {
+        if let saved = try read("internet-transport.v1") {
+            guard saved.count == 32 else { throw NativeSessionError(message: "The saved internet identity is invalid.") }
+            return saved
+        }
+        var bytes = [UInt8](repeating: 0, count: 32)
+        defer { for index in bytes.indices { bytes[index] = 0 } }
+        try NativeTransport.check(ml_internet_generate_identity(&bytes))
+        let key = Data(bytes)
+        try save("internet-transport.v1", data: key)
+        return key
+    }
     private func pairing(_ peerID: String) throws -> (code: NativePairingCode, key: NativeDeviceKey?)? {
         guard let data = try read("peer-" + peerID), !data.isEmpty else { return nil }
         var raw = MLPairingCode(), hasKey: UInt8 = 0

@@ -1,5 +1,6 @@
-mod store;
+use mooring_storage::catalog as store;
 
+use mooring_core::connection::ConnectionRepository;
 use mooring_core::desktop::DesktopWatchLimits;
 use mooring_platform::ServerKind;
 use mooring_platform::ssh::{
@@ -15,7 +16,7 @@ use std::{
 };
 use store::{Connection, NewConnection, SshHop, Store};
 
-const HELP: &str = "Mooring — native Mac connections, Rust foundation\n\nUsage: mooring [--config-dir PATH] COMMAND\n\n  list                         List saved VNC desktops as JSON\n  add --name NAME --ssh TARGET [--host HOST] [--port PORT]\n                               Save a VNC server, such as wayvnc on Linux, reached\n                               through SSH. TARGET is a ~/.ssh/config alias or\n                               user@host; HOST and PORT are as seen from the SSH\n                               host (127.0.0.1:5900)\n  remove ID                    Remove a saved connection\n  inspect ID                   Read the server's RFB greeting; no login\n  desktop-status ID            Whether the remote desktop is locked and its\n                               display on. Read-only over SSH\n  vnc-check ID                 Run Mooring's encrypted VNC sign-in handshake\n                               until the server asks for credentials, then stop.\n                               Sends none\n  connect ID [--idle-seconds N] [--wait-seconds N] [--screen WxH@SCALE]\n                               Open the SSH tunnel on 127.0.0.1 for Mooring's\n                               viewer and print JSON lines (including whether\n                               the desktop is locked) until no viewer has been\n                               connected for N seconds (default 60) or Ctrl-C.\n                               --screen shows the desktop on a virtual screen of\n                               that size (Hyprland and wayvncctl) until then\n  doctor                       Report local capabilities and limitations\n  simulate                     Run simulated adaptive-quality scenarios\n  telemetry [--count N]        Stream live native-session measurements as JSON lines\n  tune OPTIONS                 Adjust the sharing Mac's stream while connected:\n                               --bitrate-mbps 1-80  --max-width 640-3840 (even)\n                               --fps 1-60  --in-flight 1-2  --keyframe-seconds 0-10\n                               (0: keyframes only when needed, the default)\n                               --reset (restore defaults, then apply the rest)\n\nMacs connect through Mooring's own pairing, not Apple Screen Sharing.\nTelemetry and tuning use the running app's owner-only local socket; tuning\nfrom a viewer is sent to the sharing Mac over the encrypted session. No\npasswords are stored. MOORING_HOME overrides the connection directory. SSH\nuses your own keys, agent and ~/.ssh/config in batch mode and never prompts;\nMOORING_SSH_CONFIG names an alternate config.\n";
+const HELP: &str = "Mooring — native Mac connections, Rust foundation\n\nUsage: mooring [--config-dir PATH] COMMAND\n\n  list                         List saved VNC desktops as JSON\n  add --name NAME --ssh TARGET [--host HOST] [--port PORT]\n                               Save a VNC server, such as wayvnc on Linux, reached\n                               through SSH. TARGET is a ~/.ssh/config alias or\n                               user@host; HOST and PORT are as seen from the SSH\n                               host (127.0.0.1:5900)\n  remove ID                    Remove a saved connection\n  inspect ID                   Read the server's RFB greeting; no login\n  desktop-status ID            Whether the remote desktop is locked and its\n                               display on. Read-only over SSH\n  vnc-check ID                 Run Mooring's VNC sign-in handshake until the\n                               server asks for credentials (or, with no VNC\n                               password, until it is chosen), then stop.\n                               Sends none\n  connect ID [--idle-seconds N] [--wait-seconds N] [--screen WxH@SCALE]\n                               Open the SSH tunnel on 127.0.0.1 for Mooring's\n                               viewer and print JSON lines (including whether\n                               the desktop is locked) until no viewer has been\n                               connected for N seconds (default 60) or Ctrl-C.\n                               --screen shows the desktop on a virtual screen of\n                               that size (Hyprland and wayvncctl), or resizes\n                               an X11 desktop with no monitor to it in points\n                               (xrandr), until then\n  doctor                       Report local capabilities and limitations\n  simulate                     Run simulated adaptive-quality scenarios\n  telemetry [--count N]        Stream live native-session measurements as JSON lines\n  tune OPTIONS                 Adjust the sharing Mac's stream while connected:\n                               --bitrate-mbps 1-80  --max-width 640-3840 (even)\n                               --fps 1-60  --in-flight 1-2  --keyframe-seconds 0-10\n                               (0: keyframes only when needed, the default)\n                               --reset (restore defaults, then apply the rest)\n\nMacs connect through Mooring's own pairing, not Apple Screen Sharing.\nTelemetry and tuning use the running app's owner-only local socket; tuning\nfrom a viewer is sent to the sharing Mac over the encrypted session. No\npasswords are stored. MOORING_HOME overrides the connection directory. SSH\nuses your own keys, agent and ~/.ssh/config in batch mode and never prompts;\nMOORING_SSH_CONFIG names an alternate config.\n";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -47,6 +48,14 @@ fn execute(args: &[String]) -> Result<Value, String> {
         (Store::default_path()?, args)
     };
     let store = Store::new(directory.clone());
+    execute_with_repository(&store, &directory, args)
+}
+
+fn execute_with_repository(
+    store: &impl ConnectionRepository,
+    directory: &Path,
+    args: &[String],
+) -> Result<Value, String> {
     let command = args
         .first()
         .ok_or("A command is required; run mooring --help")?;
@@ -113,15 +122,15 @@ fn execute(args: &[String]) -> Result<Value, String> {
             Ok(json!({
                 "version":env!("CARGO_PKG_VERSION"),
                 "os":std::env::consts::OS, "architecture":std::env::consts::ARCH,
-                "config_directory":store::path_display(&directory),
+                "config_directory":store::path_display(directory),
                 "apple_silicon":cfg!(all(target_os="macos",target_arch="aarch64")),
                 "mac_backend":"native Mooring session between paired Macs; Apple Screen Sharing is no longer used",
-                "vnc_viewer":"Mooring's own viewer for VNC servers such as wayvnc on Linux, only through SSH; RSA-AES sign-in",
+                "vnc_viewer":"Mooring's own viewer for VNC servers such as wayvnc or x11vnc on Linux, only through SSH; RSA-AES sign-in whenever offered, and only through SSH to the server's own loopback address, no VNC password (the SSH key signs in) or a VNC password",
                 "inspection":"RFB greeting only; does not measure video latency or bandwidth",
-                "password_storage":"none; a VNC server's password is typed for each sign-in, sent once and never stored or logged",
+                "password_storage":"none; a VNC server's password, when it has one, is typed for each sign-in, sent once and never stored or logged",
                 "ssh_tunnel":"connect starts /usr/bin/ssh -W per viewer connection in batch mode with your keys, agent and ~/.ssh/config; listens on 127.0.0.1 only; SSH never prompts for or stores a password",
                 "ssh_available":Path::new(ssh_tunnel::SYSTEM_SSH).is_file(),
-                "desktop_status":"for SSH connections, a fixed read-only script reports whether the remote desktop is locked and its display on (Hyprland, Omarchy lock screen, logind); Mooring never types a password into a lock screen"
+                "desktop_status":"for SSH connections, a fixed read-only script reports whether the remote desktop is locked and its display on (Hyprland, Omarchy lock screen, the X11 desktop's screen saver, logind); Mooring never types a password into a lock screen"
             }))
         }
         "simulate" => {
@@ -142,10 +151,10 @@ fn execute(args: &[String]) -> Result<Value, String> {
                 ),
                 _ => return Err("Usage: mooring telemetry [--count N]".into()),
             };
-            stream_telemetry(&directory, count)?;
+            stream_telemetry(directory, count)?;
             Ok(Value::Null)
         }
-        "tune" => send_tuning(&directory, parse_tune(trailing)?),
+        "tune" => send_tuning(directory, parse_tune(trailing)?),
         _ => Err(format!("Unknown command '{command}'; run mooring --help")),
     }
 }
@@ -416,6 +425,23 @@ fn route_for(connection: &Connection, hop: &SshHop) -> Result<SshRoute, String> 
     SshRoute::new(&hop.target, &connection.host, connection.port)
 }
 
+/// How Mooring's viewer reaches this server: always its SSH tunnel, ending at
+/// the saved host as the SSH host sees it.
+fn vnc_route(connection: &Connection) -> mooring_vnc::Route {
+    mooring_vnc::Route::ssh_tunnel_to(&connection.host)
+}
+
+/// What Mooring's own viewer will do to sign in, for the connection check.
+fn sign_in_note(offered: &[u8], route: mooring_vnc::Route) -> String {
+    use mooring_vnc::SecurityKind;
+    match mooring_vnc::auth::choose_security(offered, route) {
+        Some(SecurityKind::None) => "This VNC server has no password. Mooring reaches it only through SSH on its own loopback address, so your SSH key is the sign-in.".into(),
+        Some(SecurityKind::VncPassword) => "This VNC server asks for its own VNC password (at most 8 characters count). Mooring asks for it at each sign-in, answers only inside SSH, and never saves it.".into(),
+        Some(SecurityKind::RsaAes128 | SecurityKind::RsaAes256) => "Mooring signs in with RSA-AES inside SSH, using an account on that computer.".into(),
+        None => mooring_vnc::auth::unsupported_message(offered, route),
+    }
+}
+
 fn describe_connection(connection: &Connection, hop: &SshHop) -> Value {
     json!({"id":connection.id, "name":connection.name, "server":connection.server,
            "ssh_target":hop.target, "remote_host":connection.host, "remote_port":connection.port})
@@ -444,9 +470,17 @@ fn inspect_through_ssh(connection: &Connection, hop: &SshHop) -> Result<Value, S
             // The app's connection check reads host, port, rfb_version and note.
             value["host"] = json!(route.remote_host);
             value["port"] = json!(route.remote_port);
-            if let Some(extra) = note {
-                value["note"] = json!(format!("{} {extra}", check.note));
+            let mut text = check.note.clone();
+            if connection.server == ServerKind::Vnc && !check.looks_like_mac {
+                text = format!(
+                    "{text} {}",
+                    sign_in_note(&check.security_types, vnc_route(connection))
+                );
             }
+            if let Some(extra) = note {
+                text = format!("{text} {extra}");
+            }
+            value["note"] = json!(text);
             // A failed desktop read does not fail the connection check.
             if connection.server == ServerKind::Vnc {
                 match ssh_tunnel::probe_desktop(&route, &options, DESKTOP_PROBE_TIMEOUT, &|| false)
@@ -546,7 +580,8 @@ fn vnc_check_through_ssh(connection: &Connection, hop: &SshHop) -> Result<Value,
             std::thread::sleep(Duration::from_millis(20));
         };
         let check = local_port.map(|local_port| {
-            let mut vnc = mooring_vnc::SessionConfig::new("127.0.0.1", local_port);
+            let mut vnc =
+                mooring_vnc::SessionConfig::new("127.0.0.1", local_port, vnc_route(connection));
             vnc.check_only = true;
             let session = mooring_vnc::Session::start(vnc, None);
             let mut events = Vec::new();
@@ -594,17 +629,36 @@ fn vnc_check_through_ssh(connection: &Connection, hop: &SshHop) -> Result<Value,
         mooring_vnc::SessionEvent::Closed { error } => error.clone(),
         _ => None,
     });
+    let security = match negotiated {
+        Some(mooring_vnc::SessionEvent::Negotiated { security, .. }) => Some(*security),
+        _ => None,
+    };
+    // No sign-in has no credential request: choosing it is the whole check.
+    let (reached, note) = match security {
+        Some(mooring_vnc::SecurityKind::None) => (
+            error.is_none(),
+            "The VNC server has no password. Through SSH to its loopback address, Mooring signs in with your SSH key; this check stopped after choosing that, before opening the desktop.",
+        ),
+        Some(mooring_vnc::SecurityKind::VncPassword) => (
+            requested.is_some() && error.is_none(),
+            "The VNC server sent its VNC password challenge inside SSH and Mooring stopped there; no password was sent, so the server did not check one.",
+        ),
+        _ => (
+            requested.is_some() && error.is_none(),
+            "Mooring's encrypted handshake reached the server's credential request and stopped there; no username or password was sent, so the server did not check a password.",
+        ),
+    };
     let value = json!({
-        "status": if requested.is_some() && error.is_none() { "ok" } else { "failed" },
+        "status": if reached { "ok" } else { "failed" },
         "connection": describe,
         "negotiated": negotiated,
         "credentials_requested": requested,
         "credentials_sent": false,
         "error": error,
         "duration_ms": started.elapsed().as_millis() as u64,
-        "note": "Mooring's encrypted handshake reached the server's credential request and stopped there; no username or password was sent, so the server did not check a password."
+        "note": note
     });
-    if requested.is_some() && error.is_none() {
+    if reached {
         Ok(value)
     } else {
         println!("{value}");
@@ -675,8 +729,14 @@ fn connect_through_ssh(
                 }
                 match ssh_tunnel::start_virtual_screen(&config.route, &config.ssh, size, &stop) {
                     Ok(screen) => {
-                        emit(&json!({"event":"virtual_screen", "state":"ready", "name":screen.name,
-                                     "width":size.width, "height":size.height, "scale":size.scale,
+                        // An X11 screen is resized in points and drawn at 1x.
+                        let scale = match screen.kind {
+                            ssh_tunnel::ScreenKind::X11Resize => 1,
+                            ssh_tunnel::ScreenKind::HyprlandOutput => size.scale,
+                        };
+                        emit(&json!({"event":"virtual_screen", "state":"ready", "kind":screen.kind,
+                                     "name":screen.name, "width":screen.width, "height":screen.height,
+                                     "scale":scale, "requested":size, "previous":screen.previous,
                                      "workspaces":screen.workspaces}));
                         while !stop() {
                             std::thread::sleep(Duration::from_millis(50));

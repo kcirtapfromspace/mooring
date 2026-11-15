@@ -3,6 +3,8 @@ set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_root"
+# Select the reviewed Xcode per process; never change the Mac's global selection.
+export DEVELOPER_DIR="$(python3 scripts/native-targets.py setting developerDir)"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
     printf '%s\n' 'The Mooring app requires macOS and the Apple command line tools.' >&2
@@ -16,6 +18,10 @@ for build_tool in cargo rustup swiftc xcrun lipo codesign plutil iconutil; do
     }
 done
 
+python3 scripts/native-targets.py check
+python3 scripts/native-targets.py toolchain
+swift_target="$(python3 scripts/native-targets.py setting swiftTarget)"
+macos_floor="$(python3 scripts/native-targets.py setting macOS)"
 release_version="${MOORING_RELEASE_VERSION:-0.3.0}"
 # The grammar the session library packs for the version message: numbers
 # without leading zeros below 65536, and preview numbers from 1 to 65534.
@@ -40,27 +46,32 @@ staged_bundle="$build_root/Mooring.app"
 mkdir -p "$staged_bundle/Contents/MacOS" "$staged_bundle/Contents/Resources" "$staged_bundle/Contents/Frameworks"
 sdk_path="$(xcrun --show-sdk-path)"
 # Render every standard icon size from the same geometry used by the shell.
-swiftc -O -swift-version 5 -parse-as-library -sdk "$sdk_path" -target arm64-apple-macosx14.0 \
+swiftc -O -swift-version 5 -parse-as-library -sdk "$sdk_path" -target "$swift_target" \
     -framework AppKit "$project_root/app/MooringBrand.swift" "$project_root/scripts/render-brand.swift" \
     -o "$build_root/render-brand"
 "$build_root/render-brand" "$build_root/Mooring.iconset"
 iconutil -c icns "$build_root/Mooring.iconset" -o "$staged_bundle/Contents/Resources/Mooring.icns"
 installed_targets="$(rustup target list --installed)"
-rust_target=aarch64-apple-darwin
+rust_target="$(python3 scripts/native-targets.py setting rustTarget)"
 if ! printf '%s\n' "$installed_targets" | /usr/bin/grep -Fqx "$rust_target"; then
     printf 'Missing Rust target. Install it with: rustup target add %s\n' "$rust_target" >&2
     exit 1
 fi
 
 # Mooring currently targets Apple Silicon only, with the same macOS floor in both binaries.
-MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release --package mooring-cli --package mooring-session \
-    --target "$rust_target" --target-dir "$project_root/target"
+cargo_args=(--locked --release --package mooring-cli --package mooring-session --target "$rust_target" --target-dir "$project_root/target")
+if [[ "${MOORING_EXPERIMENTAL_INTERNET:-1}" = 1 ]]; then
+    cargo_args+=(--features mooring-session/internet --package mooring-connectivity)
+fi
+MACOSX_DEPLOYMENT_TARGET="$macos_floor" cargo build "${cargo_args[@]}"
 # In-place updates: the pinned, checksum-verified Sparkle framework.
 sparkle_dir="$("$project_root/scripts/fetch-sparkle.sh")"
 # The one Objective-C file: the private virtual-display boundary (AGENTS.md).
-clang -fobjc-arc -O2 -Wall -Werror -isysroot "$sdk_path" -target arm64-apple-macos14.0 \
+clang -fobjc-arc -O2 -Wall -Werror -isysroot "$sdk_path" -target "$swift_target" \
     -c "$project_root/app/NativeVirtualDisplay.m" -o "$build_root/NativeVirtualDisplay.o"
-swiftc -O -swift-version 5 -parse-as-library -sdk "$sdk_path" -target arm64-apple-macosx14.0 \
+swift_sources=()
+while IFS= read -r source; do swift_sources+=("$project_root/$source"); done < <(python3 scripts/native-targets.py sources app)
+swiftc -O -swift-version 5 -warnings-as-errors -parse-as-library -sdk "$sdk_path" -target "$swift_target" \
     -framework AppKit -framework Foundation -framework Network -framework ServiceManagement \
     -framework Security -framework SystemConfiguration -framework ScreenCaptureKit -framework VideoToolbox \
     -framework CoreMedia -framework CoreVideo -framework Metal -framework MetalKit -framework CoreImage \
@@ -68,8 +79,12 @@ swiftc -O -swift-version 5 -parse-as-library -sdk "$sdk_path" -target arm64-appl
     -import-objc-header "$project_root/app/Mooring-Bridging.h" "$build_root/NativeVirtualDisplay.o" \
     -L "$project_root/target/$rust_target/release" -lmooring_session \
     -F "$sparkle_dir" -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
-    "$project_root"/app/*.swift -o "$staged_bundle/Contents/MacOS/Mooring"
+    "${swift_sources[@]}" -o "$staged_bundle/Contents/MacOS/Mooring"
 cp "$project_root/target/$rust_target/release/mooring" "$staged_bundle/Contents/Resources/mooring"
+if [[ "${MOORING_EXPERIMENTAL_INTERNET:-1}" = 1 ]]; then
+    cp "$project_root/target/$rust_target/release/mooring-link" "$staged_bundle/Contents/Resources/mooring-link"
+    [[ "$(lipo -archs "$staged_bundle/Contents/Resources/mooring-link")" = arm64 ]] || exit 1
+fi
 
 # Embed Sparkle for Apple silicon only. Mooring is not sandboxed, so Sparkle's
 # optional XPC services are unused; headers are build-time only.
@@ -118,6 +133,9 @@ codesign "${sign_options[@]}" "$sparkle/Versions/B/Autoupdate"
 codesign "${sign_options[@]}" "$sparkle/Versions/B/Updater.app"
 codesign "${sign_options[@]}" "$sparkle"
 codesign "${sign_options[@]}" "$staged_bundle/Contents/Resources/mooring"
+if [[ -f "$staged_bundle/Contents/Resources/mooring-link" ]]; then
+    codesign "${sign_options[@]}" "$staged_bundle/Contents/Resources/mooring-link"
+fi
 codesign "${sign_options[@]}" "$staged_bundle"
 codesign --verify --deep --strict "$staged_bundle"
 for executable in "$staged_bundle/Contents/MacOS/Mooring" "$staged_bundle/Contents/Resources/mooring" \

@@ -1,0 +1,18 @@
+[package]
+name = "mooring-connectivity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mooring-core = { path = "../mooring-core" }
+iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring"] }
+tokio = { version = "=1.52.1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+serde.workspace = true
+serde_json.workspace = true
+zeroize = "1"
+libc = "0.2"
+
+[dev-dependencies]
+iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring", "test-utils"] }
+iroh-relay = { version = "=1.4.1", default-features = false, features = ["server", "tls-ring"] }

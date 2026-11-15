@@ -9,8 +9,15 @@
 //! - Hyprland's monitors: an active ext-session-lock shows as `LOCK` among
 //!   a monitor's `solitaryBlockedBy` reasons, whichever program locked it.
 //! - The Omarchy lock screen's own status.
-//! - logind's `LockedHint`. Many lock screens never set it, so "not locked"
-//!   from logind alone is trusted only for desktops known to set it.
+//! - Unity 7's own answer (`com.canonical.Unity.Session.IsLocked`), on
+//!   Ubuntu 18.04 and its Unity flavours. Unity sets no logind hint, and its
+//!   screen saver reads inactive while its lock screen asks for a password.
+//! - logind's `LockedHint`. Many lock screens never set it (Unity 7 doesn't),
+//!   so "not locked" from logind alone is trusted only for desktops known to
+//!   set it.
+//! - On X11, an active screen saver (`org.gnome.ScreenSaver` and its Cinnamon
+//!   and MATE twins) with locking on counts as locked. An inactive one proves
+//!   nothing: Unity's lock screen shows with it inactive.
 //!
 //! This is pure code: it starts no processes and reads no clock.
 
@@ -62,7 +69,9 @@ pub enum SessionState {
 pub enum LockEvidence {
     HyprlandSessionLock,
     OmarchyLockScreen,
+    UnityLockScreen,
     LogindLockedHint,
+    ScreenSaver,
     None,
 }
 
@@ -80,6 +89,20 @@ pub struct DesktopStatus {
     pub compositor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lock_screen: Option<String>,
+    /// The desktop's name, such as `Unity:Unity7:ubuntu`, from logind or, on
+    /// X11, from the session's environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<String>,
+    /// On X11: whether the desktop's screen saver (or lock screen) is showing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen_saver_active: Option<bool>,
+    /// On X11: the screen's size, such as `1920x1200`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen: Option<String>,
+    /// On X11: monitors showing part of the screen. With none, the desktop is
+    /// headless and Match this screen can resize it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monitors: Option<u32>,
     /// The lock screen is checking a password or fingerprint right now.
     pub authenticating: bool,
     /// Hyprland is set to turn the display on for pointer movement or a key.
@@ -150,6 +173,13 @@ struct Probe {
     wake_options: Vec<bool>,
     omarchy: Option<OmarchyLock>,
     omarchy_unreadable: bool,
+    x11_desktop: Option<String>,
+    x11_dpms: Option<String>,
+    x11_screen: Option<String>,
+    x11_monitors: Option<u32>,
+    screen_saver: Option<bool>,
+    lock_enabled: Option<bool>,
+    unity_locked: Option<bool>,
 }
 
 /// A name from the remote host, reduced to a short printable string.
@@ -160,6 +190,14 @@ fn clean_name(value: &str) -> Option<String> {
         .take(MAX_NAME_CHARS)
         .collect();
     (!cleaned.is_empty()).then_some(cleaned)
+}
+
+fn yes_no_bool(value: &str) -> Option<bool> {
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
 }
 
 fn yes_no(value: &str) -> Option<bool> {
@@ -213,6 +251,24 @@ pub fn parse_probe(output: &[u8]) -> Result<DesktopStatus, String> {
             }
             "omarchy.lock" => probe.omarchy = serde_json::from_str(value).ok(),
             "omarchy" => probe.omarchy_unreadable = value == "unreadable",
+            "x11.desktop" => probe.x11_desktop = clean_name(value),
+            "x11.dpms" => probe.x11_dpms = clean_name(value),
+            "x11.screen" => {
+                probe.x11_screen = value
+                    .split_once('x')
+                    .filter(|(w, h)| w.parse::<u16>().is_ok() && h.parse::<u16>().is_ok())
+                    .map(|_| value.to_string())
+            }
+            "x11.monitors" => probe.x11_monitors = value.parse().ok(),
+            "x11.screensaver" => {
+                probe.screen_saver = match value.rsplit_once(' ').map(|(_, state)| state) {
+                    Some("true") => Some(true),
+                    Some("false") => Some(false),
+                    _ => None,
+                }
+            }
+            "x11.unity_locked" => probe.unity_locked = yes_no_bool(value),
+            "x11.lock_enabled" => probe.lock_enabled = yes_no_bool(value),
             _ => {}
         }
     }
@@ -254,16 +310,30 @@ fn display_state(monitors: &[HyprMonitor]) -> DisplayState {
 }
 
 /// Desktops whose lock screens are known to keep logind's LockedHint current.
+/// Unity 7 (`Unity:Unity7:ubuntu` on Ubuntu 18.04) never sets it, though its
+/// name includes "ubuntu".
 fn sets_locked_hint(desktop: Option<&str>) -> bool {
     desktop.is_some_and(|d| {
         let d = d.to_ascii_lowercase();
-        ["gnome", "ubuntu", "kde", "plasma"]
-            .iter()
-            .any(|known| d.contains(known))
+        !d.contains("unity")
+            && ["gnome", "ubuntu", "kde", "plasma"]
+                .iter()
+                .any(|known| d.contains(known))
     })
 }
 
+/// X11 display power from `xset q`: "On", "Off", "in Standby", "in Suspend",
+/// or "Disabled" when DPMS never turns the display off.
+fn x11_display_state(dpms: Option<&str>) -> DisplayState {
+    match dpms.map(str::to_ascii_lowercase).as_deref() {
+        Some("on" | "disabled") => DisplayState::On,
+        Some("off" | "instandby" | "insuspend" | "in standby" | "in suspend") => DisplayState::Off,
+        _ => DisplayState::Unknown,
+    }
+}
+
 fn evaluate(probe: Probe) -> DesktopStatus {
+    let desktop = probe.desktop.clone().or_else(|| probe.x11_desktop.clone());
     let hypr_lock = probe.monitors.as_deref().and_then(hyprland_lock);
     let omarchy_lock = probe.omarchy.as_ref().map(OmarchyLock::is_locked);
     let mut notes = Vec::new();
@@ -287,9 +357,18 @@ fn evaluate(probe: Probe) -> DesktopStatus {
         (LockState::Unlocked, LockEvidence::HyprlandSessionLock)
     } else if omarchy_lock == Some(false) {
         (LockState::Unlocked, LockEvidence::OmarchyLockScreen)
+    } else if let Some(locked) = probe.unity_locked {
+        let state = if locked {
+            LockState::Locked
+        } else {
+            LockState::Unlocked
+        };
+        (state, LockEvidence::UnityLockScreen)
     } else if probe.locked_hint == Some(true) {
         (LockState::Locked, LockEvidence::LogindLockedHint)
-    } else if probe.locked_hint == Some(false) && sets_locked_hint(probe.desktop.as_deref()) {
+    } else if probe.screen_saver == Some(true) && probe.lock_enabled != Some(false) {
+        (LockState::Locked, LockEvidence::ScreenSaver)
+    } else if probe.locked_hint == Some(false) && sets_locked_hint(desktop.as_deref()) {
         (LockState::Unlocked, LockEvidence::LogindLockedHint)
     } else {
         (LockState::Unknown, LockEvidence::None)
@@ -306,10 +385,18 @@ fn evaluate(probe: Probe) -> DesktopStatus {
     if probe.omarchy_unreadable {
         notes.push("The Omarchy lock screen did not answer Mooring's read-only query.".into());
     }
-    let display = probe
-        .monitors
-        .as_deref()
-        .map_or(DisplayState::Unknown, display_state);
+    if probe.x11_monitors == Some(0) {
+        notes.push(match &probe.x11_screen {
+            Some(size) => format!("No monitor is connected to this X11 desktop ({size}), so Match this screen can resize it."),
+            None => "No monitor is connected to this X11 desktop, so Match this screen can resize it.".into(),
+        });
+    }
+    let display = match probe.monitors.as_deref() {
+        Some(monitors) => display_state(monitors),
+        None => x11_display_state(probe.x11_dpms.as_deref()),
+    };
+    // The screen saver is showing: blank, whether or not it is locked.
+    let blanked = lock != LockState::Unknown && probe.screen_saver == Some(true);
     let input_wakes_display =
         (!probe.wake_options.is_empty()).then(|| probe.wake_options.iter().any(|enabled| *enabled));
     let authenticating = lock == LockState::Locked
@@ -323,6 +410,7 @@ fn evaluate(probe: Probe) -> DesktopStatus {
         display,
         authenticating,
         input_wakes_display,
+        blanked,
         probe.user.as_deref(),
     );
     DesktopStatus {
@@ -332,6 +420,10 @@ fn evaluate(probe: Probe) -> DesktopStatus {
         evidence,
         compositor: probe.monitors.as_ref().map(|_| "hyprland".to_string()),
         lock_screen: probe.omarchy.as_ref().map(|_| "omarchy".to_string()),
+        desktop,
+        screen_saver_active: probe.screen_saver,
+        screen: probe.x11_screen,
+        monitors: probe.x11_monitors,
         session_user: probe.user,
         session_type: probe.session_type,
         authenticating,
@@ -348,6 +440,7 @@ fn describe(
     display: DisplayState,
     authenticating: bool,
     input_wakes_display: Option<bool>,
+    blanked: bool,
     user: Option<&str>,
 ) -> (String, String) {
     const NEVER: &str = "Mooring never types your password.";
@@ -377,6 +470,10 @@ fn describe(
             "Locked: checking sign-in".into(),
             format!("{owner} screen is locked and is checking a sign-in now. {NEVER}"),
         ),
+        (SessionState::Found, LockState::Locked) if blanked => (
+            "Locked: screen saver on".into(),
+            format!("{owner} screen is locked and blank. Moving the pointer in the viewer shows the lock screen; sign in there. {NEVER}"),
+        ),
         (SessionState::Found, LockState::Locked) if display == DisplayState::Off => (
             "Locked: display off".into(),
             format!("{owner} screen is locked and its display is off. {wake} Then sign in on the lock screen in the viewer. {NEVER}"),
@@ -384,6 +481,10 @@ fn describe(
         (SessionState::Found, LockState::Locked) => (
             "Locked".into(),
             format!("{owner} screen is locked. Sign in on the lock screen in the viewer. {NEVER}"),
+        ),
+        (SessionState::Found, LockState::Unlocked) if blanked => (
+            "Unlocked: screen saver on".into(),
+            format!("{owner} desktop is unlocked; its screen saver is showing. Moving the pointer in the viewer should clear it."),
         ),
         (SessionState::Found, LockState::Unlocked) if display == DisplayState::Off => (
             "Unlocked: display off".into(),
@@ -395,7 +496,7 @@ fn describe(
         ),
         (SessionState::Found, LockState::Unknown) => (
             "Lock state unknown".into(),
-            format!("Mooring couldn’t tell whether {} screen is locked. Its lock screen doesn’t report to logind, and no Hyprland or Omarchy status was readable.", user.map_or_else(|| "the remote".to_string(), |u| format!("{u}’s"))),
+            format!("Mooring couldn’t tell whether {} screen is locked. Its lock screen doesn’t report to logind, and no Hyprland, Omarchy or Unity status was readable.", user.map_or_else(|| "the remote".to_string(), |u| format!("{u}’s"))),
         ),
     }
 }
@@ -704,6 +805,167 @@ end
             status.notes[0].contains("does not own"),
             "{:?}",
             status.notes
+        );
+    }
+
+    /// What the probe printed on an NVIDIA Jetson Nano (Ubuntu 18.04, Unity,
+    /// GDM autologin, no monitor, x11vnc), 2026-11-08.
+    const UNITY_18_04: &[&str] = &[
+        "ssh.uid=1000",
+        "session.Id=1",
+        "session.User=1000",
+        "session.Name=think",
+        "session.Desktop=",
+        "session.Type=x11",
+        "session.Active=yes",
+        "session.LockedHint=no",
+        "x11.desktop=Unity:Unity7:ubuntu",
+        "x11.display=:0",
+        "x11.dpms=Disabled",
+        "x11.screen=1920x1200",
+        "x11.monitors=0",
+    ];
+
+    fn unity(extra: &[&str]) -> DesktopStatus {
+        let mut lines = UNITY_18_04.to_vec();
+        lines.extend_from_slice(extra);
+        parse_probe(&probe(&lines)).unwrap()
+    }
+
+    #[test]
+    fn unity_on_x11_goes_by_its_own_answer_not_logind_or_the_screen_saver() {
+        // Unity never sets LockedHint, and its name includes "ubuntu".
+        let silent = unity(&[]);
+        assert_eq!(
+            (silent.lock, silent.evidence),
+            (LockState::Unknown, LockEvidence::None)
+        );
+        assert!(
+            silent.message.contains("Unity status"),
+            "{}",
+            silent.message
+        );
+        assert_eq!(silent.desktop.as_deref(), Some("Unity:Unity7:ubuntu"));
+        assert_eq!(silent.session_type.as_deref(), Some("x11"));
+        assert_eq!(silent.display, DisplayState::On, "DPMS disabled");
+        assert_eq!(
+            (silent.screen.as_deref(), silent.monitors),
+            (Some("1920x1200"), Some(0))
+        );
+        assert!(
+            silent.notes[0].contains("No monitor is connected"),
+            "{:?}",
+            silent.notes
+        );
+        assert_eq!(silent.compositor, None);
+        // An inactive screen saver proves nothing: as read live on the Jetson,
+        // Unity's lock screen asks for a password with it inactive.
+        let saver_only = unity(&[
+            "x11.screensaver=org.gnome.ScreenSaver false",
+            "x11.lock_enabled=false",
+        ]);
+        assert_eq!(saver_only.lock, LockState::Unknown);
+        let prompt = unity(&[
+            "x11.unity_locked=true",
+            "x11.screensaver=org.gnome.ScreenSaver false",
+            "x11.lock_enabled=false",
+        ]);
+        assert_eq!(
+            (prompt.lock, prompt.evidence, prompt.title.as_str()),
+            (LockState::Locked, LockEvidence::UnityLockScreen, "Locked")
+        );
+        assert!(
+            prompt
+                .message
+                .contains("Sign in on the lock screen in the viewer")
+        );
+        // Locked and blank: the first read on the Jetson, 2026-11-08.
+        let blank = unity(&[
+            "x11.unity_locked=true",
+            "x11.screensaver=org.gnome.ScreenSaver true",
+            "x11.lock_enabled=false",
+        ]);
+        assert_eq!(
+            (blank.lock, blank.title.as_str()),
+            (LockState::Locked, "Locked: screen saver on")
+        );
+        assert!(
+            blank
+                .message
+                .contains("Moving the pointer in the viewer shows the lock screen")
+        );
+        let unlocked = unity(&[
+            "x11.unity_locked=false",
+            "x11.screensaver=org.gnome.ScreenSaver false",
+        ]);
+        assert_eq!(
+            (unlocked.lock, unlocked.evidence, unlocked.title.as_str()),
+            (
+                LockState::Unlocked,
+                LockEvidence::UnityLockScreen,
+                "Unlocked"
+            )
+        );
+        let blanked = unity(&[
+            "x11.unity_locked=false",
+            "x11.screensaver=org.gnome.ScreenSaver true",
+            "x11.lock_enabled=false",
+        ]);
+        assert_eq!(blanked.lock, LockState::Unlocked);
+        assert_eq!(blanked.screen_saver_active, Some(true));
+        assert_eq!(blanked.title, "Unlocked: screen saver on");
+        assert!(blanked.message.contains("think’s desktop is unlocked"));
+    }
+
+    #[test]
+    fn an_active_screen_saver_with_locking_on_counts_as_locked() {
+        // Cinnamon or MATE on X11, with no logind hint or Unity answer.
+        for extra in [&["x11.lock_enabled=true"][..], &[]] {
+            let mut lines = vec![
+                "session.Type=x11",
+                "x11.screensaver=org.mate.ScreenSaver true",
+            ];
+            lines.extend_from_slice(extra);
+            let locked = parse_probe(&probe(&lines)).unwrap();
+            assert_eq!(
+                (locked.lock, locked.evidence),
+                (LockState::Locked, LockEvidence::ScreenSaver),
+                "{extra:?}"
+            );
+        }
+        let blank = parse_probe(&probe(&[
+            "session.Type=x11",
+            "x11.screensaver=org.gnome.ScreenSaver true",
+            "x11.lock_enabled=false",
+        ]))
+        .unwrap();
+        assert_eq!(blank.lock, LockState::Unknown);
+    }
+
+    #[test]
+    fn x11_display_power_and_monitors_are_read() {
+        let off = unity(&["x11.dpms=Off"]);
+        assert_eq!(off.display, DisplayState::Off, "the later line wins");
+        let mut lines: Vec<&str> = UNITY_18_04
+            .iter()
+            .copied()
+            .filter(|l| !l.starts_with("x11.dpms") && !l.starts_with("x11.monitors"))
+            .collect();
+        lines.extend(["x11.dpms=in Standby", "x11.monitors=1", "x11.screen=bad"]);
+        let status = parse_probe(&probe(&lines)).unwrap();
+        assert_eq!(status.display, DisplayState::Off);
+        assert_eq!((status.monitors, status.screen), (Some(1), None));
+        assert!(status.notes.is_empty(), "{:?}", status.notes);
+        // GNOME on Xorg keeps LockedHint current.
+        let gnome = parse_probe(&probe(&[
+            "session.Type=x11",
+            "session.LockedHint=no",
+            "x11.desktop=ubuntu:GNOME",
+        ]))
+        .unwrap();
+        assert_eq!(
+            (gnome.lock, gnome.evidence),
+            (LockState::Unlocked, LockEvidence::LogindLockedHint)
         );
     }
 

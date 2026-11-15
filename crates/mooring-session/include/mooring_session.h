@@ -433,7 +433,27 @@ typedef struct {
 
 typedef struct MLInputState MLInputState;
 
+/* Experimental internet reachability; disabled builds reject these calls.
+ * Keys are separate 32-byte transport seeds. Locators do not authorize a session.
+ * The existing Noise pairing and approved-device checks still run end to end. */
+uint8_t ml_internet_available(void);
+int32_t ml_internet_generate_identity(uint8_t *private_key);
+int32_t ml_internet_public_id(const uint8_t *private_key, char *out, size_t capacity);
+int32_t ml_internet_listen(uint64_t listener, const uint8_t *private_key, const char *allowed_endpoint,
+    const char *relay_url, uint8_t relay_only, char *ticket, size_t capacity);
+int32_t ml_session_connect_internet(const char *ticket, const uint8_t *transport_private,
+    const MLPairingCode *code, const uint8_t *device_private, const char *device_name,
+    uint32_t timeout_ms, uint64_t *out, uint8_t *mode);
+/* 0 local TCP, 1 direct internet, 2 relay, 3 internet with path not measured. */
+int32_t ml_session_transport_path(uint64_t session);
+
 /* Layout contract, asserted identically in Rust (src/ffi.rs). */
+/* Linux lifecycle: policy stays in Rust; callers carry the attempt generation.
+   Events: ready=1, desktop/timeout=2, started=3, explicit retry=4, close=5, ended=6.
+   Actions: none=0, wait=1, ask for sign-in=2, stop tunnel=3. */
+typedef struct { uint64_t generation; uint32_t phase; uint16_t port; uint16_t reserved; } MLLinuxFlow;
+int32_t ml_linux_flow_step(MLLinuxFlow *state, uint64_t generation, uint32_t event, uint16_t port);
+_Static_assert(sizeof(MLLinuxFlow) == 16, "MLLinuxFlow layout");
 _Static_assert(sizeof(MLDisplayGeometry) == 40, "MLDisplayGeometry layout");
 _Static_assert(offsetof(MLDisplayGeometry, pixel_width) == 32, "MLDisplayGeometry.pixel_width layout");
 _Static_assert(sizeof(MLControlMessage) == 56, "MLControlMessage layout");
@@ -766,25 +786,41 @@ int32_t ml_tuning_merge(const MLTuning *current, const MLTuning *update, MLTunin
 
 /* VNC viewer for servers that are not Macs, such as wayvnc on Linux. It
  * connects only to 127.0.0.1:port, the local end of Mooring's SSH tunnel, and
- * signs in with RSA-AES (never Apple Diffie-Hellman). ml_vnc_open copies the
- * password and overwrites the caller's buffer with zeros before returning, on
- * every path; the password is sent once and never stored or logged. Failed
- * sign-ins are counted per host_key (a saved connection's ID), in memory: after
- * two within ten minutes, check and open return ML_SESSION_RATE_LIMITED. Events
- * are JSON ("connecting", "negotiated", "credentials_requested", "connected",
- * "resized", "bell", then "closed" with an optional error {kind, message}).
- * Pixels are BGRA bytes with alpha always 255 (kCVPixelFormatType_32BGRA).
- * Buttons: 1 left, 2 middle, 4 right. Scroll is in lines, positive right and
- * down. Close releases held keys and buttons first. */
+ * signs in with RSA-AES whenever the server offers it (never Apple
+ * Diffie-Hellman). remote_host is where the tunnel ends, as the SSH host sees
+ * it (the tunnel's ready.check.remote_host): only when that is the SSH host's
+ * own loopback address (127.0.0.0/8, ::1, localhost) may a server sign in with
+ * no password (the SSH key is the sign-in) or the classic VNC password.
+ * sign_in_needs says, before any attempt, what the person is asked for:
+ * ML_VNC_NEEDS_NOTHING, _PASSWORD (VNC password, no username) or _ACCOUNT
+ * (username and password); ML_SESSION_AUTH when no offered type is usable.
+ * ml_vnc_open copies the password and overwrites the caller's buffer with
+ * zeros before returning, on every path; the password is sent once and never
+ * stored or logged. Pass an empty username and a null password with length 0
+ * when nothing is needed. Failed sign-ins are counted per host_key (a saved
+ * connection's ID), in memory: after two within ten minutes, check and open
+ * return ML_SESSION_RATE_LIMITED. Events are JSON ("connecting",
+ * "negotiated" with security and route, "credentials_requested",
+ * "connected" with security: "none", "vnc_password", "rsa_aes128" or
+ * "rsa_aes256", "resized", "bell", then "closed" with an optional error
+ * {kind, message}). Pictures arrive as Tight (with JPEG), ZRLE, CopyRect or
+ * Raw. Pixels are BGRA bytes with alpha always 255
+ * (kCVPixelFormatType_32BGRA). Buttons: 1 left, 2 middle, 4 right. Scroll is
+ * in lines, positive right and down. Close releases held keys and buttons
+ * first. */
 enum { ML_VNC_EVENT_CAPACITY = 4096 };
 enum { ML_VNC_COPIED = 0, ML_VNC_UNCHANGED = 1, ML_VNC_RESIZED = 2, ML_VNC_NOT_READY = 3 };
+enum { ML_VNC_NEEDS_NOTHING = 0, ML_VNC_NEEDS_PASSWORD = 1, ML_VNC_NEEDS_ACCOUNT = 2 };
 typedef struct { uint32_t x, y, width, height; } MLVncRect;
 /* Totals since the session started: updates, rectangles, bytes received. */
 typedef struct { uint64_t updates, rectangles, bytes; } MLVncStats;
 int32_t ml_vnc_stats(uint64_t id, MLVncStats *stats);
 int32_t ml_vnc_sign_in_check(const char *host_key, uint64_t *retry_after_ms, uint32_t *remaining);
-int32_t ml_vnc_open(const char *host_key, uint16_t port, const char *username,
-                    uint8_t *password, size_t password_length, uint64_t *id);
+int32_t ml_vnc_sign_in_needs(const char *remote_host, const uint8_t *types, size_t count,
+                             int32_t *needs);
+int32_t ml_vnc_open(const char *host_key, uint16_t port, const char *remote_host,
+                    const char *username, uint8_t *password, size_t password_length,
+                    uint64_t *id);
 int32_t ml_vnc_poll_event(uint64_t id, char *out, size_t capacity, size_t *length);
 int32_t ml_vnc_frame_size(uint64_t id, uint32_t *width, uint32_t *height);
 int32_t ml_vnc_copy_changes(uint64_t id, uint8_t *pixels, size_t stride, uint32_t width,

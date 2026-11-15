@@ -23,20 +23,38 @@ pub mod security {
 pub mod encoding {
     pub const RAW: i32 = 0;
     pub const COPY_RECT: i32 = 1;
+    pub const TIGHT: i32 = 7;
     pub const ZRLE: i32 = 16;
+    /// Tight's JPEG quality, 0 to 9, as -32 + level. Without one, servers
+    /// send no JPEG.
+    pub const JPEG_QUALITY_0: i32 = -32;
+    /// Tight's compression effort, 0 to 9, as -256 + level.
+    pub const COMPRESS_LEVEL_0: i32 = -256;
     pub const DESKTOP_SIZE: i32 = -223;
     pub const LAST_RECT: i32 = -224;
     pub const EXTENDED_DESKTOP_SIZE: i32 = -308;
 }
 
-/// What Mooring asks for, most preferred first.
-pub const ENCODINGS: [i32; 6] = [
+/// Tight's JPEG quality level. libvncserver (x11vnc) maps 7 to JPEG quality
+/// 86 with full-resolution colour (4:4:4); it keeps text and other areas of
+/// few colours lossless, as palettes.
+pub const JPEG_QUALITY: i32 = 7;
+/// Tight's compression level: 1 is libvncserver's fastest with JPEG, which
+/// matters on a server with a slow CPU such as a Jetson Nano.
+pub const COMPRESS_LEVEL: i32 = 1;
+
+/// What Mooring asks for, most preferred first: Tight with JPEG, then ZRLE
+/// for servers without Tight, then the pseudo-encodings.
+pub const ENCODINGS: [i32; 9] = [
+    encoding::TIGHT,
     encoding::ZRLE,
     encoding::COPY_RECT,
     encoding::RAW,
     encoding::DESKTOP_SIZE,
     encoding::EXTENDED_DESKTOP_SIZE,
     encoding::LAST_RECT,
+    encoding::JPEG_QUALITY_0 + JPEG_QUALITY,
+    encoding::COMPRESS_LEVEL_0 + COMPRESS_LEVEL,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

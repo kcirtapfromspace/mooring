@@ -4,8 +4,10 @@
 //!
 //! One `ssh -T` session runs a fixed script (`virtual-screen.sh`) that creates
 //! a headless Hyprland output, moves the desktop's workspaces onto it and
-//! points wayvnc at it, then holds while Mooring sends a heartbeat on its
-//! input. Closing the input, or missing heartbeats for 20 seconds, makes the
+//! points wayvnc at it, or, on an X11 desktop with no monitor in use (such as
+//! a headless Jetson behind x11vnc), resizes its screen with `xrandr --fb` to
+//! the Mac's picture area in points. It then holds while Mooring sends a
+//! heartbeat on its input. Closing the input, or missing heartbeats for 20 seconds, makes the
 //! remote side put everything back, so the laptop is restored even if
 //! Mooring is killed or the network drops. The script travels base64-encoded
 //! in the remote command, so the input carries only the heartbeat, and only
@@ -125,12 +127,30 @@ pub fn virtual_screen_args(
     args
 }
 
+/// How the remote desktop was fitted to the Mac.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenKind {
+    /// A virtual Hyprland output of `size`, at its scale, that wayvnc captures.
+    HyprlandOutput,
+    /// The X11 screen itself, resized to `size` in points: one X pixel per
+    /// point, so the desktop is drawn at 1x.
+    X11Resize,
+}
+
 /// A virtual screen that is in place on the remote desktop.
 pub struct VirtualScreen {
+    /// The size Mooring asked for.
     pub size: ScreenSize,
+    pub kind: ScreenKind,
+    /// The remote desktop's size now, in its own pixels.
+    pub width: u32,
+    pub height: u32,
     pub name: String,
     /// The workspaces moved onto it, comma-separated, as the remote reported.
     pub workspaces: String,
+    /// For an X11 resize, the size that comes back afterwards, as `WxH`.
+    pub previous: Option<String>,
     process: Arc<super::SshProcess>,
     stop: Arc<AtomicBool>,
     heartbeat: Option<JoinHandle<()>>,
@@ -142,18 +162,28 @@ pub struct VirtualScreen {
 fn explain(code: &str, target: &str) -> (SshFailureKind, String) {
     let message = match code {
         "in-use" => format!("Another viewer is already using a virtual screen on {target}."),
-        "no-hyprland" => {
-            format!("{target} isn’t running Hyprland, which Mooring needs to add a virtual screen.")
+        "no-hyprland" => format!(
+            "{target}’s Wayland desktop isn’t Hyprland, which Mooring needs to add a virtual screen."
+        ),
+        "no-display" => {
+            format!("Mooring couldn’t reach the X11 display of the desktop on {target}.")
         }
+        "no-xrandr" => {
+            format!("xrandr isn’t installed on {target}, so its X11 screen can’t be resized.")
+        }
+        "monitor-in-use" => format!(
+            "A monitor shows {target}’s X11 screen, so Mooring leaves its size alone. Match this screen resizes an X11 desktop only when no monitor is in use."
+        ),
+        "too-large" => format!("{target}’s X11 screen can’t be made as large as this Mac’s."),
         "no-wayvncctl" => format!(
             "wayvncctl isn’t installed on {target}, so wayvnc can’t be pointed at a virtual screen."
         ),
-        "no-session" => format!("No one is signed in to a Wayland desktop on {target}."),
+        "no-session" => format!("No one is signed in to a Wayland or X11 desktop on {target}."),
         "not-readable" => format!(
             "SSH signs in to {target} as a different user from the desktop’s, without root, so Mooring can’t change its screens."
         ),
         "mode-not-applied" => {
-            format!("Hyprland on {target} did not apply the virtual screen’s size.")
+            format!("{target}’s desktop did not apply the new screen size.")
         }
         "capture-failed" => format!("wayvnc on {target} did not switch to the virtual screen."),
         other => format!("Mooring couldn’t add a virtual screen on {target} ({other})."),
@@ -269,14 +299,7 @@ fn start_with_timeout(
     };
     match outcome {
         Ok(line) => {
-            let mut parts = line["mooring-screen ready ".len()..].split_whitespace();
-            let _size = parts.next();
-            let name = parts.next().unwrap_or("MOORING-1").to_string();
-            let workspaces = parts
-                .next()
-                .and_then(|w| w.strip_prefix("workspaces="))
-                .unwrap_or("none")
-                .to_string();
+            let ready = parse_ready(&line, size);
             let stop = Arc::new(AtomicBool::new(false));
             let beat_stop = Arc::clone(&stop);
             let heartbeat = thread::Builder::new()
@@ -299,8 +322,12 @@ fn start_with_timeout(
             drop(stderr);
             Ok(VirtualScreen {
                 size,
-                name,
-                workspaces,
+                kind: ready.kind,
+                width: ready.width,
+                height: ready.height,
+                name: ready.name,
+                workspaces: ready.workspaces,
+                previous: ready.previous,
                 process,
                 stop,
                 heartbeat,
@@ -324,6 +351,59 @@ fn start_with_timeout(
             })
         }
     }
+}
+
+struct Ready {
+    kind: ScreenKind,
+    width: u32,
+    height: u32,
+    name: String,
+    workspaces: String,
+    previous: Option<String>,
+}
+
+/// `mooring-screen ready WxH NAME key=value...`, from the fixed script. Only
+/// bounded digits and short names are kept.
+fn parse_ready(line: &str, asked: ScreenSize) -> Ready {
+    let mut parts = line["mooring-screen ready ".len()..].split_whitespace();
+    let dimensions = |text: &str| -> Option<(u32, u32)> {
+        let (w, h) = text.split_once('x')?;
+        let number = |v: &str| {
+            (!v.is_empty() && v.len() <= 5 && v.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| v.parse().ok())
+                .flatten()
+        };
+        Some((number(w)?, number(h)?))
+    };
+    let size = parts.next().and_then(dimensions);
+    let name: String = parts
+        .next()
+        .unwrap_or("MOORING-1")
+        .chars()
+        .take(32)
+        .collect();
+    let mut ready = Ready {
+        kind: ScreenKind::HyprlandOutput,
+        width: asked.width,
+        height: asked.height,
+        name,
+        workspaces: "none".into(),
+        previous: None,
+    };
+    for part in parts {
+        match part.split_once('=') {
+            Some(("workspaces", value)) => ready.workspaces = value.chars().take(200).collect(),
+            Some(("kind", "x11")) => ready.kind = ScreenKind::X11Resize,
+            Some(("previous", value)) => {
+                ready.previous = dimensions(value).map(|(w, h)| format!("{w}x{h}"))
+            }
+            _ => {}
+        }
+    }
+    if let Some((width, height)) = size {
+        (ready.width, ready.height) = (width, height);
+    }
+    ready
 }
 
 impl VirtualScreen {
@@ -553,6 +633,217 @@ esac"#,
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.runtime);
         }
+    }
+
+    /// Stand-ins for an X11 desktop with no monitor, as on the Jetson Nano:
+    /// GDM's environment in the user manager, and xrandr keeping the screen
+    /// size in a file.
+    struct FakeX11 {
+        fixture: Fixture,
+        runtime: PathBuf,
+        _turn: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl FakeX11 {
+        const NO_MONITOR: &'static str = "HDMI-0 disconnected primary (normal left inverted right x axis y axis)\nDP-0 disconnected (normal left inverted right x axis y axis)\n";
+
+        fn new(size: &str, outputs: &str, maximum: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let turn = fake_host_turn();
+            let fixture = Fixture::new("x11");
+            let runtime = PathBuf::from(format!(
+                "/tmp/mooring-xs-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(runtime.join("1000/gdm")).unwrap();
+            let bin = fixture.0.join("bin");
+            let state = fixture.0.join("state");
+            fs::create_dir_all(&bin).unwrap();
+            fs::create_dir_all(&state).unwrap();
+            fs::write(state.join("size"), format!("{size}\n")).unwrap();
+            fs::write(state.join("outputs"), outputs).unwrap();
+            fs::write(state.join("maximum"), format!("{maximum}\n")).unwrap();
+            let dir = fixture.0.display().to_string();
+            let rt = runtime.display().to_string();
+            let tool = |name: &str, body: &str| {
+                let path = bin.join(name);
+                fs::write(&path, format!("#!/bin/sh\nS='{dir}/state'\n{body}\n")).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            };
+            tool("id", "echo 1000");
+            tool("timeout", "[ \"$1\" = -k ] && shift 2\nshift\nexec \"$@\"");
+            tool(
+                "loginctl",
+                r#"case "$1" in
+  list-sessions) printf '         1       1000 think            seat0            tty1\n      2683       1000 think\n' ;;
+  show-session)
+    sid=$2; shift 2; value=; props=
+    while [ $# -gt 0 ]; do case $1 in -p) props="$props $2"; shift 2 ;; --value) value=1; shift ;; *) shift ;; esac; done
+    for p in $props; do
+      case "$sid:$p" in 1:Type) v=x11 ;; 1:Active) v=yes ;; 1:User) v=1000 ;; 1:Name) v=think ;; 2683:Type) v=tty ;; *) v= ;; esac
+      if [ -n "$value" ]; then echo "$v"; else echo "$p=$v"; fi
+    done ;;
+esac"#,
+            );
+            tool(
+                "systemctl",
+                &format!(
+                    "printf 'DISPLAY=:0\\nXAUTHORITY={rt}/1000/gdm/Xauthority\\nXDG_CURRENT_DESKTOP=Unity:Unity7:ubuntu\\n'"
+                ),
+            );
+            tool(
+                "xrandr",
+                &format!(
+                    r#"[ "$DISPLAY" = :0 ] && [ "$XAUTHORITY" = '{rt}/1000/gdm/Xauthority' ] || exit 1
+echo "xrandr $*" >> "$S/log"
+case "$1" in
+  --current) printf 'Screen 0: minimum 8 x 8, current %s x %s, maximum %s x %s\n' $(sed 's/x/ /' "$S/size") $(sed 's/x/ /' "$S/maximum"); cat "$S/outputs" ;;
+  --fb) echo "$2" > "$S/size" ;;
+  *) exit 1 ;;
+esac"#
+                ),
+            );
+            Self {
+                fixture,
+                runtime,
+                _turn: turn,
+            }
+        }
+
+        fn ssh(&self, shell: &str) -> SshOptions {
+            let dir = self.fixture.0.display();
+            self.fixture.fake_ssh(&format!(
+                "for last; do :; done\nPATH='{dir}/bin':$PATH MOORING_RUNTIME_ROOT='{}' exec {shell} -c \"$last\"",
+                self.runtime.display()
+            ))
+        }
+
+        fn state(&self, name: &str) -> String {
+            fs::read_to_string(self.fixture.0.join("state").join(name)).unwrap_or_default()
+        }
+
+        fn saved(&self) -> PathBuf {
+            self.runtime.join("1000/mooring-x11-screen.size")
+        }
+    }
+
+    impl Drop for FakeX11 {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.runtime);
+        }
+    }
+
+    #[test]
+    fn an_x11_screen_is_resized_in_points_and_restored() {
+        for shell in shells() {
+            let desktop = FakeX11::new("1920x1200", FakeX11::NO_MONITOR, "16384x16384");
+            let size = ScreenSize::parse("3024x1890@2").unwrap();
+            let screen = start_virtual_screen(&route(), &desktop.ssh(shell), size, &never)
+                .unwrap_or_else(|e| panic!("{shell}: {e:?} log: {}", desktop.state("log")));
+            assert_eq!(screen.kind, ScreenKind::X11Resize, "{shell}");
+            assert_eq!((screen.width, screen.height), (1512, 945), "{shell}");
+            assert_eq!(screen.previous.as_deref(), Some("1920x1200"), "{shell}");
+            assert_eq!(desktop.state("size").trim(), "1512x945", "{shell}");
+            assert_eq!(
+                fs::read_to_string(desktop.saved()).unwrap().trim(),
+                "1920x1200"
+            );
+            assert!(
+                desktop
+                    .runtime
+                    .join("1000/mooring-virtual-screen.pid")
+                    .exists()
+            );
+            assert!(
+                screen.stop(),
+                "{shell}: not restored; log: {}",
+                desktop.state("log")
+            );
+            assert_eq!(desktop.state("size").trim(), "1920x1200", "{shell}");
+            assert!(!desktop.saved().exists(), "{shell}");
+            assert!(
+                !desktop
+                    .runtime
+                    .join("1000/mooring-virtual-screen.pid")
+                    .exists()
+            );
+            desktop.fixture.assert_no_survivors();
+        }
+        // At scale 1, the size is used as it is.
+        let desktop = FakeX11::new("1920x1200", FakeX11::NO_MONITOR, "16384x16384");
+        let size = ScreenSize::parse("1440x900@1").unwrap();
+        let screen = start_virtual_screen(&route(), &desktop.ssh("/bin/sh"), size, &never).unwrap();
+        assert_eq!((screen.width, screen.height), (1440, 900));
+        assert!(screen.stop());
+        assert_eq!(desktop.state("size").trim(), "1920x1200");
+    }
+
+    #[test]
+    fn an_x11_screen_a_monitor_shows_or_too_large_is_left_alone() {
+        let size = ScreenSize::parse("3024x1890@2").unwrap();
+        let shown = "HDMI-0 connected primary 1920x1080+0+0 (normal left inverted right x axis y axis) 527mm x 296mm\n   1920x1080     60.00*+\nDP-0 disconnected (normal left inverted right x axis y axis)\n";
+        let desktop = FakeX11::new("1920x1080", shown, "16384x16384");
+        let error = start_virtual_screen(&route(), &desktop.ssh("/bin/sh"), size, &never)
+            .err()
+            .unwrap();
+        assert!(
+            error.message.contains("A monitor shows"),
+            "{}",
+            error.message
+        );
+        assert_eq!(desktop.state("size").trim(), "1920x1080");
+        assert!(
+            !desktop.state("log").contains("--fb"),
+            "{}",
+            desktop.state("log")
+        );
+        drop(desktop);
+        // A connected monitor that is switched off shows nothing: resized.
+        let off = "HDMI-0 connected primary (normal left inverted right x axis y axis)\n";
+        let desktop = FakeX11::new("1920x1200", off, "16384x16384");
+        let screen = start_virtual_screen(&route(), &desktop.ssh("/bin/sh"), size, &never).unwrap();
+        assert!(screen.stop());
+        drop(desktop);
+        let desktop = FakeX11::new("1024x768", FakeX11::NO_MONITOR, "1280x1024");
+        let error = start_virtual_screen(&route(), &desktop.ssh("/bin/sh"), size, &never)
+            .err()
+            .unwrap();
+        assert!(
+            error.message.contains("can’t be made as large"),
+            "{}",
+            error.message
+        );
+        assert_eq!(desktop.state("size").trim(), "1024x768");
+        assert!(!desktop.saved().exists());
+    }
+
+    #[test]
+    fn a_size_left_by_an_earlier_session_comes_back_first() {
+        // An earlier session resized to 1512x945 and could not restore.
+        let desktop = FakeX11::new("1512x945", FakeX11::NO_MONITOR, "16384x16384");
+        fs::write(desktop.saved(), "1920x1200\n").unwrap();
+        let size = ScreenSize::parse("2880x1800@2").unwrap();
+        let screen = start_virtual_screen(&route(), &desktop.ssh("/bin/sh"), size, &never).unwrap();
+        assert_eq!(screen.previous.as_deref(), Some("1920x1200"));
+        assert_eq!(desktop.state("size").trim(), "1440x900");
+        assert!(screen.stop());
+        assert_eq!(desktop.state("size").trim(), "1920x1200");
+        // Another live session holds the screen: left alone.
+        fs::write(
+            desktop.runtime.join("1000/mooring-virtual-screen.pid"),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+        let error = start_virtual_screen(&route(), &desktop.ssh("/bin/sh"), size, &never)
+            .err()
+            .unwrap();
+        assert!(
+            error.message.contains("Another viewer"),
+            "{}",
+            error.message
+        );
+        assert_eq!(desktop.state("size").trim(), "1920x1200");
     }
 
     fn shells() -> Vec<&'static str> {

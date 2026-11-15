@@ -3,175 +3,6 @@ import Foundation
 import Darwin
 import ServiceManagement
 
-struct SavedMac: Decodable {
-    struct SSHHop: Decodable { let target: String }
-    let id: String
-    let name: String
-    /// With `ssh`, the VNC address as seen from the SSH host.
-    let host: String
-    let port: UInt16
-    /// "vnc" for a VNC server such as wayvnc on Linux. "mac", or no value in
-    /// older saves, marks an address saved for Apple Screen Sharing, which
-    /// Mooring no longer opens; it is kept so the person can pair or remove it.
-    let server: String?
-    let ssh: SSHHop?
-
-    var isMac: Bool { (server ?? "mac") == "mac" }
-    /// Mooring's own viewer opens VNC servers that are not Macs, through SSH.
-    var opensInMooring: Bool { !isMac && ssh != nil }
-
-    var endpoint: String {
-        let address = host.contains(":") ? "[\(host)]" : host
-        let direct = port == 5900 ? host : "\(address):\(port)"
-        guard let ssh else { return direct }
-        return host == "127.0.0.1" && port == 5900 ? "via SSH \(ssh.target)" : "\(direct) via SSH \(ssh.target)"
-    }
-}
-
-private struct HostInspection: Decodable {
-    let host: String
-    let port: UInt16
-    let tcp_connect_ms: Double?
-    let rfb_version: String?
-    let note: String?
-    /// SSH connections to other VNC servers: whether the desktop is locked.
-    let desktop: DesktopReport?
-    let desktop_error: DesktopError?
-}
-
-/// Rust decides the wording; the app only shows it.
-private struct DesktopReport: Decodable {
-    let lock: String
-    let title: String
-    let message: String
-    let notes: [String]?
-}
-
-private struct DesktopError: Decodable {
-    let message: String
-}
-
-struct CLIError: LocalizedError {
-    let message: String
-    var errorDescription: String? { message }
-}
-
-private final class TimeoutState: @unchecked Sendable {
-    private let lock = NSLock()
-    private var expired = false
-    func expire() { lock.lock(); expired = true; lock.unlock() }
-    var isExpired: Bool { lock.lock(); defer { lock.unlock() }; return expired }
-}
-
-/// The UI only launches the CLI. Connection storage, validation and probing live in Rust.
-final class CLIClient {
-    func run(_ arguments: [String], timeout: TimeInterval = 15,
-             completion: @escaping (Result<Data, CLIError>) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let result: Result<Data, CLIError>
-            do {
-                let data = try self.execute(arguments, timeout: timeout)
-                result = .success(data)
-            } catch {
-                result = .failure(CLIError(message: error.localizedDescription))
-            }
-            DispatchQueue.main.async { completion(result) }
-        }
-    }
-
-    func executableURL() throws -> URL {
-        let environment = ProcessInfo.processInfo.environment
-        if let override = environment["MOORING_BIN"], !override.isEmpty {
-            guard FileManager.default.isExecutableFile(atPath: override) else {
-                throw CLIError(message: "MOORING_BIN does not point to an executable: \(override)")
-            }
-            return URL(fileURLWithPath: override)
-        }
-        let candidates = [
-            Bundle.main.resourceURL?.appendingPathComponent("mooring"),
-            Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("mooring")
-        ].compactMap { $0 }
-        guard let url = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) else {
-            throw CLIError(message: "The Mooring command-line tool is missing. Rebuild the app with scripts/build-app.sh.")
-        }
-        return url
-    }
-
-    private func execute(_ arguments: [String], timeout: TimeInterval) throws -> Data {
-        let binary = try executableURL()
-        let files = FileManager.default
-        let directory = files.temporaryDirectory.appendingPathComponent("mooring-\(UUID().uuidString)")
-        try files.createDirectory(at: directory, withIntermediateDirectories: false,
-                                  attributes: [.posixPermissions: 0o700])
-        defer { try? files.removeItem(at: directory) }
-        let outputURL = directory.appendingPathComponent("stdout")
-        let errorURL = directory.appendingPathComponent("stderr")
-        for url in [outputURL, errorURL] {
-            guard files.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
-                throw CLIError(message: "Could not create temporary command output.")
-            }
-        }
-        let stdout = try FileHandle(forWritingTo: outputURL)
-        let stderr = try FileHandle(forWritingTo: errorURL)
-        defer { try? stdout.close(); try? stderr.close() }
-        let process = Process()
-        process.executableURL = binary
-        process.arguments = arguments
-        process.standardOutput = stdout
-        process.standardError = stderr
-        process.standardInput = FileHandle.nullDevice
-        try process.run()
-        let timeoutState = TimeoutState()
-        let deadline = DispatchWorkItem {
-            if process.isRunning {
-                timeoutState.expire()
-                process.terminate()
-                DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
-                    if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-                }
-            }
-        }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: deadline)
-        process.waitUntilExit()
-        deadline.cancel()
-        if timeoutState.isExpired {
-            throw CLIError(message: "This operation took too long and was stopped. Check the Mac’s address and network, then try again.")
-        }
-        if process.terminationStatus != 0 {
-            let data = (try? Data(contentsOf: errorURL)) ?? Data()
-            let message = String(decoding: data.prefix(16_384), as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            throw CLIError(message: message.isEmpty ? "The Mooring command-line tool exited unexpectedly (\(process.terminationStatus))." : message)
-        }
-        return try Data(contentsOf: outputURL)
-    }
-}
-
-func label(_ text: String, size: CGFloat = 13, weight: NSFont.Weight = .regular,
-                   color: NSColor = .labelColor) -> NSTextField {
-    let view = MooringPrivacyLabel(labelWithString: "")
-    view.stringValue = text
-    view.observePrivacy()
-    view.font = .systemFont(ofSize: size, weight: weight)
-    view.textColor = color
-    view.lineBreakMode = .byWordWrapping
-    view.maximumNumberOfLines = 0
-    view.preferredMaxLayoutWidth = 440
-    view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-    return view
-}
-
-func stack(_ views: [NSView], orientation: NSUserInterfaceLayoutOrientation = .vertical,
-                   spacing: CGFloat = 12) -> NSStackView {
-    let view = NSStackView(views: views)
-    view.orientation = orientation
-    view.alignment = orientation == .vertical ? .leading : .centerY
-    view.distribution = .fill
-    view.spacing = spacing
-    view.translatesAutoresizingMaskIntoConstraints = false
-    return view
-}
-
 /// One row of the Connections list: a Mac paired for a Mooring session, or a
 /// connection saved by the CLI store (a Linux desktop reached through SSH, or
 /// an address left from Apple Screen Sharing, which now needs pairing).
@@ -358,20 +189,18 @@ private final class AddMacController: NSWindowController, NSTextFieldDelegate {
 private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation, NSMenuDelegate {
     private var window: NSWindow!
     private let cli = CLIClient()
-    private let tunnels = SSHTunnels()
-    /// Mooring's own viewers for VNC servers that are not Macs, by connection ID.
-    private var vncViewers: [String: VNCViewerWindow] = [:]
-    /// Tunnels that are ready and waiting for the sign-in prompt: local port.
-    private var vncPending: [String: UInt16] = [:]
-    /// Whether Linux viewers show their footer: on unless hidden with ⌃⌘D in
-    /// one, separate from the Mac-to-Mac viewer's choice.
-    private var linuxShowsFooter: Bool {
-        get { UserDefaults.standard.object(forKey: "vnc.showDiagnosticBar") as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: "vnc.showDiagnosticBar") }
-    }
-    /// The latest read-only desktop check per connection: user, title, message.
-    private var desktopStates: [String: (user: String?, title: String, message: String)] = [:]
-    private var tunnelEnded = Set<String>()
+    private lazy var linux: LinuxConnectionWorkflow = {
+        let workflow = LinuxConnectionWorkflow(executable: { [unowned self] in try self.cli.executableURL() },
+            screenArguments: { [unowned self] in self.virtualScreenArguments() },
+            extendsBesideCamera: { [unowned self] in self.native.matchesScreen && self.native.extendsBesideCamera })
+        workflow.onStatus = { [weak self] title, detail, error, success in
+            self?.setStatus(title, detail, error: error, success: success)
+        }
+        workflow.onAction = { [weak self] in self?.lastMenuAction = $0 }
+        workflow.onChange = { [weak self] in self?.refreshStatusMenu() }
+        workflow.onShowConnections = { [weak self] in self?.showConnections() }
+        return workflow
+    }()
     private lazy var native = NativeSessionCoordinator()
     private let updater = MooringUpdater()
     private var settingsWindow: MooringSettingsWindow?
@@ -435,8 +264,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
             DispatchQueue.main.async { self?.updater.installIfIdle() }
         }
         native.onPeersChange = { [weak self] in self?.rebuildRows(); self?.refreshSettings() }
-        tunnels.onEvent = { [weak self] mac, event in self?.tunnelEvent(mac, event) }
-        tunnels.onExit = { [weak self] mac, status, message in self?.tunnelExited(mac, status, message) }
         native.onVersionMismatch = { [weak self] in self?.updater.checkInBackground() }
         native.onCheckForUpdates = { [weak self] in self?.updater.checkForUpdates() }
         native.onUpdateRequest = { [weak self] in self?.updater.checkForViewer() }
@@ -447,6 +274,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         updater.start()
         // Announced from the launch self-tests: viewers may ask this Mac to update.
         native.updatesItself = updater.isAvailable
+        native.start()
         // Sharing can stop without a session change, such as automatic sharing resuming.
         updateTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.updater.installIfIdle() }
         reloadConnections()
@@ -462,8 +290,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
     func applicationWillTerminate(_ notification: Notification) {
         native.stop()
         // Release held keys on the remote desktops before the tunnels close.
-        for viewer in vncViewers.values where viewer.view.sessionID != 0 { _ = ml_vnc_close(viewer.view.sessionID) }
-        tunnels.stopAll()
+        linux.stop()
     }
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
@@ -548,7 +375,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
                 item.representedObject = mac.id
                 item.toolTip = MooringPrivacy.redact("\(mac.name) — \(mac.endpoint)")
                 item.isEnabled = available
-                if let viewer = vncViewers[mac.id], !viewer.isClosed { item.state = .on }
+                if let viewer = linux.vncViewers[mac.id], !viewer.isClosed { item.state = .on }
                 statusMenu.addItem(item)
             }
             statusMenu.addItem(.separator())
@@ -584,6 +411,60 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         statusMenu.addItem(quit)
     }
 
+    @objc private func copyInternetID() {
+        do {
+            let id = try NativeInternetLinks.shared.publicID()
+            NSPasteboard.general.clearContents(); NSPasteboard.general.setString(id, forType: .string)
+            setStatus("Internet ID copied", "Give this public ID to the Mac that will share with you.")
+        } catch { showSettingsError(error.localizedDescription) }
+    }
+    @objc private func shareOverInternet() {
+        guard let listener = native.listener, native.isSharing else { native.showShare(); return }
+        let alert = NSAlert(); alert.messageText = "Share over Internet"
+        alert.informativeText = "Approve the viewing Mac’s Internet ID. An HTTPS relay URL enables connections across networks; leave it empty for a direct connection. Your existing Mooring pairing is still required."
+        let peer = NSTextField(string: ""); peer.placeholderString = "Viewing Mac’s Internet ID"
+        let relay = NSTextField(string: ProcessInfo.processInfo.environment["MOORING_INTERNET_RELAY"] ?? "")
+        relay.placeholderString = "HTTPS relay URL (optional)"
+        let fields = NSStackView(views: [peer, relay]); fields.orientation = .vertical
+        fields.frame = NSRect(x: 0, y: 0, width: 440, height: 60)
+        peer.widthAnchor.constraint(equalToConstant: 440).isActive = true
+        relay.widthAnchor.constraint(equalToConstant: 440).isActive = true
+        alert.accessoryView = fields; alert.addButton(withTitle: "Create Locator"); alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let allowed = peer.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let relayURL = relay.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        setStatus("Preparing internet link…", "Mooring is creating a locator for this sharing session.")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Result { try NativeInternetLinks.shared.start(listener: listener, allowed: allowed, relay: relayURL) }
+            DispatchQueue.main.async {
+                guard let self, self.native.listener === listener, self.native.isSharing else { return }
+                switch result {
+                case .success(let ticket):
+                    NSPasteboard.general.clearContents(); NSPasteboard.general.setString(ticket, forType: .string)
+                    self.setStatus("Internet locator copied", "Send it to the approved Mac. It expires after ten minutes. Stop Sharing also stops the internet listener.", success: true)
+                case .failure(let error): self.showSettingsError(error.localizedDescription)
+                }
+            }
+        }
+    }
+    @objc private func connectOverInternet() {
+        guard let peer = selectedPeer else { showConnections(); setStatus("Select a paired Mac", "Choose the sharing Mac in Connections, then use Connect Selected Mac over Internet."); return }
+        let alert = NSAlert(); alert.messageText = "Connect over Internet"
+        alert.informativeText = "Paste the locator from the sharing Mac. Mooring will verify the existing pairing before opening its desktop."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 440, height: 24))
+        alert.accessoryView = field; alert.addButton(withTitle: "Connect"); alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try NativeInternetLinks.shared.setRoute(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), for: peer.id)
+            native.connect(peerID: peer.id)
+        } catch { showSettingsError(error.localizedDescription) }
+    }
+    @objc private func useSavedNetworkAddress() {
+        guard let peer = selectedPeer else { showConnections(); return }
+        NativeInternetLinks.shared.removeRoute(for: peer.id)
+        setStatus("Using saved network addresses", "The next connection to this Mac will use its saved LAN or VPN addresses.")
+    }
+
     @objc private func connectNative() { native.showConnect() }
     @objc private func shareNative() { native.showShare() }
     @objc private func showNativePIN() { native.showPIN() }
@@ -617,6 +498,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         appMenu.addItem(.separator())
+        if NativeInternetLinks.isAvailable {
+            let internet = NSMenuItem(title: "Internet Connections (Experimental)", action: nil, keyEquivalent: "")
+            let submenu = NSMenu()
+            for (title, action) in [("Copy Internet ID", #selector(copyInternetID)),
+                                    ("Share over Internet…", #selector(shareOverInternet)),
+                                    ("Connect Selected Mac over Internet…", #selector(connectOverInternet)),
+                                    ("Use Saved Network Address", #selector(useSavedNetworkAddress))] {
+                let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+                item.target = self; submenu.addItem(item)
+            }
+            internet.submenu = submenu; appMenu.addItem(internet); appMenu.addItem(.separator())
+        }
         appMenu.addItem(withTitle: "Hide Mooring", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
         hideOthers.keyEquivalentModifierMask = [.option, .command]
@@ -1263,89 +1156,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         updateControls()
     }
 
-    private func connectThroughSSH(_ mac: SavedMac) {
-        guard let target = mac.ssh?.target else { return }
-        if tunnels.isRunning(mac.id) {
-            setStatus("Already connected through SSH", "\(mac.name)’s SSH tunnel is open. Close its viewer window to end it.", success: true)
-            return
-        }
-        if let viewer = vncViewers[mac.id], !viewer.isClosed {
-            viewer.showWindow(nil)
-            return
-        }
-        do {
-            tunnelEnded.remove(mac.id)
-            desktopStates[mac.id] = nil
-            // Mooring's own viewer connects; the tunnel waits up to 10 minutes
-            // for sign-in and lingers 5 minutes between tries.
-            let extra = ["--no-viewer", "--wait-seconds", "600", "--idle-seconds", "300"] + virtualScreenArguments()
-            try tunnels.open(mac, executable: cli.executableURL(), extraArguments: extra)
-        } catch {
-            setStatus("Couldn’t start SSH", error.localizedDescription, error: true)
-            return
-        }
-        lastMenuAction = "Connecting to \(mac.name.prefix(40)) through SSH…"
-        setStatus("Connecting through SSH…", "Checking \(target) with your SSH keys and agent. Mooring never asks for a password.")
-        refreshStatusMenu()
-    }
-
-    private func tunnelEvent(_ mac: SavedMac, _ event: [String: Any]) {
-        let errorMessage = (event["error"] as? [String: Any])?["message"] as? String
-        switch event["event"] as? String {
-        case "check_retry":
-            setStatus("Retrying SSH…", errorMessage ?? "The SSH connection dropped during setup.")
-        case "ready":
-            guard let port = (event["local_port"] as? NSNumber)?.uint16Value else { break }
-            vncPending[mac.id] = port
-            setStatus("Reached \(mac.name) through SSH", "Checking whether its desktop is locked before signing in…")
-            // Wait briefly for the desktop check, so the prompt can say whether
-            // the screen is locked and suggest the desktop's user name.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in self?.presentVNCSignIn(mac) }
-        case "desktop":
-            // Read-only lock and display state. Mooring never unlocks the
-            // desktop or types a password; the person signs in in the viewer.
-            guard let title = event["title"] as? String, let message = event["message"] as? String else { return }
-            let lock = event["lock"] as? String
-            desktopStates[mac.id] = (event["session_user"] as? String, title, message)
-            vncViewers[mac.id]?.showDesktop(title)
-            if vncPending[mac.id] != nil { presentVNCSignIn(mac); return }
-            lastMenuAction = "\(mac.name.prefix(40)): \(title)"
-            setStatus("\(mac.name): \(title)", message, success: lock == "unlocked")
-        case "virtual_screen":
-            let width = event["width"] as? Int ?? 0, height = event["height"] as? Int ?? 0
-            switch event["state"] as? String {
-            case "ready":
-                lastMenuAction = "\(mac.name.prefix(40)): screen matched to this Mac"
-                if vncPending[mac.id] == nil {
-                    setStatus("\(mac.name): screen matched", "Showing \(mac.name) on a \(width)×\(height) virtual screen sized to this Mac. Its own screen comes back when you disconnect.", success: true)
-                }
-            case "failed":
-                setStatus("Showing \(mac.name)’s own screen", errorMessage ?? "Mooring couldn’t add a virtual screen there.")
-            case "restore_unconfirmed":
-                setStatus("Check \(mac.name)’s screen", "Mooring couldn’t confirm that \(mac.name)’s own screen was restored. It restores itself within about 20 seconds once the connection is gone.", error: true)
-            default:
-                return
-            }
-        case "failed":
-            tunnelEnded.insert(mac.id)
-            vncPending[mac.id] = nil
-            vncViewers[mac.id]?.end("The SSH tunnel closed.")
-            lastMenuAction = "SSH connection failed"
-            setStatus("Couldn’t connect through SSH", errorMessage ?? "The SSH tunnel closed.", error: true)
-            showConnections()
-        case "closed":
-            tunnelEnded.insert(mac.id)
-            vncPending[mac.id] = nil
-            if let viewer = vncViewers[mac.id], !viewer.isClosed, viewer.view.sessionID != 0 { viewer.end("The SSH tunnel closed.") }
-            lastMenuAction = "SSH tunnel closed"
-            let detail = event["reason"] as? String == "no_viewer"
-                ? "No sign-in started in time, so the tunnel closed."
-                : "The SSH tunnel to \(mac.name) has closed."
-            setStatus("SSH tunnel closed", detail)
-        default: return
-        }
-        refreshStatusMenu()
-    }
+    private func connectThroughSSH(_ mac: SavedMac) { linux.connect(mac) }
 
     /// With Match this screen on, the Linux desktop shows on a virtual screen
     /// the size of the picture in full screen: this Mac's whole screen when
@@ -1358,110 +1169,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         guard scale == 1 || scale == 2 else { return [] }
         let besideCamera = native.extendsBesideCamera && NativeCameraRow.housing(on: screen) != nil
         let size = VNCViewerWindow.virtualScreen(size: screen.frame.size, safeTop: screen.safeAreaInsets.top, scale: scale,
-                                                 besideCamera: besideCamera, showsFooter: linuxShowsFooter)
+                                                 besideCamera: besideCamera, showsFooter: linux.linuxShowsFooter)
         return ["--screen", "\(size.width)x\(size.height)@\(Int(scale))"]
-    }
-
-    /// Ask for the VNC server's sign-in, once the tunnel is ready. Rust decides
-    /// whether another attempt is allowed; the password goes straight to Rust,
-    /// which wipes the buffer before returning.
-    private func presentVNCSignIn(_ mac: SavedMac) {
-        guard let port = vncPending.removeValue(forKey: mac.id), tunnels.isRunning(mac.id) else { return }
-        var wait: UInt64 = 0, remaining: UInt32 = 0
-        let allowed = mac.id.withCString { ml_vnc_sign_in_check($0, &wait, &remaining) }
-        if allowed == Int32(ML_SESSION_RATE_LIMITED) {
-            let minutes = max(1, Int((wait + 59_999) / 60_000))
-            tunnels.stop(mac.id)
-            setStatus("Waiting before another sign-in", "Two sign-ins to \(mac.name) failed in the last 10 minutes, so Mooring waits about \(minutes) more minute\(minutes == 1 ? "" : "s") before another try. You can also sign in at the computer.", error: true)
-            refreshStatusMenu()
-            return
-        }
-        let desktop = desktopStates[mac.id]
-        let sshUser = mac.ssh?.target.split(separator: "@", maxSplits: 1).count == 2 ? String(mac.ssh!.target.split(separator: "@")[0]) : nil
-        var detail = "\(mac.name)’s VNC server asks for an account on that computer. Mooring sends it once, encrypted (RSA-AES) inside SSH, and doesn’t save it."
-        if remaining == 1 { detail += "\n\nAfter one more failed sign-in, Mooring waits 10 minutes before another try." }
-        if let desktop { detail += "\n\n\(desktop.title): \(desktop.message)" }
-        setStatus("Sign in to \(mac.name)", "Waiting for the account name and password.")
-        VNCSignIn.prompt(name: mac.name, username: sshUser ?? desktop?.user ?? "", detail: detail) { [weak self] answer in
-            guard let self else { return }
-            guard let answer, self.tunnels.isRunning(mac.id) else {
-                self.tunnels.stop(mac.id)
-                self.setStatus("Sign-in cancelled", "The SSH tunnel to \(mac.name) has been closed.")
-                self.refreshStatusMenu()
-                return
-            }
-            var password = answer.password
-            var session: UInt64 = 0
-            let status = mac.id.withCString { key in
-                answer.username.withCString { user in
-                    ml_vnc_open(key, port, user, &password, password.count, &session)
-                }
-            }
-            guard status == 0, session != 0 else {
-                self.tunnels.stop(mac.id)
-                self.setStatus("Couldn’t start the viewer", String(cString: ml_session_error_string(status)), error: true)
-                return
-            }
-            self.openVNCViewer(mac, session: session, port: port)
-        }
-    }
-
-    private func openVNCViewer(_ mac: SavedMac, session: UInt64, port: UInt16) {
-        if let old = vncViewers[mac.id] { old.onClose = nil; old.close() }
-        let viewer = VNCViewerWindow(name: mac.name, connectionID: mac.id, sessionID: session,
-                                     showsDiagnosticBar: linuxShowsFooter)
-        viewer.onDiagnosticBarChange = { [weak self] shows in self?.linuxShowsFooter = shows }
-        // As from the Mac-to-Mac viewer's Allow ⌘-Tab….
-        viewer.onAllowSystemKeys = {
-            AccessibilityPermission.request()
-            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
-        }
-        // The viewer checks the desktop's size before using the camera row.
-        viewer.extendsBesideCamera = native.matchesScreen && native.extendsBesideCamera
-        if let desktop = desktopStates[mac.id] { viewer.showDesktop(desktop.title) }
-        viewer.onClose = { [weak self] in
-            self?.vncViewers[mac.id] = nil
-            self?.tunnels.stop(mac.id)
-        }
-        viewer.onSignInRejected = { [weak self, weak viewer] message in
-            guard let self else { return }
-            viewer?.onClose = nil
-            viewer?.close()
-            self.vncViewers[mac.id] = nil
-            self.setStatus("Sign-in not accepted", message, error: true)
-            guard self.tunnels.isRunning(mac.id) else { return }
-            self.vncPending[mac.id] = port
-            self.presentVNCSignIn(mac)
-        }
-        viewer.onEnded = { [weak self] message in
-            self?.setStatus("\(mac.name): session ended", message ?? "The VNC session has ended.")
-        }
-        viewer.onReconnect = { [weak self] in
-            guard let self else { return }
-            if self.tunnels.isRunning(mac.id) {
-                self.vncPending[mac.id] = port
-                self.presentVNCSignIn(mac)
-            } else {
-                self.vncViewers[mac.id]?.onClose = nil
-                self.vncViewers[mac.id]?.close()
-                self.vncViewers[mac.id] = nil
-                self.connectThroughSSH(mac)
-            }
-        }
-        vncViewers[mac.id] = viewer
-        lastMenuAction = "Viewing \(mac.name.prefix(40))"
-        setStatus("Connecting to \(mac.name)…", "Signing in through SSH. Closing the viewer closes the tunnel.", success: true)
-        viewer.showWindow(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        refreshStatusMenu()
-    }
-
-    private func tunnelExited(_ mac: SavedMac, _ status: Int32, _ message: String) {
-        guard !tunnelEnded.contains(mac.id) else { return }
-        // Exited without a final event, for example the CLI could not start.
-        lastMenuAction = "SSH tunnel stopped"
-        setStatus("SSH tunnel stopped", message.isEmpty ? "The SSH tunnel process exited (\(status))." : message, error: status != 0)
-        refreshStatusMenu()
     }
 
     @objc private func checkConnection() {
@@ -1598,7 +1307,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDat
         showConnections()
         let alert = NSAlert()
         alert.messageText = "Connecting to a Mac"
-        alert.informativeText = "Pair: on your other Mac, open Mooring → Share this Mac. Start sharing, copy a code, then paste it into Pair a Mac here.\n\nLinux: run a VNC server such as wayvnc, then add the desktop with its SSH target. You sign in to it in Mooring each time; the password is never saved.\n\nMooring stays in the menu bar when you close this window."
+        alert.informativeText = "Pair: on your other Mac, open Mooring → Share this Mac. Start sharing, copy a code, then paste it into Pair a Mac here.\n\nLinux: run a VNC server such as wayvnc or x11vnc, then add the desktop with its SSH target. If the VNC server has a password, you type it in Mooring each time; it is never saved. A VNC server with no password, listening only on its own loopback address, is signed in with your SSH key.\n\nMooring stays in the menu bar when you close this window."
         alert.addButton(withTitle: "Done")
         alert.beginSheetModal(for: window) { [weak self] _ in self?.updateControls() }
         updateControls()

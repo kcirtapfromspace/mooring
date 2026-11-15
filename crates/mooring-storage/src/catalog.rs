@@ -1,4 +1,7 @@
-use mooring_platform::ServerKind;
+use mooring_core::connection::ConnectionRepository;
+#[cfg(test)]
+use mooring_core::connection::ServerKind;
+pub use mooring_core::connection::{Connection, NewConnection, SshHop};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
@@ -11,40 +14,6 @@ use std::{
 
 const MAX_STORE_BYTES: u64 = 1024 * 1024;
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-/// A saved VNC endpoint. With `ssh`, `host` and `port` are as seen from the
-/// SSH host (usually 127.0.0.1:5900) and the viewer is pointed at a local
-/// tunnel instead. The new fields are omitted when unset, so connections saved
-/// before them are written back byte-for-byte unchanged.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Connection {
-    pub id: String,
-    pub name: String,
-    pub host: String,
-    pub port: u16,
-    #[serde(default, skip_serializing_if = "ServerKind::is_mac")]
-    pub server: ServerKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ssh: Option<SshHop>,
-}
-
-/// The SSH destination: a `~/.ssh/config` alias or user@host. Keys, ports and
-/// jump hosts stay in the user's SSH configuration; nothing secret is saved.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SshHop {
-    pub target: String,
-}
-
-/// What `add` saves, before an ID is assigned.
-pub struct NewConnection<'a> {
-    pub name: &'a str,
-    pub host: &'a str,
-    pub port: u16,
-    pub server: ServerKind,
-    pub ssh_target: Option<&'a str>,
-}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,7 +32,7 @@ impl Store {
     }
 
     pub fn default_path() -> Result<PathBuf, String> {
-        mooring_platform::support_directory()
+        crate::support_directory()
     }
 
     pub fn list(&self) -> Result<Vec<Connection>, String> {
@@ -91,9 +60,9 @@ impl Store {
         let mut ids = HashSet::new();
         for connection in &mut document.connections {
             connection.name = validate_name(&connection.name)?;
-            connection.host = mooring_platform::validate_host(&connection.host)?;
+            connection.host = mooring_core::connection::validate_host(&connection.host)?;
             if let Some(ssh) = &mut connection.ssh {
-                ssh.target = mooring_platform::ssh::validate_ssh_target(&ssh.target)?;
+                ssh.target = mooring_core::connection::validate_ssh_target(&ssh.target)?;
             }
             if connection.port == 0
                 || !valid_id(&connection.id)
@@ -128,14 +97,14 @@ impl Store {
 
     pub fn add_connection(&self, new: NewConnection) -> Result<Connection, String> {
         let name = validate_name(new.name)?;
-        let host = mooring_platform::validate_host(new.host)?;
+        let host = mooring_core::connection::validate_host(new.host)?;
         let port = new.port;
         if port == 0 {
             return Err("Port must be between 1 and 65535".into());
         }
         let ssh = new
             .ssh_target
-            .map(mooring_platform::ssh::validate_ssh_target)
+            .map(mooring_core::connection::validate_ssh_target)
             .transpose()?
             .map(|target| SshHop { target });
         let _lock = self.lock()?;
@@ -286,6 +255,21 @@ fn validate_name(name: &str) -> Result<String, String> {
 
 pub fn path_display(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+impl ConnectionRepository for Store {
+    fn list(&self) -> Result<Vec<Connection>, String> {
+        Store::list(self)
+    }
+    fn get(&self, id: &str) -> Result<Connection, String> {
+        Store::get(self, id)
+    }
+    fn add_connection(&self, new: NewConnection<'_>) -> Result<Connection, String> {
+        Store::add_connection(self, new)
+    }
+    fn remove(&self, id: &str) -> Result<(), String> {
+        Store::remove(self, id)
+    }
 }
 
 #[cfg(test)]

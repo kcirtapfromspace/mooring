@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+mooring-storage = { path = "../mooring-storage" }
 mooring-core = { path = "../mooring-core" }
 libc = "0.2"
 serde.workspace = true

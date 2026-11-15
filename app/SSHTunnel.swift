@@ -1,15 +1,28 @@
 import Foundation
 
+private final class TunnelErrorOutput: @unchecked Sendable {
+    private let lock = NSLock()
+    private var bytes = Data()
+    func append(_ data: Data) {
+        lock.lock(); defer { lock.unlock() }
+        bytes.append(data.prefix(max(0, 16_384 - bytes.count)))
+    }
+    var message: String {
+        lock.lock(); defer { lock.unlock() }
+        return String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 /// Runs `mooring connect ID` for saved connections that go through SSH.
 ///
 /// Rust owns the tunnel: SSH options, the 127.0.0.1 listener, the RFB check,
 /// timeouts, retries and teardown. This shell only starts that process, reads
 /// its JSON lines and asks it to stop. Rust also stops on its own when the
 /// session ends, or when this app exits for any reason.
-final class SSHTunnels {
+final class SSHTunnels: TunnelRunning {
     private var running: [String: Process] = [:]
     /// One JSON event from a tunnel, delivered on the main thread.
-    var onEvent: ((SavedMac, [String: Any]) -> Void)?
+    var onEvent: ((SavedMac, TunnelEvent) -> Void)?
     /// The tunnel process exited; delivered on the main thread after its last event.
     var onExit: ((SavedMac, Int32, String) -> Void)?
 
@@ -29,6 +42,18 @@ final class SSHTunnels {
         try process.run()
         running[mac.id] = process
         let reader = output.fileHandleForReading, errorReader = errors.fileHandleForReading
+        // Drain both pipes concurrently. Taking a prefix after reading all of
+        // stderr neither bounds memory nor prevents a full-pipe deadlock.
+        let errorOutput = TunnelErrorOutput(), errorDone = DispatchGroup()
+        errorDone.enter()
+        Thread.detachNewThread {
+            defer { errorDone.leave() }
+            while true {
+                let data = errorReader.availableData
+                if data.isEmpty { break }
+                errorOutput.append(data)
+            }
+        }
         Thread.detachNewThread { [weak self] in
             var buffer = Data()
             while true {
@@ -38,17 +63,28 @@ final class SSHTunnels {
                 while let newline = buffer.firstIndex(of: 0x0A) {
                     let line = buffer.subdata(in: buffer.startIndex..<newline)
                     buffer.removeSubrange(buffer.startIndex...newline)
-                    if let event = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] {
-                        DispatchQueue.main.async { self?.onEvent?(mac, event) }
+                    do {
+                        let event = try TunnelEvent.decode(line)
+                        DispatchQueue.main.async {
+                            guard self?.running[mac.id] === process else { return }
+                            self?.onEvent?(mac, event)
+                        }
+                    } catch {
+                        DispatchQueue.main.async {
+                            guard self?.running[mac.id] === process else { return }
+                            self?.onEvent?(mac, .failed(ConnectionFailure(kind: "invalid_event", message: "The Mooring command returned an invalid connection event.")))
+                            self?.stop(mac.id)
+                        }
                     }
                 }
                 // Events are small; a runaway line is dropped, not buffered.
                 if buffer.count > 262_144 { buffer.removeAll() }
             }
-            let message = String(decoding: errorReader.readDataToEndOfFile().prefix(16_384), as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
             process.waitUntilExit()
+            errorDone.wait()
+            let message = errorOutput.message
             DispatchQueue.main.async {
+                guard self?.running[mac.id] === process else { return }
                 self?.running[mac.id] = nil
                 self?.onExit?(mac, process.terminationStatus, message)
             }
@@ -56,7 +92,9 @@ final class SSHTunnels {
     }
 
     /// SIGTERM: Rust closes the viewer sockets, stops every ssh and exits.
-    func stop(_ id: String) { running[id]?.terminate() }
+    func stop(_ id: String) {
+        if let process = running[id], process.isRunning { process.terminate() }
+    }
 
     /// Called when the app quits. Waits briefly so teardown finishes first.
     func stopAll(wait: TimeInterval = 2) {

@@ -421,6 +421,175 @@ esac"#,
         }
     }
 
+    /// Ubuntu 18.04 with Unity on X11, as on the Jetson Nano: GDM puts
+    /// DISPLAY and XAUTHORITY in the user manager's environment, Unity owns
+    /// org.gnome.ScreenSaver, and there is no Hyprland or Omarchy.
+    struct FakeUnity {
+        fixture: Fixture,
+        runtime: PathBuf,
+        _turn: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl FakeUnity {
+        fn new(unity_locked: &str, screen_saver: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let turn = fake_host_turn();
+            let fixture = Fixture::new("unity");
+            let runtime = PathBuf::from(format!(
+                "/tmp/mooring-x11-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(runtime.join("1000/gdm")).unwrap();
+            let bin = fixture.0.join("bin");
+            fs::create_dir_all(&bin).unwrap();
+            let rt = runtime.display().to_string();
+            let tool = |name: &str, body: String| {
+                let path = bin.join(name);
+                fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            };
+            tool("id", "echo 1000".into());
+            tool("timeout", "shift 3; exec \"$@\"".into());
+            tool(
+                "loginctl",
+                r#"case "$1" in
+  list-sessions) printf '         1       1000 think            seat0            tty1\n      2683       1000 think\n' ;;
+  show-session)
+    sid=$2; shift 2; props=; value=
+    while [ $# -gt 0 ]; do case $1 in -p) props="$props $2"; shift 2 ;; --value) value=1; shift ;; *) shift ;; esac; done
+    for p in $props; do
+      case "$sid:$p" in
+        1:Id) v=1 ;; 1:Type) v=x11 ;; 1:Active) v=yes ;; 1:Name) v=think ;; 1:User) v=1000 ;;
+        1:LockedHint) v=no ;; 2683:Type) v=tty ;; 2683:Active) v=yes ;; *) v= ;;
+      esac
+      if [ -n "$value" ]; then echo "$v"; else echo "$p=$v"; fi
+    done ;;
+esac"#
+                    .into(),
+            );
+            tool(
+                "systemctl",
+                format!(
+                    "[ \"$1 $2\" = '--user show-environment' ] || exit 1\nprintf 'DISPLAY=:0\\nXAUTHORITY={rt}/1000/gdm/Xauthority\\nXDG_CURRENT_DESKTOP=Unity:Unity7:ubuntu\\nDBUS_SESSION_BUS_ADDRESS=unix:path={rt}/1000/bus\\nSSH_AUTH_SOCK=/run/user/1000/keyring/ssh\\nMOORING_TEST_SECRET=hunter2\\n'"
+                ),
+            );
+            let x = format!(
+                "[ \"$DISPLAY\" = :0 ] && [ \"$XAUTHORITY\" = '{rt}/1000/gdm/Xauthority' ] || exit 1"
+            );
+            tool(
+                "xset",
+                format!(
+                    "{x}\n[ \"$1\" = q ] && printf 'DPMS (Energy Star):\\n  Standby: 0    Suspend: 0    Off: 0\\n  DPMS is Disabled\\n'"
+                ),
+            );
+            tool(
+                "xrandr",
+                format!(
+                    "{x}\nprintf 'Screen 0: minimum 8 x 8, current 1920 x 1200, maximum 16384 x 16384\\nHDMI-0 disconnected primary (normal left inverted right x axis y axis)\\nDP-0 disconnected (normal left inverted right x axis y axis)\\n'"
+                ),
+            );
+            tool(
+                "gdbus",
+                format!(
+                    "[ \"$DBUS_SESSION_BUS_ADDRESS\" = 'unix:path={rt}/1000/bus' ] || exit 1\ncase \"$*\" in *com.canonical.Unity.Session.IsLocked*) echo '({unity_locked},)' ;; *org.gnome.ScreenSaver.GetActive*) echo '({screen_saver},)' ;; *) exit 1 ;; esac"
+                ),
+            );
+            tool(
+                "gsettings",
+                "[ \"$*\" = 'get org.gnome.desktop.screensaver lock-enabled' ] && echo false"
+                    .into(),
+            );
+            Self {
+                fixture,
+                runtime,
+                _turn: turn,
+            }
+        }
+
+        fn ssh(&self, shell: &str) -> SshOptions {
+            let dir = self.fixture.0.display();
+            self.fixture.fake_ssh(&format!(
+                "PATH='{dir}/bin':$PATH MOORING_RUNTIME_ROOT='{}' MOORING_OMARCHY_ROOT='{dir}/omarchy' exec {shell} -s",
+                self.runtime.display()
+            ))
+        }
+    }
+
+    impl Drop for FakeUnity {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.runtime);
+        }
+    }
+
+    #[test]
+    fn the_real_script_reads_an_x11_unity_session_without_hyprland() {
+        for shell in shells() {
+            for (locked, active, lock, title) in [
+                ("false", "false", LockState::Unlocked, "Unlocked"),
+                // As on the Jetson: the lock screen asks for a password while
+                // the screen saver reads inactive.
+                ("true", "false", LockState::Locked, "Locked"),
+                ("true", "true", LockState::Locked, "Locked: screen saver on"),
+                (
+                    "false",
+                    "true",
+                    LockState::Unlocked,
+                    "Unlocked: screen saver on",
+                ),
+            ] {
+                let host = FakeUnity::new(locked, active);
+                let status =
+                    probe_desktop(&route(), &host.ssh(shell), Duration::from_secs(10), &never)
+                        .unwrap_or_else(|error| panic!("{shell}: {error:?}"));
+                assert_eq!(status.session, SessionState::Found, "{shell}");
+                assert_eq!(
+                    (status.lock, status.title.as_str()),
+                    (lock, title),
+                    "{shell}"
+                );
+                assert_eq!(status.evidence, LockEvidence::UnityLockScreen, "{shell}");
+                assert_eq!(status.display, DisplayState::On, "{shell}");
+                assert_eq!(status.session_type.as_deref(), Some("x11"));
+                assert_eq!(status.desktop.as_deref(), Some("Unity:Unity7:ubuntu"));
+                assert_eq!(status.screen.as_deref(), Some("1920x1200"));
+                assert_eq!(status.monitors, Some(0));
+                assert_eq!((status.compositor, status.lock_screen), (None, None));
+                assert!(
+                    status
+                        .notes
+                        .iter()
+                        .all(|n| !n.contains("Hyprland") && !n.contains("Omarchy")),
+                    "{:?}",
+                    status.notes
+                );
+            }
+        }
+        // The environment is read, but only the values Mooring needs leave it.
+        let host = FakeUnity::new("false", "false");
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-s")
+            .env(
+                "PATH",
+                format!("{}/bin:/usr/bin:/bin", host.fixture.0.display()),
+            )
+            .env("MOORING_RUNTIME_ROOT", &host.runtime)
+            .stdin(fs::File::open(write_script(&host.fixture.0)).unwrap())
+            .output()
+            .unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains("x11.desktop=Unity:Unity7:ubuntu\n"), "{text}");
+        for private in ["hunter2", "SSH_AUTH_SOCK", "XAUTHORITY", "Xauthority"] {
+            assert!(!text.contains(private), "{private} printed: {text}");
+        }
+    }
+
+    fn write_script(dir: &Path) -> PathBuf {
+        let path = dir.join("probe.sh");
+        fs::write(&path, DESKTOP_PROBE_SCRIPT).unwrap();
+        path
+    }
+
     #[test]
     fn another_user_cannot_read_the_session() {
         for shell in shells() {

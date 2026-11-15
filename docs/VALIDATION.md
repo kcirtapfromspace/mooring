@@ -637,3 +637,38 @@ The capability probe and synthetic encode probe are separate developer tools. Th
 ## Not yet validated
 
 Second-Mac installation, downloaded-app first launch, end-to-end remote login, Apple's actual response to both mode URLs (including opposite remembered modes), real Accessibility session matching/full screen/reconnect, login registration, travel/VPN transitions, live capture/network/decode, a native session between two Macs (pairing, permissions, input, lock/sleep handling and legibility), click-to-photon latency, sustained 4K60, audio/clipboard integration, and headless virtual displays. Apple provides remote authentication, negotiated display mode, and rendering.
+
+## Application composition refactor — November 14, 2026
+
+Validated on `refactor/composable-domain`, based on the marketing branch plus a
+separate baseline snapshot of the existing X11 changes. The original marketing
+and X11 worktrees were preserved. See [ARCHITECTURE.md](ARCHITECTURE.md) for domain
+ownership, application ports and the checked local build graph.
+
+| Check | Result |
+| --- | --- |
+| `./scripts/ci-local.sh` | Passed: formatting, strict Clippy, all 352 Rust tests, all native targets, application workflow tests, full arm64 bundle build, packaged CLI integration |
+| Application workflow target | Passed: desktop/timeout race, stale credential callback, cancellation, explicit sign-in submission, retry budget/cancellation, viewer/tunnel cleanup, credential-before-metadata removal, identity preservation, typed event decoding |
+| Real subprocess adapter | Passed: 100 KB stderr drained concurrently without blocking stdout; retained diagnostic bounded to 16 KiB; typed events delivered before exit |
+| Native media | Passed: synthetic hardware H.264/HEVC encode/decode, Opus, bounded queues and recovery; not a real desktop performance benchmark |
+| `./scripts/test-update-local.sh` | Passed: previous app installed/relaunched new app through redirected signed loopback feed; tampered archive and modified signed feed refused |
+| Live Omarchy SSH/VNC check | All 14 cases passed, including RSA-AES credential request without sending credentials and teardown after interruption/process death |
+| Live Jetson/X11 SSH/VNC check | All 14 cases passed, including SSH-to-loopback no-password route, read-only Unity status, error handling and orphan cleanup |
+| `./scripts/package-release.sh 0.3.0` | Passed: extracted ZIP signature, arm64 binaries, macOS 14 floor, package metadata and SHA-256 verification |
+| Source/build manifest checks | Passed: every app Swift source has one owning group and every non-entry-point source is compiled by the workflow target; staged patch has no whitespace errors |
+
+The reviewed toolchain is Rust 1.99.0, Apple Swift 6.4.2, Xcode build 27B52 and
+the macOS 27.2 SDK, targeting arm64/macOS 14. The pipeline selects this Xcode per
+process, fixing a mismatch with this Mac's global Command Line Tools SDK.
+
+Updater validation now generates an ephemeral test seed in a private temporary
+directory, pins its public key only in isolated test app copies, signs the
+loopback fixtures, and deletes the seed on exit. It never exports, changes or
+requires production Keychain material. This was verified after the original
+test found no key under its expected production account, `dev.maclink`.
+Production release signing/notarization and feed publication were not performed.
+
+The packaged artifact is an ad hoc development build. Automated local tests and
+credential-free live SSH checks are distinct from interactive two-Mac pairing,
+physical capture/input permission, sleep/wake and real desktop acceptance. No
+remote display changes or input were made by the live checks in this run.

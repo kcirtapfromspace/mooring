@@ -46,7 +46,7 @@ final class NativeTransport: @unchecked Sendable {
     }
     /// Listens for Macs approved in `devices`, and for the old code while that
     /// store still accepts it.
-    static func listen(identity: NativeHostIdentity, devices: NativeDeviceStore,
+    static func listen(identity: NativeHostIdentity, devices: any NativeDeviceRepository,
                        bindAddress: String = "0.0.0.0", port: UInt16 = 45900) throws -> NativeTransport {
         try identity.validate()
         var handle: UInt64 = 0
@@ -87,6 +87,24 @@ final class NativeTransport: @unchecked Sendable {
                         deviceName: String = NativeDeviceKey.computerName,
                         port: UInt16 = 45900) throws -> (NativeTransport, Mode, String) {
         guard deviceKey.privateKey.count == 32 else { throw NativeSessionError(message: "This Mac's device key is invalid. Pair the Macs again.") }
+        if let ticket = NativeInternetLinks.shared.route(for: code.peerID) {
+            var handle: UInt64 = 0
+            var mode: UInt8 = 0
+            var raw = code.raw
+            let status = try NativeInternetLinks.shared.withIdentity { seed in
+                deviceKey.privateKey.withUnsafeBytes { key in
+                    ml_session_connect_internet(ticket, seed, &raw, key.bindMemory(to: UInt8.self).baseAddress!, deviceName,
+                                                15_000, &handle, &mode)
+                }
+            }
+            if status == ML_SESSION_INVALID {
+                throw NativeSessionError(message: "This internet locator is invalid or expired. Ask for a new locator or use the saved network address.", status: status)
+            }
+            try check(status)
+            guard let connected = Mode(rawValue: mode) else { _ = ml_session_close(handle); throw NativeSessionError(message: "Invalid internet connection mode.") }
+            // The loopback proxy is transient and must never enter saved peer addresses.
+            return (NativeTransport(handle, receivesVideo: true), connected, code.address)
+        }
         var handle: UInt64 = 0
         var mode: UInt8 = 0
         var used = [CChar](repeating: 0, count: Int(ML_TEXT_CAPACITY))
@@ -104,7 +122,7 @@ final class NativeTransport: @unchecked Sendable {
     static let pinPort = UInt16(ML_PIN_DEFAULT_PORT)
     /// A pairing listener for this Mac's identity: it approves Macs into
     /// `devices` with a PIN, takes nothing else, and never starts a session.
-    static func listenForPIN(identity: NativeHostIdentity, devices: NativeDeviceStore,
+    static func listenForPIN(identity: NativeHostIdentity, devices: any NativeDeviceRepository,
                              bindAddress: String = "0.0.0.0", port: UInt16 = pinPort) throws -> NativeTransport {
         try identity.validate()
         var handle: UInt64 = 0
@@ -159,6 +177,8 @@ final class NativeTransport: @unchecked Sendable {
         try check(status)
         return (NativePairingCode(raw: raw), nativeString(used))
     }
+    var listenerID: UInt64 { id }
+    var transportPath: Int32 { ml_session_transport_path(id) }
     var listeningPort: UInt16 { ml_session_listener_port(id) }
     /// 4 or 5; capabilities are exchanged only in protocol 5.
     var protocolVersion: Int { Int(max(0, ml_session_protocol_version(id))) }

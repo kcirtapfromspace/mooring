@@ -1,7 +1,11 @@
 """Live, credential-free check of `mooring connect` through an SSH tunnel.
 
 Usage: python3 scripts/test-ssh-tunnel-live.py MOORING_BINARY SSH_TARGET \
-           [--user-target USER@HOST] [--expect-types 129,5,30] [--expect-version 003.008]
+           [--user-target USER@HOST] [--expect-types 129,5,30] [--expect-version 003.008] \
+           [--server-process wayvnc|x11vnc] [--ssh-slack SECONDS] [--virtual-screen]
+
+For x11vnc with no VNC password on an X11 desktop, such as the Jetson Nano:
+  --expect-types 1 --server-process x11vnc --ssh-slack 5 [--virtual-screen]
 
 This is a live check against a real SSH host and VNC server, separate from the
 local CI tests. It never signs in: it reads the RFB greeting and the offered
@@ -33,6 +37,11 @@ parser.add_argument("--expect-types", default="129,5")
 parser.add_argument("--expect-version", default="003.008")
 parser.add_argument("--virtual-screen", action="store_true",
                     help="also add and remove a virtual screen on the desktop (changes it briefly)")
+parser.add_argument("--server-process", default="wayvnc",
+                    help="the VNC server's process name, checked to survive each test")
+parser.add_argument("--ssh-slack", type=float, default=0.0,
+                    help="seconds added to time limits for a host whose sshd is slow to accept "
+                         "(the Jetson Nano takes about 3.5 s)")
 options = parser.parse_args()
 binary = str(Path(options.binary).resolve())
 expected_types = [int(value) for value in options.expect_types.split(",")]
@@ -166,7 +175,7 @@ with tempfile.TemporaryDirectory(prefix="mooring-ssh-live-") as directory:
         assert status["lock"] in ("locked", "unlocked"), status
         assert status["evidence"] != "none", status
         assert status["display"] in ("on", "off"), status
-        assert elapsed < 5, f"desktop-status took {elapsed:.1f}s"
+        assert elapsed < 5 + options.ssh_slack, f"desktop-status took {elapsed:.1f}s"
         record(label, f"{status['lock']}, display {status['display']} by {status['evidence']} "
                       f"(user {status.get('session_user')}) in {elapsed:.2f}s: {status['message']}")
         return status
@@ -174,23 +183,37 @@ with tempfile.TemporaryDirectory(prefix="mooring-ssh-live-") as directory:
 
     # 1c. Mooring's own VNC sign-in handshake, stopped at the credential
     # request: RSA-AES keys, hashes and the AES-EAX layer all match the
-    # server's, and no credentials are sent, so no password is checked.
-    def wayvnc_pid():
+    # server's, and no credentials are sent, so no password is checked. A
+    # server with no VNC password (x11vnc -nopw) is reached through SSH on its
+    # loopback address, so choosing no sign-in is the whole check.
+    server = options.server_process
+    def server_pid():
         found = subprocess.run(["/usr/bin/ssh", "-o", "BatchMode=yes", "--", options.target,
-                                "pgrep -x wayvnc"], capture_output=True, text=True, timeout=30)
+                                f"pgrep -x {shlex.quote(server)}"], capture_output=True, text=True,
+                               timeout=30)
         return found.stdout.strip()
-    pid_before = wayvnc_pid()
+    pid_before = server_pid()
     result, elapsed = run(directory, "vnc-check", connection)
     vnc = json.loads(result.stdout)
     assert vnc["status"] == "ok" and vnc["credentials_sent"] is False, vnc
-    assert vnc["negotiated"]["security"] == "rsa_aes256", vnc
-    assert vnc["credentials_requested"]["username_needed"] is True, vnc
-    assert vnc["credentials_requested"]["server_key_bits"] >= 2048, vnc
-    pid_after = wayvnc_pid()
-    assert pid_before and pid_before == pid_after, f"wayvnc restarted: {pid_before} -> {pid_after}"
-    record("vnc-check", f"{vnc['negotiated']['security']} with a {vnc['credentials_requested']['server_key_bits']}-bit "
-                        f"server key reached the credential request in {elapsed:.2f}s; none sent; wayvnc pid "
-                        f"{pid_after} unchanged")
+    assert vnc["negotiated"]["route"] == "ssh_to_loopback", vnc
+    if 129 in expected_types or 5 in expected_types:
+        assert vnc["negotiated"]["security"] in ("rsa_aes256", "rsa_aes128"), vnc
+        assert vnc["credentials_requested"]["username_needed"] is True, vnc
+        assert vnc["credentials_requested"]["server_key_bits"] >= 2048, vnc
+        detail = (f"{vnc['negotiated']['security']} with a {vnc['credentials_requested']['server_key_bits']}-bit "
+                  "server key reached the credential request")
+    elif 1 in expected_types:
+        assert vnc["negotiated"]["security"] == "none", vnc
+        assert vnc["credentials_requested"] is None, vnc
+        detail = "no VNC password, chosen only through SSH to loopback"
+    else:
+        assert vnc["negotiated"]["security"] == "vnc_password", vnc
+        assert vnc["credentials_requested"]["username_needed"] is False, vnc
+        detail = "the VNC password challenge arrived inside SSH"
+    pid_after = server_pid()
+    assert pid_before and pid_before == pid_after, f"{server} restarted: {pid_before} -> {pid_after}"
+    record("vnc-check", f"{detail} in {elapsed:.2f}s; none sent; {server} pid {pid_after} unchanged")
     if options.user_target:
         same = desktop_status(other, "desktop-status user@host")
         assert same["session_user"] == first_desktop["session_user"]
@@ -268,7 +291,7 @@ with tempfile.TemporaryDirectory(prefix="mooring-ssh-live-") as directory:
         assert code == 1 and final["event"] == "failed", final
         error = final["error"]
         assert error["kind"] == kind, error
-        assert elapsed < limit, f"{name} took {elapsed:.1f}s"
+        assert elapsed < limit + options.ssh_slack, f"{name} took {elapsed:.1f}s"
         assert not any(e.get("event") == "ready" for e in tunnel.events), tunnel.events
         stderr = tunnel.process.stderr.read().strip()
         assert stderr.startswith("Mooring: "), stderr
@@ -301,13 +324,23 @@ with tempfile.TemporaryDirectory(prefix="mooring-ssh-live-") as directory:
         result, elapsed = run(directory, "desktop-status", connection, env=env, expect_ok=False)
         refused = json.loads(result.stdout)
         assert result.returncode == 1 and refused["error"]["kind"] == "authentication_failed", refused
-        assert elapsed < 8, f"desktop check with no key took {elapsed:.1f}s"
+        assert elapsed < 8 + options.ssh_slack, f"desktop check with no key took {elapsed:.1f}s"
         record("desktop missing key", f"authentication_failed in {elapsed:.2f}s")
 
     # 6. The virtual screen: in place while connected, restored afterwards,
     #    including when Mooring is killed outright. It changes the desktop's
     #    screens for a few seconds, then puts them back.
+    x11 = first_desktop.get("session_type") == "x11"
+
     def screen_state():
+        if x11:
+            # The desktop user's own display, as the Jetson's x11vnc uses it.
+            script = ("DISPLAY=:0 XAUTHORITY=/run/user/$(id -u)/gdm/Xauthority xrandr --current "
+                      "| sed -n 's/.* current \\([0-9]*\\) x \\([0-9]*\\),.*/\\1x\\2/p'; "
+                      "ls /run/user/$(id -u) | grep -c mooring")
+            found = subprocess.run(["/usr/bin/ssh", "-o", "BatchMode=yes", "--", options.target, script],
+                                   capture_output=True, text=True, timeout=30).stdout.split("\n")
+            return found[0].strip(), found[1].strip()
         user = shlex.quote(first_desktop["session_user"])
         script = (f"uid=$(id -u {user}); sig=$(ls -t /run/user/$uid/hypr | head -1); "
                   f"T() {{ runuser -u {user} -- env XDG_RUNTIME_DIR=/run/user/$uid HYPRLAND_INSTANCE_SIGNATURE=$sig \"$@\"; }}; "
@@ -319,11 +352,17 @@ with tempfile.TemporaryDirectory(prefix="mooring-ssh-live-") as directory:
     if options.virtual_screen:
         before_monitors, before_capture = screen_state()
         for kill in (False, True):
-            tunnel = Tunnel(directory, connection, "--wait-seconds", "8", "--screen", "1920x1200@1")
+            tunnel = Tunnel(directory, connection, "--wait-seconds", "8", "--screen",
+                            "2880x1800@2" if x11 else "1920x1200@1")
             ready = tunnel.until("virtual_screen", timeout=30)
             assert ready["state"] == "ready", ready
             monitors, capture = screen_state()
-            assert "MOORING-1" in monitors and capture == "MOORING-1", (monitors, capture)
+            if x11:
+                # Resized in points: a 2880x1800 Retina picture is 1440x900.
+                assert ready["kind"] == "x11_resize" and monitors == "1440x900", (ready, monitors)
+                assert ready["previous"] == before_monitors, ready
+            else:
+                assert "MOORING-1" in monitors and capture == "MOORING-1", (monitors, capture)
             if kill:
                 tunnel.process.kill()
                 tunnel.process.wait(timeout=5)
@@ -333,8 +372,13 @@ with tempfile.TemporaryDirectory(prefix="mooring-ssh-live-") as directory:
                 names = [event.get("state") for event in tunnel.events if event["event"] == "virtual_screen"]
                 assert names == ["ready", "restored"], tunnel.events
             assert screen_state() == (before_monitors, before_capture), screen_state()
-        record("virtual screen", f"MOORING-1 1920x1200 captured while connected; {before_monitors} and "
-                                 f"{before_capture} restored after a clean stop and after SIGKILL")
+        if x11:
+            record("virtual screen", f"X11 screen resized to 1440x900 while connected; {before_monitors} "
+                                     "restored, with no state left, after a clean stop and after SIGKILL")
+        else:
+            record("virtual screen", f"MOORING-1 1920x1200 captured while connected; {before_monitors} and "
+                                     f"{before_capture} restored after a clean stop and after SIGKILL")
+        assert server_pid() == pid_after, f"{server} restarted during the virtual screen"
 
     leftovers = [subprocess.run(["/usr/bin/pgrep", "-fl", "--", pattern], capture_output=True,
                                 text=True).stdout.strip()

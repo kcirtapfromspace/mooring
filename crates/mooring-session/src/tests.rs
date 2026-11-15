@@ -3652,3 +3652,232 @@ fn typed_pins_normalize_across_the_abi() {
         "a malformed PIN never reaches the network"
     );
 }
+
+#[cfg(feature = "internet")]
+#[test]
+fn internet_bridge_keeps_noise_pairing_and_does_not_report_loopback_as_network_rtt() {
+    internet_noise_fixture(c"", false, 1);
+}
+#[cfg(feature = "internet")]
+#[test]
+fn forced_relay_preserves_native_noise_authentication() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let relay = runtime.block_on(async {
+        let mut config = iroh_relay::server::ServerConfig::default();
+        config.relay = Some(iroh_relay::server::RelayConfig::new((
+            std::net::Ipv4Addr::LOCALHOST,
+            0,
+        )));
+        iroh_relay::server::Server::spawn(config).await.unwrap()
+    });
+    let url = CString::new(format!("http://{}", relay.http_addr().unwrap())).unwrap();
+    internet_noise_fixture(&url, true, 2);
+    drop(relay);
+}
+#[cfg(feature = "internet")]
+fn internet_noise_fixture(relay: &std::ffi::CStr, relay_only: bool, path: i32) {
+    use crate::internet_ffi::*;
+    ml_capabilities_set(TEST_CAPABILITIES);
+    let host = device_host(false);
+    let code = host.one_time_code();
+    let (device, _) = device_key();
+    let (mut host_key, mut client_key) = ([0u8; 32], [0u8; 32]);
+    assert_eq!(
+        unsafe { ml_internet_generate_identity(host_key.as_mut_ptr()) },
+        0
+    );
+    assert_eq!(
+        unsafe { ml_internet_generate_identity(client_key.as_mut_ptr()) },
+        0
+    );
+    let mut client_id = [0 as c_char; 65];
+    assert_eq!(
+        unsafe {
+            ml_internet_public_id(client_key.as_ptr(), client_id.as_mut_ptr(), client_id.len())
+        },
+        0
+    );
+    let mut ticket = [0 as c_char; 8193];
+    assert_eq!(
+        unsafe {
+            ml_internet_listen(
+                host.listener.0,
+                host_key.as_ptr(),
+                client_id.as_ptr(),
+                relay.as_ptr(),
+                u8::from(relay_only),
+                ticket.as_mut_ptr(),
+                ticket.len(),
+            )
+        },
+        0
+    );
+    // This fixture runs both peers on one Mac. Use the bound UDP port through
+    // loopback so local firewall/VPN routing cannot affect the protocol test.
+    let mut locator = mooring_connectivity::Ticket::parse(
+        &text(&ticket),
+        mooring_connectivity::blocking::unix_seconds().unwrap(),
+    )
+    .unwrap();
+    if !relay_only {
+        let port = locator.endpoint.ip_addrs().next().unwrap().port();
+        locator.endpoint.addrs.clear();
+        locator.endpoint = locator.endpoint.with_ip_addr(std::net::SocketAddr::from((
+            std::net::Ipv4Addr::LOCALHOST,
+            port,
+        )));
+    } else {
+        assert_eq!(locator.endpoint.ip_addrs().count(), 0);
+    }
+    let locator = CString::new(locator.encode().unwrap()).unwrap();
+    let ((status, viewer, mode), mut results) = exchange(host.listener.0, || {
+        let (mut id, mut mode) = (0, 0);
+        let status = unsafe {
+            ml_session_connect_internet(
+                locator.as_ptr(),
+                client_key.as_ptr(),
+                &code,
+                device.as_ptr(),
+                c"Fixture".as_ptr(),
+                15_000,
+                &mut id,
+                &mut mode,
+            )
+        };
+        (status, (status == 0).then_some(Owned(id)), mode)
+    });
+    assert_eq!((status, mode, statuses(&results)), (0, MODE_PAIR, vec![0]));
+    let viewer = viewer.unwrap();
+    let sharing = results.pop().unwrap().unwrap();
+    assert_eq!(hello(viewer.0), TEST_CAPABILITIES);
+    assert_eq!(hello(sharing.0), TEST_CAPABILITIES);
+    assert_eq!(ml_session_transport_path(viewer.0), path);
+    assert_eq!(ml_session_transport_path(sharing.0), 3);
+    assert!(session(viewer.0).unwrap().send_queue().is_err());
+    assert!(session(sharing.0).unwrap().send_queue().is_err());
+    assert_eq!(
+        send_control(
+            viewer.0,
+            &control(crate::control::ControlKind::Ping as u8, 123)
+        ),
+        0
+    );
+    let mut buffer = [0u8; 1024];
+    let (status, message) = typed(sharing.0, &mut buffer, 3000);
+    assert_eq!(
+        (status, message.kind, message.control.ping_id),
+        (0, CONTROL, 123)
+    );
+    // The app uses an already paired device, not a fresh one-time code.
+    let mut saved = empty_code();
+    assert_eq!(unsafe { ml_pairing_device(&code, &mut saved) }, 0);
+    let ((status, id, mode), mut established) = exchange(host.listener.0, || {
+        let (mut id, mut mode) = (0, 0);
+        let status = unsafe {
+            ml_session_connect_internet(
+                locator.as_ptr(),
+                client_key.as_ptr(),
+                &saved,
+                device.as_ptr(),
+                c"Fixture".as_ptr(),
+                5000,
+                &mut id,
+                &mut mode,
+            )
+        };
+        (status, id, mode)
+    });
+    assert_eq!(
+        (status, mode, statuses(&established)),
+        (0, MODE_DEVICE, vec![0])
+    );
+    let reconnected = Owned(id);
+    let accepted = established.pop().unwrap().unwrap();
+    assert_eq!(hello(reconnected.0), TEST_CAPABILITIES);
+    assert_eq!(hello(accepted.0), TEST_CAPABILITIES);
+    drop(reconnected);
+    drop(accepted);
+    // A wrong pinned Noise identity must still fail, with otherwise valid
+    // saved-device authentication. No consumed one-time secret is involved.
+    let another_host = host_code(&identity().1, &[7; 32], PAIRING_ONE_TIME);
+    let mut wrong = empty_code();
+    assert_eq!(unsafe { ml_pairing_device(&another_host, &mut wrong) }, 0);
+    let ((status, out), rejected) = exchange(host.listener.0, || {
+        let (mut id, mut mode) = (99, 99);
+        let status = unsafe {
+            ml_session_connect_internet(
+                locator.as_ptr(),
+                client_key.as_ptr(),
+                &wrong,
+                device.as_ptr(),
+                c"Fixture".as_ptr(),
+                5000,
+                &mut id,
+                &mut mode,
+            )
+        };
+        (status, id)
+    });
+    assert_ne!(status, 0);
+    assert_eq!(out, 0);
+    assert!(
+        !rejected.is_empty() && rejected.iter().all(|r| r.is_err()),
+        "{status}: {:?}",
+        statuses(&rejected)
+    );
+    drop(viewer);
+    drop(sharing);
+    host_key.fill(0);
+    client_key.fill(0);
+}
+
+#[test]
+fn internet_abi_failures_clear_outputs() {
+    use crate::internet_ffi::*;
+    let (mut id, mut mode) = (123, 123);
+    assert_ne!(
+        unsafe {
+            ml_session_connect_internet(
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                100,
+                &mut id,
+                &mut mode,
+            )
+        },
+        0
+    );
+    assert_eq!((id, mode), (0, 0));
+    let mut text = [1 as c_char; 65];
+    assert_ne!(
+        unsafe { ml_internet_public_id(ptr::null(), text.as_mut_ptr(), text.len()) },
+        0
+    );
+    assert_eq!(text[0], 0);
+    assert_ne!(
+        unsafe {
+            ml_internet_listen(
+                0,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                0,
+                text.as_mut_ptr(),
+                text.len(),
+            )
+        },
+        0
+    );
+    assert_eq!(text[0], 0);
+    assert_eq!(
+        ml_internet_available(),
+        u8::from(cfg!(feature = "internet"))
+    );
+}

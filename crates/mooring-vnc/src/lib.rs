@@ -2,7 +2,10 @@
 //! Macs, such as wayvnc on Linux.
 //!
 //! - Sign-in: RSA-AES (security types 129 and 5, as wayvnc and TigerVNC
-//!   implement them), or none when the server asks for none. Apple
+//!   implement them) whenever the server offers it. Only through Mooring's
+//!   SSH tunnel to the server's own loopback address ([`Route`]): no sign-in
+//!   (1), where the SSH key is the sign-in, or the classic VNC password (2),
+//!   as x11vnc, vino and TigerVNC offer on Ubuntu 18.04. Apple
 //!   Diffie-Hellman (30) is never chosen: it only protects the password, and
 //!   wayvnc 0.10.2 with neatvnc 1.0.3 aborts when a client selects it.
 //! - The password is used once, for the attempt the person started, and is
@@ -10,8 +13,8 @@
 //!   attempt is never retried automatically. [`SignInGuard`] stops further
 //!   attempts after repeated failures: a brake on guessing that stays below
 //!   common account lockouts.
-//! - Picture: Raw, CopyRect and ZRLE into a 32-bit BGRX framebuffer, plus
-//!   desktop resizes. Input: X keysyms, pointer buttons and scrolling, with
+//! - Picture: Tight (with JPEG at quality level 7), ZRLE, CopyRect and Raw
+//!   into a 32-bit BGRX framebuffer, plus desktop resizes. Input: X keysyms, pointer buttons and scrolling, with
 //!   every held key and button released when the session ends.
 //! - Every length the server sends is bounded before memory is allocated.
 //!
@@ -25,12 +28,13 @@ pub mod keysym;
 pub mod proto;
 pub mod session;
 pub mod stream;
+pub mod tight;
 pub mod zrle;
 
 #[cfg(test)]
 mod fake_server;
 
-pub use auth::{Credentials, SecurityKind};
+pub use auth::{Credentials, Route, SecurityKind, SignInNeeds};
 pub use framebuffer::{Framebuffer, Rect};
 pub use guard::{SignInDecision, SignInGuard};
 pub use session::{Session, SessionConfig, SessionError, SessionErrorKind, SessionEvent};

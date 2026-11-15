@@ -25,12 +25,12 @@ done
 if [ -z "$sid" ]; then
   echo "session=none"; echo "end"; exit 0
 fi
-uid= user=
+uid= user= stype=
 for line in $($T loginctl show-session "$sid" -p Id -p Type -p Active -p Name -p User -p LockedHint -p Desktop 2>/dev/null); do
   case "$line" in
     Id=*|Type=*|Active=*|Name=*|User=*|LockedHint=*|Desktop=*) echo "session.$line" ;;
   esac
-  case "$line" in User=*) uid=${line#User=} ;; Name=*) user=${line#Name=} ;; esac
+  case "$line" in User=*) uid=${line#User=} ;; Name=*) user=${line#Name=} ;; Type=*) stype=${line#Type=} ;; esac
 done
 if [ "$me" != "$uid" ] && { [ "$me" != 0 ] || ! command -v runuser >/dev/null 2>&1; }; then
   echo "session.readable=no"; echo "end"; exit 0
@@ -63,5 +63,66 @@ omarchy=${MOORING_OMARCHY_ROOT:-/usr/share/omarchy}
 if command -v omarchy-shell >/dev/null 2>&1 && [ -f "$omarchy/shell/shell.qml" ]; then
   status=$(as_user env OMARCHY_PATH="$omarchy" omarchy-shell lock status 2>/dev/null | grep '^{' | tail -n 1 | head -c 4000)
   if [ -n "$status" ]; then printf 'omarchy.lock=%s\n' "$status"; else echo "omarchy=unreadable"; fi
+fi
+# An X11 desktop, such as Unity or GNOME on Ubuntu 18.04: its desktop name,
+# display power, screen size, monitors in use and screen saver. DISPLAY and
+# XAUTHORITY come from the session's own environment, as its user manager
+# holds it; only the values below are printed, never the environment itself.
+if [ "$stype" = x11 ]; then
+  envs=
+  command -v systemctl >/dev/null 2>&1 && envs=$(as_user systemctl --user show-environment 2>/dev/null)
+  value() { printf '%s\n' "$envs" | sed -n "s/^$1=//p" | head -n 1; }
+  dpy=$(value DISPLAY) xauth=$(value XAUTHORITY) desk=$(value XDG_CURRENT_DESKTOP) bus=$(value DBUS_SESSION_BUS_ADDRESS)
+  [ -n "$dpy" ] || dpy=$($T loginctl show-session "$sid" -p Display --value 2>/dev/null)
+  if [ -z "$dpy" ] && [ "$(ls /tmp/.X11-unix 2>/dev/null | wc -l)" -eq 1 ]; then
+    dpy=:$(ls /tmp/.X11-unix | sed -n 's/^X\([0-9]*\)$/\1/p')
+  fi
+  if [ -z "$xauth" ]; then
+    home=$(getent passwd "$user" 2>/dev/null | cut -d: -f6)
+    for file in "$runtime/gdm/Xauthority" "$home/.Xauthority"; do
+      [ -f "$file" ] && { xauth=$file; break; }
+    done
+  fi
+  [ -n "$bus" ] || { [ -S "$runtime/bus" ] && bus=unix:path=$runtime/bus; }
+  printf 'x11.desktop=%s\n' "$desk"
+  printf 'x11.display=%s\n' "$dpy"
+  x() { as_user env DISPLAY="$dpy" XAUTHORITY="$xauth" "$@"; }
+  if [ -n "$dpy" ] && command -v xset >/dev/null 2>&1; then
+    q=$(x xset q 2>/dev/null)
+    dpms=$(printf '%s\n' "$q" | sed -n 's/^ *Monitor is //p' | head -n 1)
+    [ -n "$dpms" ] || dpms=$(printf '%s\n' "$q" | sed -n 's/^ *DPMS is //p' | head -n 1)
+    [ -n "$dpms" ] && printf 'x11.dpms=%s\n' "$dpms"
+  fi
+  if [ -n "$dpy" ] && command -v xrandr >/dev/null 2>&1 && screen=$(x xrandr --current 2>/dev/null); then
+    printf '%s\n' "$screen" | sed -n 's/^Screen [0-9]*:.* current \([0-9]*\) x \([0-9]*\),.*/x11.screen=\1x\2/p' | head -n 1
+    # Monitors in use: connected outputs showing part of the screen.
+    printf 'x11.monitors=%s\n' "$(printf '%s\n' "$screen" | grep -c '^[^ ]* connected .*[0-9]x[0-9]*+[0-9]*+[0-9]')"
+  fi
+  if [ -n "$bus" ] && command -v gdbus >/dev/null 2>&1; then
+    call() { as_user env DBUS_SESSION_BUS_ADDRESS="$bus" gdbus call --session "$@" 2>/dev/null; }
+    # Unity 7 draws its own lock screen and answers whether it is locked; it
+    # sets neither logind's LockedHint nor a screen saver state that tracks
+    # the lock.
+    locked=$(call --dest com.canonical.Unity --object-path /com/canonical/Unity/Session \
+      --method com.canonical.Unity.Session.IsLocked)
+    case "$locked" in
+      *true*) echo "x11.unity_locked=true" ;;
+      *false*) echo "x11.unity_locked=false" ;;
+    esac
+    for name in gnome cinnamon mate; do
+      active=$(call --dest "org.$name.ScreenSaver" --object-path "/org/$name/ScreenSaver" \
+        --method "org.$name.ScreenSaver.GetActive")
+      case "$active" in
+        *true*) printf 'x11.screensaver=org.%s.ScreenSaver true\n' "$name" ;;
+        *false*) printf 'x11.screensaver=org.%s.ScreenSaver false\n' "$name" ;;
+        *) continue ;;
+      esac
+      if [ "$name" = gnome ] && command -v gsettings >/dev/null 2>&1; then
+        enabled=$(as_user env DBUS_SESSION_BUS_ADDRESS="$bus" gsettings get org.gnome.desktop.screensaver lock-enabled 2>/dev/null)
+        case "$enabled" in true|false) printf 'x11.lock_enabled=%s\n' "$enabled" ;; esac
+      fi
+      break
+    done
+  fi
 fi
 echo "end"
