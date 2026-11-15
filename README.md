@@ -4,9 +4,9 @@
 
 **Your other desktop. On your Mac.**
 
-Native remote desktop for Macs and Linux. Apple silicon, macOS 14+, no Mooring account. MIT source.
+Control another Mac or Linux desktop from your Mac. Free and open source. Apple silicon, macOS 14+, no Mooring account.
 
-**[Download](https://github.com/kcirtapfromspace/mooring/releases/latest)** · **[Watch the demo](https://kcirtapfromspace.github.io/mooring/#demo)** · **[Setup](docs/TESTING.md)**
+**[Download](https://github.com/kcirtapfromspace/mooring/releases/latest)** · **[Watch the demo](https://kcirtapfromspace.github.io/mooring/#demo)** · **[Get started](docs/GETTING-STARTED.md)**
 
 [![Mooring Mac session](site/assets/demo-poster.jpg)](https://kcirtapfromspace.github.io/mooring/#demo)
 

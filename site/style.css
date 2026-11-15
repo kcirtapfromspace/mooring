@@ -72,11 +72,11 @@ h1 em { display:inline-block; margin-top:15px; color:var(--teal); font:italic 40
 .section-label { display:flex; align-items:center; gap:22px; font:600 11px/1.5 var(--mono); text-transform:uppercase; margin-bottom:44px; }
 .section-label>span:first-child { background:var(--ink); color:var(--paper); padding:8px 12px; }
 .divider { height:3px; flex:1; background:var(--ink); }
-.features,.internet,.architecture { padding-bottom:84px; }
+.features,.setup,.questions { padding-bottom:84px; }
 .section-grid { display:grid; grid-template-columns:1fr 1fr; gap:80px; align-items:center; }
 h2 { font:800 clamp(38px,4.5vw,60px)/1.01 var(--body); letter-spacing:-2.8px; margin:0 0 24px; }
 h2 em { color:var(--teal); font:italic 400 1.04em/1.05 Georgia,"Times New Roman",serif; letter-spacing:-2.5px; }
-.section-grid>div>p,.architecture-row p { max-width:400px; color:var(--muted); font-size:15px; margin:0 0 23px; }
+.section-grid>div>p { max-width:400px; color:var(--muted); font-size:15px; margin:0 0 23px; }
 .feature-chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:28px; }
 .feature-chips span { border:1.5px solid var(--ink); padding:6px 10px; font:11px/1.5 var(--mono); background:var(--accent); }
 .feature-chips span:nth-child(2) { background:var(--coral); }
@@ -94,25 +94,20 @@ h2 em { color:var(--teal); font:italic 400 1.04em/1.05 Georgia,"Times New Roman"
 .plus::after { height:14px; width:2px; top:0; left:6px; transition:transform .15s; }
 details[open] .plus::after { display:none; }
 .accordion p { font-size:14px; color:var(--muted); max-width:420px; margin:0; padding:0 20px 24px; }
-.badge { border:1.5px solid var(--ink); padding:5px 9px; font:10px/1.5 var(--mono); background:var(--coral); }
 .text-link { font:600 12px/1.5 var(--mono); display:inline-flex; align-items:center; gap:12px; padding-bottom:5px; border-bottom:2px solid currentColor; }
-.route-panel { padding:30px 36px 24px; border:2px solid var(--ink); background:var(--coral); }
-.route-endpoint { display:flex; align-items:center; gap:14px; border:2px solid var(--ink); padding:12px 16px; background:var(--paper); font:600 12px/1.5 var(--mono); }
-.route-state,.route-check { color:var(--teal); font-size:12px; margin-left:auto; }
-.route-check { font-size:18px; }
-.endpoint-symbol { display:grid; place-items:center; width:32px; height:32px; background:var(--ink); color:var(--paper); font:23px/1 var(--body); }
-.route-wire { height:24px; width:2px; margin:auto; background:var(--ink); }
-.route-choice { display:flex; justify-content:center; align-items:center; gap:12px; font:11px/1.5 var(--mono); }
-.route-choice>span:not(.route-or) { border:1.5px solid var(--ink); padding:7px 10px; background:var(--accent); }
-.route-choice>span:last-child { background:var(--paper); }
-.route-or { font:italic 16px/1 Georgia,serif; }
-.route-caption { display:block; font:9px/1.6 var(--mono); text-align:center; margin-top:20px; }
-.availability { border-top:2px solid var(--ink); border-bottom:2px solid var(--ink); margin-top:38px; padding-block:17px; font:11px/1.6 var(--mono); }
-.availability>summary { display:flex; align-items:center; justify-content:space-between; }
-.availability>summary:hover { color:var(--teal); }
-.availability>p { max-width:720px; color:var(--muted); font:14px/1.6 var(--body); margin:20px 0; }
-.architecture-row { display:grid; grid-template-columns:1fr 1fr; gap:80px; align-items:center; }
-.architecture-row h2 { margin:0; }
+.setup-steps { list-style:none; margin:0; padding:0; border:2px solid var(--ink); background:var(--panel); }
+.setup-steps li { display:grid; grid-template-columns:40px 1fr; gap:20px; padding:24px 20px; }
+.setup-steps li+li { border-top:2px solid var(--ink); }
+.step-number { display:grid; place-items:center; align-self:start; width:40px; height:40px; border:1.5px solid var(--ink); background:var(--accent); font:600 12px/1 var(--mono); }
+.setup-steps li:nth-child(2) .step-number { background:var(--coral); }
+.setup-steps li:nth-child(3) .step-number { background:var(--turquoise); }
+.setup-steps h3 { margin:0 0 5px; font-size:20px; line-height:1.2; }
+.setup-steps p { margin:0; color:var(--muted); font-size:14px; }
+.setup-steps strong { font-weight:600; }
+.questions .section-grid { align-items:start; }
+.questions h2 { margin-bottom:0; }
+.faq summary { grid-template-columns:1fr 14px; font-size:16px; }
+.faq .text-link { margin:0 20px 24px; }
 .site-footer { min-height:108px; display:flex; align-items:center; gap:40px; border-top:3px solid var(--ink); }
 .site-footer .wordmark { font-size:22px; }
 .site-footer .wordmark img { width:28px; }
@@ -124,8 +119,7 @@ details[open] .plus::after { display:none; }
   h1 { font-size:8.3vw; letter-spacing:-4px; }
   .hero-actions { gap:8px; }
   .connection-mark { transform:scale(.8); transform-origin:right bottom; margin-bottom:16px; }
-  .section-grid,.architecture-row { gap:40px; }
-  .route-panel { padding:26px; }
+  .section-grid { gap:40px; }
 }
 @media(max-width:760px) {
   .page { width:calc(100% - 40px); }
@@ -156,21 +150,19 @@ details[open] .plus::after { display:none; }
   .product-stage figcaption details { max-width:45%; }
   .product-stage figcaption .chevron { width:9px; margin-left:5px; }
   .product-stage figcaption .chevron::before { font-size:12px; }
-  .features,.internet,.architecture { padding-bottom:54px; }
+  .features,.setup,.questions { padding-bottom:54px; }
   .section-label { margin-bottom:30px; gap:10px; font-size:9px; }
   .section-label>span:first-child { padding:7px 9px; }
-  .badge { font-size:8px; padding:4px 6px; }
-  .section-grid,.architecture-row { grid-template-columns:1fr; gap:30px; }
+  .section-grid { grid-template-columns:1fr; gap:30px; }
   h2 { font-size:43px; letter-spacing:-2px; margin-bottom:20px; }
   h2 em { letter-spacing:-1.8px; }
-  .section-grid>div>p,.architecture-row p { font-size:14px; }
+  .section-grid>div>p { font-size:14px; }
   .accordion summary { padding:21px 16px; font-size:19px; gap:14px; }
   .summary-note { font-size:9px; }
   .accordion p { padding:0 16px 21px; }
-  .route-panel { padding:24px; }
-  .route-choice { gap:9px; font-size:10px; }
-  .route-caption { font-size:8px; }
-  .availability { margin-top:28px; }
+  .setup-steps li { padding:21px 16px; gap:16px; }
+  .faq summary { font-size:15px; }
+  .faq .text-link { margin:0 16px 21px; }
   .site-footer { flex-wrap:wrap; gap:18px; padding-block:22px; }
   .site-footer nav { gap:16px; font-size:10px; }
   .site-footer>span { width:100%; }
