@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Your other desktop, on your Mac. Native remote desktop for Macs and Linux, with experimental Rust Internet Links in source.">
-  <meta name="theme-color" content="#fff8f6">
+  <meta name="theme-color" content="#f4f1e8">
   <meta property="og:title" content="Mooring — Your other desktop. On your Mac.">
   <meta property="og:description" content="Native Mac remote desktop. Paired Macs, Linux through SSH, and experimental Rust Internet Links. Free and open source.">
   <meta property="og:type" content="website">
@@ -16,8 +16,8 @@
   <meta name="twitter:card" content="summary_large_image">
   <link rel="canonical" href="https://kcirtapfromspace.github.io/mooring/">
   <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="style.css?v=51-compact">
-  <script src="site.js?v=51-compact" defer></script>
+  <link rel="stylesheet" href="style.css?v=51-poster">
+  <script src="site.js?v=51-poster" defer></script>
   <title>Mooring — Your other desktop. On your Mac.</title>
 </head>
 <body>
@@ -32,14 +32,19 @@
   <main id="main">
     <section class="hero page" aria-labelledby="hero-title">
       <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> Native. Open source. Within reach.</p>
-      <h1 id="hero-title">Your other desktop.<br><em>On your Mac.</em></h1>
-      <p class="intro">Connect to your Mac or Linux desktop.<br>Keep the native Mac experience.</p>
-      <div class="hero-actions">
-        <div class="download-group"><a class="button" href="https://github.com/kcirtapfromspace/mooring/releases/latest">Download for Mac <span aria-hidden="true">↓</span></a><details class="download-menu"><summary aria-label="More download options"><span class="chevron" aria-hidden="true"></span></summary><div class="popover"><a href="https://github.com/kcirtapfromspace/mooring/releases/latest">Signed preview 45</a><a href="https://github.com/kcirtapfromspace/mooring#build">Source build 51</a><a href="https://github.com/kcirtapfromspace/mooring/blob/main/docs/INTERNET-CONNECTIVITY.md#prepare-the-linux-helper">Linux arm64 helper</a></div></details></div>
-        <a class="button secondary" href="#demo">See it work <span aria-hidden="true">↘</span></a>
+      <div class="hero-grid">
+        <h1 id="hero-title">Your other<br>desktop.<br><em>On your Mac.</em></h1>
+        <div class="hero-copy">
+          <div class="connection-mark" aria-hidden="true"><span></span><span></span><b>↗</b></div>
+          <p class="intro">Connect to your Mac or Linux desktop.<br>Keep the native Mac experience.</p>
+          <div class="hero-actions">
+            <div class="download-group"><a class="button" href="https://github.com/kcirtapfromspace/mooring/releases/latest">Download for Mac <span aria-hidden="true">↓</span></a><details class="download-menu"><summary aria-label="More download options"><span class="chevron" aria-hidden="true"></span></summary><div class="popover"><a href="https://github.com/kcirtapfromspace/mooring/releases/latest">Signed preview 45</a><a href="https://github.com/kcirtapfromspace/mooring#build">Source build 51</a><a href="https://github.com/kcirtapfromspace/mooring/blob/main/docs/INTERNET-CONNECTIVITY.md#prepare-the-linux-helper">Linux arm64 helper</a></div></details></div>
+            <a class="button secondary" href="#demo">See it work <span aria-hidden="true">↘</span></a>
+          </div>
+          <p class="requirements">Apple silicon · macOS 14+ · No Mooring account</p>
+          <a class="release-note" href="#availability">Download: preview 45 · Internet Links: source build 51</a>
+        </div>
       </div>
-      <p class="requirements">Apple silicon · macOS 14+ · No Mooring account</p>
-      <a class="release-note" href="#availability">Download: preview 45 · Internet Links: source build 51</a>
     </section>
     <section id="demo" class="demo page" aria-label="Mooring product demo">
       <figure class="product-stage">
@@ -52,9 +57,9 @@
       <div class="section-grid">
         <div><h2 id="features-title">Mac. Linux.<br><em>Your choice.</em></h2><p>One native viewer for your other computers.</p><div class="feature-chips"><span>Clipboard</span><span>Sound</span><span>Trackpad gestures</span></div><p class="micro">Mac-to-Mac features</p></div>
         <div class="accordion">
-          <details><summary>Mac <span class="summary-note">Pair with a PIN</span><span class="plus" aria-hidden="true"></span></summary><p>Control a paired Mac. Match its display to yours, including the space beside the camera.</p></details>
-          <details id="linux"><summary>Linux <span class="summary-note">SSH + VNC</span><span class="plus" aria-hidden="true"></span></summary><p>Omarchy/Hyprland is in preview 45. Source build 51 adds Ubuntu/X11 and Jetson support.</p></details>
-          <details><summary>Access <span class="summary-note">Your keys. Your control.</span><span class="plus" aria-hidden="true"></span></summary><p>Remove individual Mac pairings. Linux uses existing SSH keys and host-key verification.</p></details>
+          <details><summary><span class="summary-title">Mac</span><span class="summary-note">Pair with a PIN</span><span class="plus" aria-hidden="true"></span></summary><p>Control a paired Mac. Match its display to yours, including the space beside the camera.</p></details>
+          <details id="linux"><summary><span class="summary-title">Linux</span><span class="summary-note">SSH + VNC</span><span class="plus" aria-hidden="true"></span></summary><p>Omarchy/Hyprland is in preview 45. Source build 51 adds Ubuntu/X11 and Jetson support.</p></details>
+          <details><summary><span class="summary-title">Access</span><span class="summary-note">Your keys. Your control.</span><span class="plus" aria-hidden="true"></span></summary><p>Remove individual Mac pairings. Linux uses existing SSH keys and host-key verification.</p></details>
         </div>
       </div>
     </section>
